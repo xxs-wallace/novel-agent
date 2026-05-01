@@ -92,8 +92,15 @@ class ActionStep(MemoryStep):
     def to_messages(self, summary_mode: bool = False) -> list[ChatMessage]:
         messages = []
         if self.model_output is not None and not summary_mode:
+            reasoning = None
+            if self.model_output_message is not None:
+                reasoning = getattr(self.model_output_message, "reasoning_content", None)
             messages.append(
-                ChatMessage(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": self.model_output.strip()}])
+                ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=[{"type": "text", "text": self.model_output.strip()}],
+                    reasoning_content=reasoning,
+                )
             )
 
         if self.tool_calls is not None:
@@ -174,8 +181,13 @@ class PlanningStep(MemoryStep):
     def to_messages(self, summary_mode: bool = False) -> list[ChatMessage]:
         if summary_mode:
             return []
+        reasoning = getattr(self.model_output_message, "reasoning_content", None)
         return [
-            ChatMessage(role=MessageRole.ASSISTANT, content=[{"type": "text", "text": self.plan.strip()}]),
+            ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=[{"type": "text", "text": self.plan.strip()}],
+                reasoning_content=reasoning,
+            ),
             ChatMessage(
                 role=MessageRole.USER, content=[{"type": "text", "text": "Now proceed and carry out this plan."}]
             ),

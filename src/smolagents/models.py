@@ -124,6 +124,7 @@ class MessageRole(str, Enum):
 class ChatMessage:
     role: MessageRole
     content: str | list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
     tool_calls: list[ChatMessageToolCall] | None = None
     raw: Any | None = None  # Stores the raw output from the API
     token_usage: TokenUsage | None = None
@@ -149,6 +150,7 @@ class ChatMessage:
         return cls(
             role=MessageRole(data["role"]),
             content=data.get("content"),
+            reasoning_content=data.get("reasoning_content"),
             tool_calls=data.get("tool_calls"),
             raw=raw,
             token_usage=token_usage,
@@ -334,6 +336,7 @@ def get_clean_message_list(
     role_conversions: dict[MessageRole, MessageRole] | dict[str, str] = {},
     convert_images_to_image_urls: bool = False,
     flatten_messages_as_text: bool = False,
+    include_reasoning_content: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Creates a list of messages to give as input to the LLM. These messages are dictionaries and chat template compatible with transformers LLM chat template.
@@ -383,17 +386,21 @@ def get_clean_message_list(
                         output_message_list[-1]["content"][-1]["text"] += "\n" + el["text"]
                     else:
                         output_message_list[-1]["content"].append(el)
+            if include_reasoning_content and message.reasoning_content:
+                prev = output_message_list[-1].get("reasoning_content")
+                if isinstance(prev, str) and prev:
+                    output_message_list[-1]["reasoning_content"] = prev + "\n" + message.reasoning_content
+                else:
+                    output_message_list[-1]["reasoning_content"] = message.reasoning_content
         else:
             if flatten_messages_as_text:
                 content = message.content[0]["text"]
             else:
                 content = message.content
-            output_message_list.append(
-                {
-                    "role": message.role,
-                    "content": content,
-                }
-            )
+            payload: dict[str, Any] = {"role": message.role, "content": content}
+            if include_reasoning_content and message.reasoning_content is not None:
+                payload["reasoning_content"] = message.reasoning_content
+            output_message_list.append(payload)
     return output_message_list
 
 
@@ -520,11 +527,13 @@ class Model:
         """
         # Clean and standardize the message list
         flatten_messages_as_text = kwargs.pop("flatten_messages_as_text", self.flatten_messages_as_text)
+        include_reasoning_content = kwargs.pop("include_reasoning_content", getattr(self, "include_reasoning_content", False))
         messages_as_dicts = get_clean_message_list(
             messages,
             role_conversions=custom_role_conversions or tool_role_conversions,
             convert_images_to_image_urls=convert_images_to_image_urls,
             flatten_messages_as_text=flatten_messages_as_text,
+            include_reasoning_content=include_reasoning_content,
         )
         # Start with messages
         completion_kwargs = {
@@ -1678,6 +1687,7 @@ class OpenAIModel(ApiModel):
         client_kwargs: dict[str, Any] | None = None,
         custom_role_conversions: dict[str, str] | None = None,
         flatten_messages_as_text: bool = False,
+        include_reasoning_content: bool = False,
         **kwargs,
     ):
         self.client_kwargs = {
@@ -1687,6 +1697,7 @@ class OpenAIModel(ApiModel):
             "organization": organization,
             "project": project,
         }
+        self.include_reasoning_content = bool(include_reasoning_content)
         super().__init__(
             model_id=model_id,
             custom_role_conversions=custom_role_conversions,
@@ -1779,11 +1790,13 @@ class OpenAIModel(ApiModel):
         self._apply_rate_limit()
         response = self.retryer(self.client.chat.completions.create, **completion_kwargs)
         content = response.choices[0].message.content
+        reasoning_content = getattr(response.choices[0].message, "reasoning_content", None)
         if stop_sequences is not None and not self.supports_stop_parameter:
             content = remove_content_after_stop_sequences(content, stop_sequences)
         return ChatMessage(
             role=response.choices[0].message.role,
             content=content,
+            reasoning_content=reasoning_content,
             tool_calls=response.choices[0].message.tool_calls,
             raw=response,
             token_usage=TokenUsage(

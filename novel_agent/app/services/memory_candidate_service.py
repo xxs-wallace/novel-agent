@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .character_mention_service import CharacterMentionService
+
+
+LOW_CONFIDENCE_THRESHOLD = 0.45
+LOW_VALUE_CANDIDATE_TYPES = {
+    "abstract",
+    "concept",
+    "low_confidence",
+    "non_person",
+    "object",
+    "place",
+    "scene",
+    "setting",
+    "weak_cooccurrence",
+}
+
+
+class MemoryCandidateService:
+    def __init__(self, *, character_mention_service: CharacterMentionService | None = None) -> None:
+        self.character_mention_service = character_mention_service or CharacterMentionService()
+
+    def build_prompt_input(
+        self,
+        *,
+        prompt_input: dict[str, Any],
+        summary_payload: dict[str, Any],
+        evidence_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "book_id": prompt_input.get("book_id"),
+            "current_title_index": prompt_input.get("current_title_index"),
+            "chapter_title": prompt_input.get("chapter_title"),
+            "chapter_summary": {
+                "chapter_summary_md": summary_payload.get("chapter_summary_md", ""),
+                "chapter_summary_short": summary_payload.get("chapter_summary_short", ""),
+                "importance_score": summary_payload.get("importance_score", 0),
+                "importance_reason": summary_payload.get("importance_reason", ""),
+                "related_chapters": summary_payload.get("related_chapters", []),
+                "chapter_summaries": summary_payload.get("chapter_summaries", []),
+            },
+            "character_evidence_batches": self._normalize_evidence_batches(evidence_payload),
+            "story_outline_md": prompt_input.get("story_outline_md", ""),
+            "world_summary_md": prompt_input.get("world_summary_md", ""),
+            "character_profiles": prompt_input.get("character_profiles", []),
+            "candidate_policy": {
+                "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
+                "drop_low_value_candidate_types": sorted(LOW_VALUE_CANDIDATE_TYPES),
+                "memory_update_agent_contract": "只消费候选事实，不依赖 Character Evidence prompt 或原文 offset 细节。",
+            },
+        }
+
+    def build_character_reduce_inputs(
+        self,
+        *,
+        prompt_input: dict[str, Any],
+        summary_payload: dict[str, Any],
+        evidence_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        grouped = self._group_character_evidence(evidence_payload)
+        if not grouped:
+            return []
+        result: list[dict[str, Any]] = []
+        for canonical_name in sorted(grouped):
+            evidence_items = sorted(grouped[canonical_name], key=self._evidence_sort_key)
+            result.append(
+                {
+                    "book_id": prompt_input.get("book_id"),
+                    "canonical_name": canonical_name,
+                    "existing_profile": self._find_existing_profile(
+                        prompt_input.get("character_profiles", []),
+                        canonical_name=canonical_name,
+                    ),
+                    "ordered_character_evidence": evidence_items,
+                    "chapter_summary": self._character_reduce_summary(summary_payload),
+                    "reduce_policy": {
+                        "same_character_must_be_reduced_serially": True,
+                        "relationships_are_merged_inside_character_reduce": True,
+                        "drop_low_value_candidate_types": sorted(LOW_VALUE_CANDIDATE_TYPES),
+                        "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
+                    },
+                }
+            )
+        return result
+
+    def build_character_reduce_fallback_output(
+        self,
+        *,
+        reduce_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        canonical_name = str(reduce_input.get("canonical_name", "")).strip()
+        evidence_items = [item for item in reduce_input.get("ordered_character_evidence", []) if isinstance(item, dict)]
+        if not canonical_name or not evidence_items:
+            return {"should_update": False, "canonical_name": canonical_name, "character_update": None}
+        evidence_payload = {"characters": evidence_items}
+        chapter_summary = reduce_input.get("chapter_summary", {})
+        summary_short = (
+            str(chapter_summary.get("chapter_summary_short", "")).strip()
+            if isinstance(chapter_summary, dict)
+            else ""
+        )
+        updates = self.build_character_updates(
+            summary_short=summary_short,
+            evidence_payload=evidence_payload,
+        )
+        update = next((item for item in updates if item.get("canonical_name") == canonical_name), None)
+        return {
+            "should_update": update is not None,
+            "canonical_name": canonical_name,
+            "character_update": update,
+        }
+
+    def normalize_character_reduce_outputs(self, outputs: list[dict[str, Any]]) -> dict[str, Any]:
+        updates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for output in outputs:
+            if not isinstance(output, dict) or output.get("should_update") is False:
+                continue
+            update = output.get("character_update")
+            if not isinstance(update, dict):
+                continue
+            canonical_name = str(update.get("canonical_name") or output.get("canonical_name") or "").strip()
+            cleaned = self.character_mention_service.clean_names([canonical_name])
+            if not cleaned:
+                continue
+            canonical_name = cleaned[0]
+            if canonical_name in seen:
+                continue
+            seen.add(canonical_name)
+            normalized = dict(update)
+            normalized["canonical_name"] = canonical_name
+            updates.append(normalized)
+        return {"character_updates": updates}
+
+    def build_global_memory_input(
+        self,
+        *,
+        prompt_input: dict[str, Any],
+        summary_payload: dict[str, Any],
+        world_evidence_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "book_id": prompt_input.get("book_id"),
+            "current_title_index": prompt_input.get("current_title_index"),
+            "chapter_title": prompt_input.get("chapter_title"),
+            "chapter_summary": self._global_summary_payload(summary_payload),
+            "world_evidence": self._normalize_world_evidence_payload(world_evidence_payload or {}),
+            "story_outline_md": prompt_input.get("story_outline_md", ""),
+            "world_summary_md": prompt_input.get("world_summary_md", ""),
+            "global_memory_policy": {
+                "do_not_read_full_documents": True,
+                "do_not_emit_character_updates": True,
+                "allowed_world_sections": [
+                    "世界类型",
+                    "时代背景",
+                    "能力体系",
+                    "超自然要素",
+                    "阵营势力",
+                    "核心禁忌与规则",
+                ],
+            },
+        }
+
+    def build_global_memory_fallback_output(
+        self,
+        *,
+        summary_payload: dict[str, Any],
+        world_evidence_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        candidates = [
+            *self._normalize_world_candidates(summary_payload.get("world_evidence_candidates", [])),
+            *self._normalize_world_candidates((world_evidence_payload or {}).get("world_evidence_candidates", [])),
+        ]
+        changes = []
+        seen: set[tuple[str, str]] = set()
+        for candidate in candidates:
+            confidence = self._safe_float(candidate.get("confidence"), default=0.0)
+            section = str(candidate.get("section", "")).strip()
+            summary = str(candidate.get("summary", "")).strip()
+            if confidence < 0.5 or not section or not summary:
+                continue
+            key = (section, summary)
+            if key in seen:
+                continue
+            seen.add(key)
+            changes.append(
+                {
+                    "section": section,
+                    "summary": summary,
+                    "evidence": str(candidate.get("evidence_hint", "")).strip() or summary,
+                }
+            )
+        return {"world_update": {"should_update": bool(changes), "changes": changes}}
+
+    def build_fallback_output(
+        self,
+        *,
+        chapter_title: str,
+        document_title_index: int,
+        summary_payload: dict[str, Any],
+        evidence_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        summary_short = str(summary_payload.get("chapter_summary_short", "")).strip()
+        return {
+            "character_updates": self.build_character_updates(
+                summary_short=summary_short,
+                evidence_payload=evidence_payload,
+            ),
+            "world_update": {"should_update": False, "changes": []},
+            "outline_update": {
+                "chapter_line": f"[{document_title_index}] {chapter_title}: {summary_short}",
+                "timeline_events": [],
+            },
+        }
+
+    def build_character_updates(
+        self,
+        *,
+        summary_short: str,
+        evidence_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        updates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for character in self._iter_character_evidence(evidence_payload):
+            canonical_name = str(character.get("canonical_name", "")).strip()
+            cleaned = self.character_mention_service.clean_names([canonical_name])
+            if not cleaned:
+                continue
+            canonical_name = cleaned[0]
+            if canonical_name in seen or not self._should_keep_character(character):
+                continue
+            seen.add(canonical_name)
+            activity_evidence = str(character.get("activity_or_state_evidence", "")).strip()
+            relationship_evidence = str(character.get("relationship_evidence", "")).strip()
+            recent_activity = activity_evidence or relationship_evidence or summary_short
+            updates.append(
+                {
+                    "canonical_name": canonical_name,
+                    "aliases": self._clean_aliases(character.get("aliases", [])),
+                    "personality": [],
+                    "occupations": [],
+                    "recent_activity": recent_activity,
+                    "relationships": self._relationship_updates_from_evidence(
+                        canonical_name=canonical_name,
+                        relationship_evidence=relationship_evidence,
+                    ),
+                    "evidence_level": self._evidence_level(character),
+                    "is_speaking_character": bool(character.get("is_speaking_character")),
+                    "speaking_character_status": (
+                        "confirmed_speaking" if bool(character.get("is_speaking_character")) else "personhood_supported"
+                    ),
+                    "speaking_evidence": str(character.get("speaking_evidence", "")).strip(),
+                    "personhood_evidence_summary": str(character.get("personhood_evidence", "")).strip(),
+                    "activity_or_state_evidence": activity_evidence,
+                    "relationship_evidence": relationship_evidence,
+                }
+            )
+        return updates
+
+    def _normalize_evidence_batches(self, evidence_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        if isinstance(evidence_payload.get("characters"), list):
+            return [
+                {
+                    "character_evidence_batch_id": evidence_payload.get("character_evidence_batch_id", ""),
+                    "doc_ids": evidence_payload.get("doc_ids", []),
+                    "document_title_indexes": evidence_payload.get("document_title_indexes", []),
+                    "characters": evidence_payload.get("characters", []),
+                }
+            ]
+        if isinstance(evidence_payload.get("character_evidence_batches"), list):
+            return [item for item in evidence_payload["character_evidence_batches"] if isinstance(item, dict)]
+        return [
+            {
+                "character_evidence_batch_id": evidence_payload.get("character_evidence_batch_id", ""),
+                "characters": [],
+                "legacy_document_character_mentions": evidence_payload.get("document_character_mentions", []),
+            }
+        ]
+
+    def _iter_character_evidence(self, evidence_payload: dict[str, Any]):
+        characters = evidence_payload.get("characters")
+        if isinstance(characters, list):
+            batch_doc_ids = self._safe_int_list(evidence_payload.get("doc_ids"))
+            batch_title_indexes = self._safe_int_list(evidence_payload.get("document_title_indexes"))
+            for item in characters:
+                if isinstance(item, dict):
+                    character = dict(item)
+                    character.setdefault("source_doc_ids", batch_doc_ids)
+                    character.setdefault("source_title_indexes", batch_title_indexes)
+                    yield character
+            return
+        batches = evidence_payload.get("character_evidence_batches")
+        if isinstance(batches, list):
+            for batch in batches:
+                if not isinstance(batch, dict):
+                    continue
+                batch_doc_ids = self._safe_int_list(batch.get("doc_ids"))
+                batch_title_indexes = self._safe_int_list(batch.get("document_title_indexes"))
+                for character in batch.get("characters", []):
+                    if not isinstance(character, dict):
+                        continue
+                    item = dict(character)
+                    item.setdefault("source_doc_ids", batch_doc_ids)
+                    item.setdefault("source_title_indexes", batch_title_indexes)
+                    yield item
+            return
+        for item in evidence_payload.get("document_character_mentions", []):
+            if not isinstance(item, dict):
+                continue
+            for name in item.get("character_keywords", []):
+                yield {
+                    "canonical_name": name,
+                    "aliases": [],
+                    "is_speaking_character": name in item.get("speaking_character_keywords", []),
+                    "personhood_evidence": "旧 document 级人物命中",
+                    "activity_or_state_evidence": "",
+                    "relationship_evidence": "",
+                    "source_doc_ids": [item.get("doc_id")] if item.get("doc_id") is not None else [],
+                    "source_title_indexes": [],
+                    "candidate_type": "character",
+                    "confidence": 0.65,
+                    "uncertainty_reason": "",
+                }
+
+    def _should_keep_character(self, character: dict[str, Any]) -> bool:
+        candidate_type = str(character.get("candidate_type", "")).strip().lower()
+        if candidate_type in LOW_VALUE_CANDIDATE_TYPES:
+            return False
+        confidence = self._safe_float(character.get("confidence"), default=0.0)
+        has_personhood = bool(str(character.get("personhood_evidence", "")).strip())
+        has_action = bool(str(character.get("activity_or_state_evidence", "")).strip())
+        has_relationship = bool(str(character.get("relationship_evidence", "")).strip())
+        is_speaking = bool(character.get("is_speaking_character"))
+        if confidence < LOW_CONFIDENCE_THRESHOLD and not (is_speaking and has_personhood):
+            return False
+        return is_speaking or has_personhood or has_action or has_relationship
+
+    def _evidence_level(self, character: dict[str, Any]) -> str:
+        confidence = self._safe_float(character.get("confidence"), default=0.0)
+        if bool(character.get("is_speaking_character")) and confidence >= 0.6:
+            return "explicit"
+        if confidence >= 0.75:
+            return "explicit"
+        if confidence >= LOW_CONFIDENCE_THRESHOLD:
+            return "inferred"
+        return "weak"
+
+    def _safe_float(self, value: object, *, default: float) -> float:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    def _clean_aliases(self, aliases: object) -> list[str]:
+        if not isinstance(aliases, list):
+            return []
+        return self.character_mention_service.clean_names(aliases)
+
+    def _relationship_updates_from_evidence(
+        self,
+        *,
+        canonical_name: str,
+        relationship_evidence: str,
+    ) -> list[dict[str, str]]:
+        if not relationship_evidence:
+            return []
+        target_names = [
+            name
+            for name in self.character_mention_service.extract_local_candidates(relationship_evidence, limit=6)
+            if name != canonical_name
+        ]
+        if not target_names:
+            return []
+        return [
+            {
+                "target_name": target_names[0],
+                "relation_type": "互动",
+                "sentiment_state": "",
+                "status_summary": relationship_evidence,
+            }
+        ]
+
+    def _group_character_evidence(self, evidence_payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for character in self._iter_character_evidence(evidence_payload):
+            canonical_name = str(character.get("canonical_name", "")).strip()
+            cleaned = self.character_mention_service.clean_names([canonical_name])
+            if not cleaned or not self._should_keep_character(character):
+                continue
+            canonical_name = cleaned[0]
+            item = dict(character)
+            item["canonical_name"] = canonical_name
+            item["source_doc_ids"] = self._safe_int_list(item.get("source_doc_ids"))
+            item["source_title_indexes"] = self._safe_int_list(item.get("source_title_indexes"))
+            grouped.setdefault(canonical_name, []).append(item)
+        return grouped
+
+    def _evidence_sort_key(self, item: dict[str, Any]) -> tuple[int, int, str]:
+        doc_ids = self._safe_int_list(item.get("source_doc_ids"))
+        title_indexes = self._safe_int_list(item.get("source_title_indexes"))
+        return (
+            min(doc_ids) if doc_ids else 10**12,
+            min(title_indexes) if title_indexes else 10**12,
+            str(item.get("canonical_name", "")),
+        )
+
+    def _find_existing_profile(self, profiles: object, *, canonical_name: str) -> dict[str, Any] | None:
+        if not isinstance(profiles, list):
+            return None
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_name = str(profile.get("canonical_name", "")).strip()
+            aliases = profile.get("aliases", [])
+            alias_values = aliases if isinstance(aliases, list) else []
+            if profile_name == canonical_name or canonical_name in alias_values:
+                return profile
+        return None
+
+    def _character_reduce_summary(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "chapter_summary_md": summary_payload.get("chapter_summary_md", ""),
+            "chapter_summary_short": summary_payload.get("chapter_summary_short", ""),
+            "chapter_summaries": summary_payload.get("chapter_summaries", []),
+        }
+
+    def _global_summary_payload(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "chapter_summary_md": summary_payload.get("chapter_summary_md", ""),
+            "chapter_summary_short": summary_payload.get("chapter_summary_short", ""),
+            "importance_score": summary_payload.get("importance_score", 0),
+            "importance_reason": summary_payload.get("importance_reason", ""),
+            "related_chapters": summary_payload.get("related_chapters", []),
+            "chapter_summaries": summary_payload.get("chapter_summaries", []),
+            "world_signal_score": summary_payload.get("world_signal_score", 0),
+            "world_evidence_candidates": self._normalize_world_candidates(
+                summary_payload.get("world_evidence_candidates", [])
+            ),
+        }
+
+    def _normalize_world_evidence_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "world_signal_score": payload.get("world_signal_score", 0),
+            "world_evidence_candidates": self._normalize_world_candidates(
+                payload.get("world_evidence_candidates", [])
+            ),
+        }
+
+    def _normalize_world_candidates(self, candidates: object) -> list[dict[str, Any]]:
+        if not isinstance(candidates, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            result.append(
+                {
+                    "section": str(candidate.get("section", "")).strip(),
+                    "summary": str(candidate.get("summary", "")).strip(),
+                    "evidence_hint": str(candidate.get("evidence_hint", "")).strip(),
+                    "source_doc_ids": self._safe_int_list(candidate.get("source_doc_ids")),
+                    "source_title_indexes": self._safe_int_list(candidate.get("source_title_indexes")),
+                    "confidence": self._safe_float(candidate.get("confidence"), default=0.0),
+                }
+            )
+        return result
+
+    def _safe_int_list(self, values: object) -> list[int]:
+        if not isinstance(values, list):
+            return []
+        result: list[int] = []
+        for value in values:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result

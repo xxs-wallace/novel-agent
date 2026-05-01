@@ -1,292 +1,165 @@
-<!---
-Copyright 2024 The HuggingFace Team. All rights reserved.
+# Novel Agent
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+Novel Agent 是一个面向作者的小说续写工作台，用于把长篇原文导入本地、完成粗读/精读建模、构建创作知识库，并在人工审阅确认的节奏下生成后续章节。
 
-    http://www.apache.org/licenses/LICENSE-2.0
+本项目基于 [huggingface/smolagents](https://github.com/huggingface/smolagents.git) 研发，继续复用其 Agent、Tool 与模型接入能力，并在此基础上扩展了小说续写相关的 `novel_agent` 模块和统一 CLI / TUI 工作台。
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
--->
-<p align="center">
-    <!-- Uncomment when CircleCI is set up
-    <a href="https://circleci.com/gh/huggingface/accelerate"><img alt="Build" src="https://img.shields.io/circleci/build/github/huggingface/transformers/master"></a>
-    -->
-    <a href="https://github.com/huggingface/smolagents/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/huggingface/smolagents.svg?color=blue"></a>
-    <a href="https://huggingface.co/docs/smolagents"><img alt="Documentation" src="https://img.shields.io/website/http/huggingface.co/docs/smolagents/index.html.svg?down_color=red&down_message=offline&up_message=online"></a>
-    <a href="https://github.com/huggingface/smolagents/releases"><img alt="GitHub release" src="https://img.shields.io/github/release/huggingface/smolagents.svg"></a>
-    <a href="https://github.com/huggingface/smolagents/blob/main/CODE_OF_CONDUCT.md"><img alt="Contributor Covenant" src="https://img.shields.io/badge/Contributor%20Covenant-v2.0%20adopted-ff69b4.svg"></a>
-    <a href="https://deepwiki.com/huggingface/smolagents"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
-</p>
+## 主要功能
 
-<h3 align="center">
-  <div style="display:flex;flex-direction:row;">
-    <img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/smolagents/smolagents.png" alt="Hugging Face mascot as James Bond" width=400px>
-    <p>Agents that think in code!</p>
-  </div>
-</h3>
+- 原文导入与粗读：把小说原文切分并写入本地索引，形成后续建模的 `documents` 基线。
+- 精读建模：抽取章节信息、人物档案、世界观摘要、故事大纲和事实型记忆。
+- Creative KB：构建桥段卡片、结构模式与风格参考，用于续写时检索相似桥段。
+- Writer 分层生成：按“全书规划 -> 批次大纲 -> 章节梗概 -> 长度计划 -> 写作材料 -> 正文草稿 -> 验收写回”的流程推进。
+- 人工审阅与可恢复运行：每个关键产物都先展示摘要，用户可以修改、保存、确认，再进入下一步。
+- 统一 CLI / TUI：粗读、精读、知识库和 Writer 不再分散在多个用户入口中，而是在同一个工作台里切换。
 
-`smolagents` is a library that enables you to run powerful agents in a few lines of code. It offers:
+## 环境准备
 
-✨ **Simplicity**: the logic for agents fits in ~1,000 lines of code (see [agents.py](https://github.com/huggingface/smolagents/blob/main/src/smolagents/agents.py)). We kept abstractions to their minimal shape above raw code!
-
-🧑‍💻 **First-class support for Code Agents**. Our [`CodeAgent`](https://huggingface.co/docs/smolagents/reference/agents#smolagents.CodeAgent) writes its actions in code (as opposed to "agents being used to write code"). To make it secure, we support executing in sandboxed environments via [Blaxel](https://blaxel.ai), [E2B](https://e2b.dev/), [Modal](https://modal.com/), Docker, or Pyodide+Deno WebAssembly sandbox.
-
-🤗 **Hub integrations**: you can [share/pull tools or agents to/from the Hub](https://huggingface.co/docs/smolagents/reference/tools#smolagents.Tool.from_hub) for instant sharing of the most efficient agents!
-
-🌐 **Model-agnostic**: smolagents supports any LLM. It can be a local `transformers` or `ollama` model, one of [many providers on the Hub](https://huggingface.co/blog/inference-providers), or any model from OpenAI, Anthropic and many others via our [LiteLLM](https://www.litellm.ai/) integration.
-
-👁️ **Modality-agnostic**: Agents support text, vision, video, even audio inputs! Cf [this tutorial](https://huggingface.co/docs/smolagents/examples/web_browser) for vision.
-
-🛠️ **Tool-agnostic**: you can use tools from any [MCP server](https://huggingface.co/docs/smolagents/reference/tools#smolagents.ToolCollection.from_mcp), from [LangChain](https://huggingface.co/docs/smolagents/reference/tools#smolagents.Tool.from_langchain), you can even use a [Hub Space](https://huggingface.co/docs/smolagents/reference/tools#smolagents.Tool.from_space) as a tool.
-
-Full documentation can be found [here](https://huggingface.co/docs/smolagents/index).
-
-> [!NOTE]
-> Check the our [launch blog post](https://huggingface.co/blog/smolagents) to learn more about `smolagents`!
-
-## Quick demo
-
-First install the package with a default set of tools:
-```bash
-pip install "smolagents[toolkit]"
-```
-Then define your agent, give it the tools it needs and run it!
-```py
-from smolagents import CodeAgent, WebSearchTool, InferenceClientModel
-
-model = InferenceClientModel()
-agent = CodeAgent(tools=[WebSearchTool()], model=model, stream_outputs=True)
-
-agent.run("How many seconds would it take for a leopard at full speed to run through Pont des Arts?")
-```
-
-https://github.com/user-attachments/assets/84b149b4-246c-40c9-a48d-ba013b08e600
-
-You can even share your agent to the Hub, as a Space repository:
-```py
-agent.push_to_hub("m-ric/my_agent")
-
-# agent.from_hub("m-ric/my_agent") to load an agent from Hub
-```
-
-Our library is LLM-agnostic: you could switch the example above to any inference provider.
-
-<details>
-<summary> <b>InferenceClientModel, gateway for all <a href="https://huggingface.co/docs/inference-providers/index">inference providers</a> supported on HF</b></summary>
-
-```py
-from smolagents import InferenceClientModel
-
-model = InferenceClientModel(
-    model_id="deepseek-ai/DeepSeek-R1",
-    provider="together",
-)
-```
-</details>
-<details>
-<summary> <b>LiteLLM to access 100+ LLMs</b></summary>
-
-```py
-from smolagents import LiteLLMModel
-
-model = LiteLLMModel(
-    model_id="anthropic/claude-4-sonnet-latest",
-    temperature=0.2,
-    api_key=os.environ["ANTHROPIC_API_KEY"]
-)
-```
-</details>
-<details>
-<summary> <b>OpenAI-compatible servers: Together AI</b></summary>
-
-```py
-import os
-from smolagents import OpenAIModel
-
-model = OpenAIModel(
-    model_id="deepseek-ai/DeepSeek-R1",
-    api_base="https://api.together.xyz/v1/", # Leave this blank to query OpenAI servers.
-    api_key=os.environ["TOGETHER_API_KEY"], # Switch to the API key for the server you're targeting.
-)
-```
-</details>
-<details>
-<summary> <b>OpenAI-compatible servers: OpenRouter</b></summary>
-
-```py
-import os
-from smolagents import OpenAIModel
-
-model = OpenAIModel(
-    model_id="openai/gpt-4o",
-    api_base="https://openrouter.ai/api/v1", # Leave this blank to query OpenAI servers.
-    api_key=os.environ["OPENROUTER_API_KEY"], # Switch to the API key for the server you're targeting.
-)
-```
-
-</details>
-<details>
-<summary> <b>Local `transformers` model</b></summary>
-
-```py
-from smolagents import TransformersModel
-
-model = TransformersModel(
-    model_id="Qwen/Qwen3-Next-80B-A3B-Thinking",
-    max_new_tokens=4096,
-    device_map="auto"
-)
-```
-</details>
-<details>
-<summary> <b>Azure models</b></summary>
-
-```py
-import os
-from smolagents import AzureOpenAIModel
-
-model = AzureOpenAIModel(
-    model_id = os.environ.get("AZURE_OPENAI_MODEL"),
-    azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
-    api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
-    api_version=os.environ.get("OPENAI_API_VERSION")    
-)
-```
-</details>
-<details>
-<summary> <b>Amazon Bedrock models</b></summary>
-
-```py
-import os
-from smolagents import AmazonBedrockModel
-
-model = AmazonBedrockModel(
-    model_id = os.environ.get("AMAZON_BEDROCK_MODEL_ID") 
-)
-```
-</details>
-
-## CLI
-
-You can run agents from CLI using two commands: `smolagent` and `webagent`.
-
-`smolagent` is a generalist command to run a multi-step `CodeAgent` that can be equipped with various tools.
+需要 Python 3.10 及以上版本。推荐直接使用仓库根目录的启动脚本，它会自动创建或复用 `.venv` 并安装缺失依赖：
 
 ```bash
-# Run with direct prompt and options
-smolagent "Plan a trip to Tokyo, Kyoto and Osaka between Mar 28 and Apr 7."  --model-type "InferenceClientModel" --model-id "Qwen/Qwen3-Next-80B-A3B-Thinking" --imports pandas numpy --tools web_search
-
-# Run in interactive mode (launches setup wizard when no prompt provided)
-smolagent
+./novel-agent
 ```
 
-Interactive mode guides you through:
-- Agent type selection (CodeAgent vs ToolCallingAgent)  
-- Tool selection from available toolbox
-- Model configuration (type, ID, API settings)
-- Advanced options like additional imports
-- Task prompt input
+如果希望手动安装：
 
-Meanwhile `webagent` is a specific web-browsing agent using [helium](https://github.com/mherrmann/helium) (read more [here](https://github.com/huggingface/smolagents/blob/main/src/smolagents/vision_web_browser.py)).
-
-For instance:
 ```bash
-webagent "go to xyz.com/men, get to sale section, click the first clothing item you see. Get the product details, and the price, return them. note that I'm shopping from France" --model-type "LiteLLMModel" --model-id "gpt-5"
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[openai]"
 ```
 
-## How do Code agents work?
+本项目默认使用 DeepSeek 兼容 OpenAI 的接口能力。运行前请设置 `DEEPSEEK_API_KEY`：
 
-Our [`CodeAgent`](https://huggingface.co/docs/smolagents/reference/agents#smolagents.CodeAgent) works mostly like classical ReAct agents - the exception being that the LLM engine writes its actions as Python code snippets.
-
-```mermaid
-flowchart TB
-    Task[User Task]
-    Memory[agent.memory]
-    Generate[Generate from agent.model]
-    Execute[Execute Code action - Tool calls are written as functions]
-    Answer[Return the argument given to 'final_answer']
-
-    Task -->|Add task to agent.memory| Memory
-
-    subgraph ReAct[ReAct loop]
-        Memory -->|Memory as chat messages| Generate
-        Generate -->|Parse output to extract code action| Execute
-        Execute -->|No call to 'final_answer' tool => Store execution logs in memory and keep running| Memory
-    end
-    
-    Execute -->|Call to 'final_answer' tool| Answer
-
-    %% Styling
-    classDef default fill:#d4b702,stroke:#8b7701,color:#ffffff
-    classDef io fill:#4a5568,stroke:#2d3748,color:#ffffff
-    
-    class Task,Answer io
+```bash
+export DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 ```
 
-Actions are now Python code snippets. Hence, tool calls will be performed as Python function calls. For instance, here is how the agent can perform web search over several websites in one single action:
-```py
-requests_to_search = ["gulf of mexico america", "greenland denmark", "tariffs"]
-for request in requests_to_search:
-    print(f"Here are the search results for {request}:", web_search(request))
+也可以把 key 放在自己的 shell 配置或本地环境管理工具中，只要启动 `novel-agent` 时进程能读取到 `DEEPSEEK_API_KEY` 即可。
+
+## 启动 CLI 工作台
+
+开发者推荐入口：
+
+```bash
+./novel-agent
 ```
 
-Writing actions as code snippets is demonstrated to work better than the current industry practice of letting the LLM output a dictionary of the tools it wants to call: [uses 30% fewer steps](https://huggingface.co/papers/2402.01030) (thus 30% fewer LLM calls) and [reaches higher performance on difficult benchmarks](https://huggingface.co/papers/2411.01747). Head to [our high-level intro to agents](https://huggingface.co/docs/smolagents/conceptual_guides/intro_agents) to learn more on that.
+安装为 console script 后也可以使用：
 
-Since code execution can be a serious security concern (arbitrary code execution!), **you should run agent code in a sandbox**. We support several options:
-  - [E2B](https://e2b.dev/), [Blaxel](https://blaxel.ai), [Modal](https://modal.com/) — managed cloud sandboxes, simplest to set up
-  - [Docker](https://www.docker.com/) — self-hosted container isolation
-  - Pyodide+Deno WebAssembly — lightweight sandbox for browser or edge environments
+```bash
+novel-agent
+```
 
-The built-in `LocalPythonExecutor` is **not a security sandbox**. It applies some restrictions but can be bypassed and must not be used as a security boundary.
+等价的开发调试入口：
 
-Alongside [`CodeAgent`](https://huggingface.co/docs/smolagents/reference/agents#smolagents.CodeAgent), we also provide the standard [`ToolCallingAgent`](https://huggingface.co/docs/smolagents/reference/agents#smolagents.ToolCallingAgent) which writes actions as JSON/text blobs. You can pick whichever style best suits your use case.
+```bash
+python -m novel_agent.app.cli_tui
+```
 
-## How smol is this library?
+启动后会进入 Textual 全屏 TUI。首屏会提供常用动作，例如选择或创建任务、继续上次会话、导入/粗读原文、运行精读建模、查看建模状态、构建 Creative KB、开始或恢复 Writer。
 
-We strived to keep abstractions to a strict minimum: the main code in `agents.py` has <1,000 lines of code.
-Still, we implement several types of agents: `CodeAgent` writes its actions as Python code snippets, and the more classic `ToolCallingAgent` leverages built-in tool calling methods. We also have multi-agent hierarchies, import from tool collections, remote code execution, vision models...
+旧入口 `python -m novel_agent.app.run_interactive` 仅保留给 smoke、兼容测试和迁移期调试，不再作为正式用户入口。
 
-By the way, why use a framework at all? Well, because a big part of this stuff is non-trivial. For instance, the code agent has to keep a consistent format for code throughout its system prompt, its parser, the execution. So our framework handles this complexity for you. But of course we still encourage you to hack into the source code and use only the bits that you need, to the exclusion of everything else!
+## 基本使用流程
 
-## How strong are open models for agentic workflows?
+1. 设置 `DEEPSEEK_API_KEY`。
+2. 运行 `./novel-agent` 进入工作台。
+3. 使用 `/new-task <task_id> <source_path>` 创建任务，或用 `/tasks` 查看已有任务。
+4. 使用 `/read` 导入并粗读原文。
+5. 使用 `/close-read` 运行精读建模。
+6. 使用 `/kb` 构建或查看 Creative KB。
+7. 使用 `/writer` 开始或恢复分层续写。
+8. 在每个审阅节点中修改、保存、确认产物，确认后系统才会进入下一步。
 
-We've created [`CodeAgent`](https://huggingface.co/docs/smolagents/reference/agents#smolagents.CodeAgent) instances with some leading models, and compared them on [this benchmark](https://huggingface.co/datasets/m-ric/agents_medium_benchmark_2) that gathers questions from a few different benchmarks to propose a varied blend of challenges.
+其中 `task_id` 对应同一本书在粗读、精读、Creative KB 和 Writer 中共用的 `book_id`。
 
-[Find the benchmarking code here](https://github.com/huggingface/smolagents/blob/main/examples/smolagents_benchmark/run.py) for more detail on the agentic setup used, and see a comparison of using LLMs code agents compared to vanilla (spoilers: code agents works better).
+## 主要命令
 
-<p align="center">
-    <img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/smolagents/benchmark_code_agents.jpeg" alt="benchmark of different models on agentic workflows. Open model DeepSeek-R1 beats closed-source models." width=60% max-width=500px>
-</p>
+| 命令 | 用法 |
+| --- | --- |
+| `/status` | 查看当前项目的原文、精读记忆、人物档案、世界观、故事大纲、Creative KB 与 Writer 状态。 |
+| `/tasks` | 列出所有任务，以及 documents、chapters、粗读进度和精读进度。 |
+| `/task <task_id>` | 进入指定任务。 |
+| `/new-task <task_id> <source_path>` | 创建新任务并记录原文路径。 |
+| `/reset-close-read` | 清空当前任务的精读进度与派生产物，保留粗读 documents。 |
+| `/read` | 进入原文导入/粗读流程。 |
+| `/close-read` | 进入精读与记忆抽取流程。 |
+| `/kb` | 构建或查看 Creative KB。 |
+| `/writer` | 开始或恢复 Writer 分层生成。 |
+| `/resume` | 恢复最近一次未完成流程。 |
+| `/artifacts` | 查看当前会话产物。 |
+| `/open` | 打开当前重点产物。 |
+| `/save` | 保存当前 artifact 编辑内容。 |
+| `/confirm` | 确认当前审阅步骤，并允许系统继续推进。 |
+| `/back` | 在 Writer 审阅流程中返回上一层可修改节点。 |
+| `/help` | 查看当前上下文可用操作。 |
+| `/debug` | 查看内部 stage、run id、artifact path 等技术详情。 |
 
-This comparison shows that open-source models can now take on the best closed models!
+常用快捷键：
 
-## Security
+| 快捷键 | 行为 |
+| --- | --- |
+| `Enter` | 发送当前输入。 |
+| `Shift+Enter` | 在输入框内换行。 |
+| `Ctrl+P` | 打开命令面板。 |
+| `Ctrl+S` | 保存当前 artifact。 |
+| `Ctrl+Enter` | 确认当前审阅步骤。 |
+| `Ctrl+O` | 打开当前重点 artifact。 |
+| `Esc` | 关闭弹层；运行中可请求暂停。 |
 
-Security is a critical consideration when working with code-executing agents. Ensure you are using one of the sandboxed execution options that provide isolation from untrusted code.
+## Writer 审阅节点
 
-**Warning:** `LocalPythonExecutor` provides best-effort mitigations only and is **not a security boundary**. Do not use it to run untrusted code.
+Writer 不会直接“一键吐出全文”，而是按可审阅、可修改、可恢复的方式推进：
 
-For security policies, vulnerability reporting, and more information on secure agent execution, please see our [Security Policy](SECURITY.md).
+1. 生成并审阅全书续写规划。
+2. 生成并审阅本批剧情大纲。
+3. 生成并审阅章节标题与故事梗概。
+4. 规划并确认章节长度。
+5. 整理并确认本章写作材料。
+6. 生成正文草稿并进行连续性检查。
+7. 用户接受、调整长度重生成、退回重规划或作废。
+8. 接受后写回章节、记忆与运行产物。
 
-## Contribute
+用户在审阅节点修改后的内容，会作为后续流程的准绳。例如修改批次剧情大纲后，章节梗概会基于修改后的大纲继续生成。
 
-Everyone is welcome to contribute, get started with our [contribution guide](https://github.com/huggingface/smolagents/blob/main/CONTRIBUTING.md).
+## 运行产物
 
-## Cite smolagents
+项目会在本地保存索引、记忆和运行产物，常见目录包括：
 
-If you use `smolagents` in your publication, please cite it by using the following BibTeX entry.
+- `.indexes/`：每个任务对应的本地 SQLite 索引。
+- `.memory/`：世界观、故事大纲、源作品篇章地图等长期记忆产物。
+- `runs/`：Writer 运行过程中的规划、草稿、连续性检查和写回产物。
 
-```bibtex
-@Misc{smolagents,
-  title =        {`smolagents`: a smol library to build great agentic systems.},
-  author =       {Aymeric Roucher and Albert Villanova del Moral and Thomas Wolf and Leandro von Werra and Erik Kaunismäki},
-  howpublished = {\url{https://github.com/huggingface/smolagents}},
-  year =         {2025}
-}
+大体量正文默认在界面中只展示摘要和路径，完整内容通过 artifact 文件访问。
+
+## 与 smolagents 的关系
+
+本仓库保留并复用 [huggingface/smolagents](https://github.com/huggingface/smolagents.git) 的基础能力，包括：
+
+- `CodeAgent` / `ToolCallingAgent`
+- `Tool` 体系
+- OpenAI-compatible、LiteLLM、InferenceClient、Transformers 等模型接入方式
+- 原有 `smolagent`、`webagent` 命令
+
+Novel Agent 是在这些能力之上扩展出的小说续写产品层。正式小说续写入口请使用 `./novel-agent` 或 `novel-agent`。
+
+## 开发与测试
+
+安装开发依赖：
+
+```bash
+pip install -e ".[dev,openai]"
+```
+
+运行测试：
+
+```bash
+python -m pytest novel_agent/tests tests
+```
+
+只验证 CLI / TUI 入口时可运行：
+
+```bash
+python -m pytest novel_agent/tests/test_cli_tui_entrypoint.py novel_agent/tests/test_cli_textual_components.py
 ```

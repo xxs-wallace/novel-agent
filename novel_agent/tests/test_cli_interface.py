@@ -1,0 +1,554 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from novel_agent.app import run_interactive
+from novel_agent.app.cli import (
+    ArtifactPresenter,
+    ChineseInputBuffer,
+    CommandContext,
+    CommandRouter,
+    DecisionPanel,
+    StatusPresenter,
+    TuiApp,
+    TuiSessionConfig,
+    WorkflowFacade,
+    WriterStatusPresenter,
+)
+from novel_agent.app.cli.events import RunEventStream
+from novel_agent.app.constants import DEFAULT_CLOSE_READING_STAGE, DEFAULT_SEGMENTATION_STAGE
+from novel_agent.app.repos.db import NovelAgentDB
+
+
+def test_status_presenter_translates_internal_writer_and_read_states() -> None:
+    presenter = StatusPresenter()
+
+    rendered = "\n".join(
+        [
+            presenter.present("freeze_d_review").step,
+            presenter.present("wait_chapter_acceptance").step,
+            presenter.present("Freeze B pending").step,
+            presenter.present("artifact saved").step,
+            presenter.present("segmentation running").step,
+            presenter.present("memory ready").step,
+        ]
+    )
+
+    assert "请确认本章写作材料" in rendered
+    assert "请验收当前章节" in rendered
+    assert "请审阅本批剧情大纲" in rendered
+    assert "已保存你的修改" in rendered
+    assert "正在粗读并切分原文" in rendered
+    assert "精读记忆已可用" in rendered
+    for token in presenter.FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in rendered
+
+
+def test_writer_status_presenter_covers_confirmation_points_events_and_gui_actions() -> None:
+    presenter = WriterStatusPresenter()
+    rendered = "\n".join(
+        [
+            presenter.present("artifact saved").step,
+            presenter.present("batch_review").step,
+            presenter.present("Freeze B pending").step,
+            presenter.present("freeze_d_review").step,
+            presenter.present("wait_chapter_acceptance").step,
+            presenter.present("writeback_review").step,
+            presenter.present("wait_chapter_review").step,
+            presenter.present("checkpoint confirmed").step,
+            presenter.present("pending").step,
+            presenter.event_message("artifact_saved"),
+            *(action.label for action in presenter.writer_actions_for_stage(stage="wait_chapter_acceptance")),
+            *(action.label for action in presenter.writer_actions_for_stage(stage="wait_chapter_review")),
+        ]
+    )
+
+    assert "已保存你的修改" in rendered
+    assert "请审阅本批剧情大纲" in rendered
+    assert "请确认本章写作材料" in rendered
+    assert "请验收当前章节" in rendered
+    assert "请确认写回续写记忆" in rendered
+    assert "请调整章节规划后重写" in rendered
+    assert "已确认，继续下一步" in rendered
+    assert "等待你确认" in rendered
+    assert "接受本章" in rendered
+    assert "调整字数后重写" in rendered
+    assert "修改章节梗概后重写" in rendered
+    assert "作废本次草稿" in rendered
+    assert "确认修改后的章节梗概，并重新生成长度计划" in rendered
+    assert "保存不等于确认" in rendered
+    for token in presenter.FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in rendered
+    assert "checkpoint confirmed" not in rendered
+
+
+def test_chinese_input_buffer_handles_mixed_width_backspace_and_multiline_paste() -> None:
+    buffer = ChineseInputBuffer()
+    buffer.insert("沈青A")
+    assert buffer.display_cursor_column() == 5
+
+    removed = buffer.backspace()
+    assert removed == "A"
+    assert buffer.text == "沈青"
+    assert buffer.display_cursor_column() == 4
+
+    buffer.paste("继续调查\n避免OOC")
+    assert buffer.text == "沈青继续调查\n避免OOC"
+    buffer.cursor = len("沈青继续调查")
+    buffer.handle_control_key("CTRL+A")
+    buffer.handle_control_key("CTRL+K")
+    assert buffer.text == "\n避免OOC"
+    buffer.cursor = len(buffer.text)
+    buffer.handle_control_key("CTRL+E")
+    buffer.handle_control_key("CTRL+W")
+    assert buffer.text == "\n"
+
+
+def test_run_event_stream_summarizes_close_read_document_progress() -> None:
+    stream = RunEventStream()
+
+    stream.progress_callback(
+        {
+            "stage": "close_reading",
+            "event": "batch_done",
+            "batch_index": 2,
+            "first_doc_id": 4,
+            "last_doc_id": 6,
+            "completed_documents": 6,
+            "total_documents": 20,
+        }
+    )
+
+    rendered = stream.events()[0].message
+    assert "精读 batch 2 完成" in rendered
+    assert "doc 4-6" in rendered
+    assert "已完成 6/20 documents" in rendered
+
+
+def test_artifact_presenter_summarizes_batch_chapter_length_and_draft(tmp_path: Path) -> None:
+    presenter = ArtifactPresenter()
+    batch_path = tmp_path / "batch_plan.json"
+    batch_path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "stage_goal": "把旧案线索推到新地点。",
+                    "main_conflict": "主角组与反派压力位正面碰撞。",
+                    "forbidden_early_consumption": ["不得提前揭晓幕后人"],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    chapter_path = tmp_path / "chapter_package.json"
+    chapter_path.write_text(
+        json.dumps(
+            {
+                "chapters": [
+                    {
+                        "chapter_id": "ch-1",
+                        "chapter_title": "雨夜接应",
+                        "chapter_goal": "救出关键证人。",
+                    }
+                ],
+                "forbidden_items": ["不得告白"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    length_path = tmp_path / "chapter_length_plan.json"
+    length_path.write_text(
+        json.dumps(
+            {
+                "default_target_chars": 2400,
+                "focus_chapter_ids": ["ch-1"],
+                "budgets": [{"chapter_id": "ch-1", "target_chars": 2600}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    draft_path = tmp_path / "draft.md"
+    draft_path.write_text("开头。" + "正文。" * 500, encoding="utf-8")
+
+    assert "旧案线索" in presenter.summarize(batch_path, stage="batch_review").render()
+    assert "雨夜接应" in presenter.summarize(chapter_path, stage="chapter_review").render()
+    assert "2600" in presenter.summarize(length_path, stage="wait_length_review").render()
+    draft_summary = presenter.summarize(draft_path, stage="wait_chapter_acceptance", target_chars=2000)
+    assert draft_summary.collapsed is True
+    assert "请验收当前章节" in draft_summary.render()
+
+
+def test_artifact_save_validates_json_and_does_not_confirm(tmp_path: Path) -> None:
+    presenter = ArtifactPresenter()
+    path = tmp_path / "chapter_length_plan.json"
+
+    failed = presenter.save_text(path, '{"budgets": {}}')
+    assert failed.saved is False
+    assert "budgets 必须是列表" in failed.validation_error
+    assert not path.exists()
+
+    saved = presenter.save_text(path, json.dumps({"budgets": []}, ensure_ascii=False))
+    assert saved.saved is True
+    assert saved.message == "已保存你的修改"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"budgets": []}
+
+
+def test_command_router_supports_slash_commands_palette_and_context_filtering() -> None:
+    router = CommandRouter()
+    context = CommandContext(mode="Writer 分层生成", stage="batch_review", has_artifact=True)
+
+    assert router.parse("/writer", context).handler_name == "start_writer"
+    assert router.parse("/tasks", context).handler_name == "list_tasks"
+    assert router.parse("/task couple", context).handler_name == "select_task"
+    assert router.parse("/new-task couple ./couple.txt", context).handler_name == "create_task"
+    assert router.parse("/reset-close-read", context).handler_name == "reset_close_read"
+    assert router.parse("/query summary", context).handler_name == "query_close_read"
+    assert router.parse("/benchmark longzu-32kb", context).handler_name == "run_smoke_benchmark"
+    assert router.parse("/benchmark --source novel_agent/tests/longzu_32kb.txt", context).args == (
+        "--source",
+        "novel_agent/tests/longzu_32kb.txt",
+    )
+    assert router.parse("/confirm", context).handler_name == "confirm_current_step"
+    assert router.parse("\x10", context).handler_name == "show_command_palette"
+    assert "/close-read  运行精读；用法 /close-read [source_path] [--batches N]" in router.render_panel(context)
+    assert "/benchmark  运行端到端 Agentic benchmark" in router.render_panel(context)
+    assert "默认 1 batch/约 20000 字预算" in router.render_panel(context)
+    panel = router.command_panel(context)
+    assert "Writer" in panel
+    assert any(command.command_id == "save" for command in panel["artifact"])
+
+    no_artifact_panel = router.command_panel(CommandContext(has_artifact=False))
+    assert all(command.command_id != "save" for commands in no_artifact_panel.values() for command in commands)
+
+
+def test_workflow_facade_lists_tasks_with_close_read_completion(tmp_path: Path) -> None:
+    facade = WorkflowFacade(repo_root=tmp_path)
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一章\n旧案开始。", encoding="utf-8")
+    facade.ensure_task(book_id="couple", source_path=str(source_path))
+    db = NovelAgentDB(facade.db_path_for_book("couple"))
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO documents(book_id, content, source_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("couple", "第一章", str(source_path), "now", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO chapters(
+                book_id, document_title_index, chapter_title, source_doc_start_id, source_doc_end_id,
+                source_doc_count, source_total_chars, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("couple", 1, "第一章", 1, 1, 1, 3, "now", "now"),
+        )
+        for stage in (DEFAULT_SEGMENTATION_STAGE, DEFAULT_CLOSE_READING_STAGE):
+            conn.execute(
+                """
+                INSERT INTO reading_progress(book_id, agent_stage, last_completed_doc_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("couple", stage, 1, "now"),
+            )
+        conn.commit()
+
+    rendered = facade.render_task_list(active_book_id="couple")
+
+    assert "* couple" in rendered
+
+
+def test_workflow_facade_smoke_benchmark_output_prioritizes_reviewer_summary(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+) -> None:
+    class _FakeRunService:
+        def __init__(self, *, repo_root: Path) -> None:
+            self.repo_root = repo_root
+
+        def run_longzu_32kb(self, **kwargs):  # type: ignore[no-untyped-def]
+            return _fake_agentic_smoke_result(tmp_path)
+
+    monkeypatch.setattr("novel_agent.app.cli.facade.AgenticSmokeBenchmarkService", _FakeRunService)
+
+    payload = WorkflowFacade(repo_root=tmp_path).run_smoke_benchmark(target="longzu-32kb")
+
+    assert payload["reviewer_summary"] == "中文 Reviewer 结论"
+    assert "中文 Reviewer 结论" in payload["summary_text"]
+    assert str(tmp_path / "runs" / "run-1") in payload["summary_text"]
+
+
+def test_tui_app_benchmark_command_renders_reviewer_summary(tmp_path: Path) -> None:
+    class _FacadeWithBenchmark:
+        def run_smoke_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["target"] == "longzu-32kb"
+            return {"summary_text": "Reviewer：中文结论\n产物目录：/tmp/run"}
+
+    app = TuiApp(repo_root=tmp_path, facade=_FacadeWithBenchmark())  # type: ignore[arg-type]
+
+    rendered = app.dispatch_command("/benchmark longzu-32kb")
+
+    assert "Reviewer：中文结论" in rendered
+    assert "产物目录" in rendered
+
+
+def _fake_agentic_smoke_result(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        run_id="run-1",
+        run_dir=str(tmp_path / "runs" / "run-1"),
+        book_id="book-1",
+        source_path=str(tmp_path / "source.txt"),
+        prefix_source_path=str(tmp_path / "source_prefix.txt"),
+        db_path=str(tmp_path / "novel.db"),
+        writer_run_dir=str(tmp_path / "writer_runs" / "run-1"),
+        draft_path=str(tmp_path / "writer_runs" / "run-1" / "draft.md"),
+        reference_truth_path=str(tmp_path / "reference_truth.txt"),
+        reviewer_report_path=str(tmp_path / "reviewer_report.json"),
+        summary_path=str(tmp_path / "summary.json"),
+        generated_chars=12,
+        reference_truth_chars=8,
+        reviewer_decision="pass",
+        reviewer_score=0.66,
+        reviewer_summary="中文 Reviewer 结论",
+        to_dict=lambda: {
+            "run_id": "run-1",
+            "run_dir": str(tmp_path / "runs" / "run-1"),
+            "reviewer_summary": "中文 Reviewer 结论",
+            "reviewer_decision": "pass",
+            "reviewer_score": 0.66,
+            "draft_path": str(tmp_path / "writer_runs" / "run-1" / "draft.md"),
+            "reference_truth_path": str(tmp_path / "reference_truth.txt"),
+            "generated_chars": 12,
+            "reference_truth_chars": 8,
+        },
+    )
+    assert "documents=1" in rendered
+    assert "chapters=1" in rendered
+    assert "精读完成" in rendered
+    assert str(source_path) in rendered
+
+
+def test_task_list_infers_segmentation_progress_from_source_offset(tmp_path: Path) -> None:
+    facade = WorkflowFacade(repo_root=tmp_path)
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一章\n旧案开始。", encoding="utf-8")
+    facade.ensure_task(book_id="couple", source_path=str(source_path))
+    db = NovelAgentDB(facade.db_path_for_book("couple"))
+    with db.connect() as conn:
+        db.init_schema(conn)
+        for content in ("第一章", "第二章"):
+            conn.execute(
+                """
+                INSERT INTO documents(book_id, content, source_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("couple", content, str(source_path), "now", "now"),
+            )
+        conn.execute(
+            """
+            INSERT INTO reading_progress(
+                book_id, agent_stage, current_source_path, current_source_offset, last_completed_doc_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("couple", DEFAULT_SEGMENTATION_STAGE, str(source_path), 42, None, "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO reading_progress(book_id, agent_stage, last_completed_doc_id, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("couple", DEFAULT_CLOSE_READING_STAGE, 2, "now"),
+        )
+        conn.commit()
+
+    rendered = facade.render_task_list(active_book_id="couple")
+
+    assert "粗读至 doc 2/2" in rendered
+    assert "精读完成" in rendered
+
+
+def test_workflow_facade_reset_close_read_keeps_documents_and_clears_progress(tmp_path: Path) -> None:
+    facade = WorkflowFacade(repo_root=tmp_path)
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一章\n旧案开始。", encoding="utf-8")
+    facade.ensure_task(book_id="couple", source_path=str(source_path))
+    world_path = tmp_path / ".memory" / "world" / "couple.summary.md"
+    world_path.parent.mkdir(parents=True, exist_ok=True)
+    world_path.write_text("旧世界观", encoding="utf-8")
+    db = NovelAgentDB(facade.db_path_for_book("couple"))
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO documents(book_id, content, source_path, character_keywords_json, content_tags_csv, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("couple", "第一章", str(source_path), '["沈青"]', "tag", "now", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO chapters(
+                book_id, document_title_index, chapter_title, source_doc_start_id, source_doc_end_id,
+                source_doc_count, source_total_chars, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("couple", 1, "第一章", 1, 1, 1, 3, "now", "now"),
+        )
+        conn.execute(
+            """
+            INSERT INTO character_profiles(book_id, canonical_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("couple", "沈青", "now", "now"),
+        )
+        for stage in (DEFAULT_SEGMENTATION_STAGE, DEFAULT_CLOSE_READING_STAGE):
+            conn.execute(
+                """
+                INSERT INTO reading_progress(book_id, agent_stage, last_completed_doc_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("couple", stage, 1, "now"),
+            )
+        conn.commit()
+
+    result = facade.reset_close_read_task(book_id="couple")
+
+    assert result["deleted"]["chapters"] == 1
+    assert result["deleted"]["character_profiles"] == 1
+    assert result["deleted"]["close_read_progress"] == 1
+    assert result["deleted"]["files"] == 1
+    assert not world_path.exists()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        assert conn.execute("SELECT COUNT(*) FROM documents WHERE book_id = ?", ("couple",)).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM chapters WHERE book_id = ?", ("couple",)).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+                ("couple", DEFAULT_SEGMENTATION_STAGE),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+                ("couple", DEFAULT_CLOSE_READING_STAGE),
+            ).fetchone()[0]
+            == 0
+        )
+        row = conn.execute("SELECT character_keywords_json, content_tags_csv FROM documents WHERE book_id = ?", ("couple",)).fetchone()
+        assert row["character_keywords_json"] == "[]"
+        assert row["content_tags_csv"] == ""
+
+
+def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> None:
+    panel = DecisionPanel.chapter_acceptance(draft_path="/tmp/draft.md", draft_chars=4820, target_chars=5000)
+    rendered = panel.render()
+
+    assert "接受本章 -> 请确认写回续写记忆" in rendered
+    assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
+    assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
+    assert "作废本次草稿 -> 流程已暂停" in rendered
+    assert "稍后再决定 -> 请验收当前章节" in rendered
+    assert panel.choose("2").workflow_action == "revise_length"
+    assert panel.choose("3").workflow_action == "replan_chapter"
+
+
+def test_prompt_writer_review_uses_public_status_copy_and_save_guidance(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    artifact_path = tmp_path / "chapter_execution_input.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "chapter_id": "chapter-001",
+                "length_budget": {"target_chars": 2400},
+                "forbidden_items": ["不得提前揭晓真相"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    confirmed = run_interactive._prompt_writer_review("freeze_d_review", str(artifact_path))  # noqa: SLF001
+    output = capsys.readouterr().out
+
+    assert confirmed is False
+    assert "请确认本章写作材料" in output
+    assert "保存只是保留修改" in output
+    assert "保存不等于确认" in output
+    for token in WriterStatusPresenter.FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in output
+
+
+class _FakeFacade:
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        self.steps: list[str] = []
+
+    def modeling_status(self, *, book_id: str, db_path: Path | None = None):  # type: ignore[no-untyped-def]
+        self.steps.append("status")
+        return type(
+            "Snapshot",
+            (),
+            {
+                "close_read_ready": True,
+                "ready_map": lambda _self: {"原文": True, "精读记忆": True, "桥段 KB": True},
+            },
+        )()
+
+    def start_writer(self, **_kwargs):  # type: ignore[no-untyped-def]
+        self.steps.append("writer")
+        return {"status": "waiting_for_review", "checkpoint": {"stage": "batch_review"}}
+
+
+def test_tui_app_keeps_message_artifact_status_and_input_regions_separate(tmp_path: Path) -> None:
+    facade = _FakeFacade(tmp_path)
+    app = TuiApp(
+        repo_root=tmp_path,
+        config=TuiSessionConfig(project="Couple", book_id="couple", width=100),
+        facade=facade,  # type: ignore[arg-type]
+    )
+    app.set_status("batch_review", technical_details={"run_id": "run-1"})
+    artifact = tmp_path / "batch_plan.json"
+    artifact.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
+    app.show_artifact(artifact, stage="batch_review")
+    app.input_buffer.insert("开始续写")
+
+    rendered = app.render(width=100)
+
+    assert "[消息流]" in rendered
+    assert "[产物审阅]" in rendered
+    assert "[状态侧栏]" in rendered
+    assert "[输入区 / 决策面板]" in rendered
+    assert "开始续写" in rendered
+    assert "请审阅本批剧情大纲" in rendered
+    for token in StatusPresenter.FORBIDDEN_PUBLIC_TOKENS:
+        assert token not in rendered.replace("技术详情", "")
+
+
+def test_read_to_writer_minimal_path_in_one_tui_session(tmp_path: Path) -> None:
+    facade = _FakeFacade(tmp_path)
+    app = TuiApp(
+        repo_root=tmp_path,
+        config=TuiSessionConfig(project="Couple", book_id="couple"),
+        facade=facade,  # type: ignore[arg-type]
+    )
+
+    snapshot = facade.modeling_status(book_id="couple")
+    assert snapshot.ready_map()["精读记忆"] is True
+    writer_result = facade.start_writer(book_id="couple")
+    app.set_status(writer_result["checkpoint"]["stage"])
+
+    assert facade.steps == ["status", "writer"]
+    assert app.current_status.step == "请审阅本批剧情大纲"

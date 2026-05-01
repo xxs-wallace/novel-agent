@@ -18,7 +18,9 @@ dependencies = [
   "jinja2>=3.1.4",
   "pillow>=10.0.1",
   # Security fix for CVE-2023-4863: https://pillow.readthedocs.io/en/stable/releasenotes/10.0.1.html
+  "jieba>=0.42.1",
   "python-dotenv",
+  "textual>=0.89.0",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +50,9 @@ e2b = [
 ]
 gradio = [
   "gradio>=5.14.0",  # Sidebar component GH-797
+]
+gui = [
+  "PySide6>=6.8.0",
 ]
 litellm = [
   "litellm>=1.60.2",
@@ -136,6 +141,13 @@ lines-after-imports = 2
 [tool.setuptools.package-data]
 "smolagents.prompts" = ["*.yaml"]
 
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = ["smolagents*", "novel_agent*", "cli*"]
+exclude = ["novel_agent.tests*", "tests*"]
+
 [project.scripts]
 smolagent = "smolagents.cli:main"
 webagent = "smolagents.vision_web_browser:main"
+novel-agent = "cli.novel_agent:main"
+novel-agent-gui = "cli.novel_agent_gui:main"
