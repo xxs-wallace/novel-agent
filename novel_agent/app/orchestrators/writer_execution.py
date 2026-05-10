@@ -152,6 +152,11 @@ def build_authorized_synopsis_execution_input(
         "reference_document_synopses": document_synopses,
         "recent_story_synopses": story_context.get("recent_story_synopses", []),
         "character_docs": story_context.get("character_docs", []),
+        "history_usage_policy": (
+            "story_outline.current_position、timeline 中 scope=past 的节点、recent_story_synopses "
+            "都是已发生剧情的承接上下文；正文开头必须进入本次 authorized synopsis 的目标事件，"
+            "不得复述、改写或重新生成历史章节正文。"
+        ),
         "creative_kb_note": "Style and continuity references are inherited from the prepared Writer execution input; they cannot override authorized facts.",
     }
     execution_input["relation_state_gate"] = {
@@ -178,6 +183,7 @@ def build_authorized_synopsis_execution_input(
         *writer_rules,
         "正文扩写事实源以 chapter_brief.combined_synopsis、coverage_plot_beats 与 reference_document_synopses 为准。",
         "若 fact_inputs、风格参考或 Creative KB 与 chapter_brief 冲突，必须优先遵守 chapter_brief。",
+        "历史上下文只允许用于承接状态，不得把上一章/current_position/recent_story_synopses 当作本章正文重新输出。",
     ]
     return execution_input
 
@@ -1059,6 +1065,11 @@ class RestrictedWriterExecutor:
                 "如果核心事件已经写完但字数未达目标，只做场景内动作、对白和感官细节的适度展开；"
                 "不得用前情回放、未授权旁支、后续设定讲解或下一章节事件凑字。"
             ),
+            "history_rule": (
+                "fact_inputs.story_outline.current_position、timeline scope=past、recent_story_synopses "
+                "只用于理解上一章已经发生了什么。正文不得从这些历史文本的开头重新写起，"
+                "不得复述上一章正文；第一段应直接进入 combined_synopsis/coverage_plot_beats 指定的当前目标事件。"
+            ),
         }
         return {
             "system_prompt": (
@@ -1067,6 +1078,7 @@ class RestrictedWriterExecutor:
                 "不得越过当前批次边界。必须遵守原作叙事契约，不得擅自更换叙述者或视角机制。"
                 "Creative KB、风格参考和结构知识只能辅助表达，不得替换 ChapterBrief 的剧情目标。"
                 "若输入包含连续多个 document 梗概，必须按顺序合并为同一段连续正文并写到长度预算附近。"
+                "历史上下文和上一章正文只用于承接，不得作为本章正文开头重写或复述。"
                 "长度预算是硬约束：不要超过 max_chars，不要为了凑字补写前情回放、原创支线、旅程过场或设定讲解。"
                 "chapter_brief.must_include 主要是连续性校验锚点，coverage_plot_beats 才是完整剧情覆盖目标。"
                 "只输出正文，不要解释。"
@@ -1171,6 +1183,18 @@ class RestrictedWriterExecutor:
         )
         if planned_gate["blocked"]:
             issues.extend(planned_gate["issues"])
+        issues.extend(
+            self._evaluate_external_length_budget(
+                draft_text=draft_text,
+                length_budget=dict(execution_input.get("length_budget") or {}),
+            )
+        )
+        issues.extend(
+            self._evaluate_history_replay(
+                draft_text=draft_text,
+                execution_input=execution_input,
+            )
+        )
         blocked = any(issue.severity == "high" for issue in issues)
         state_delta = self._extract_state_delta(
             execution_input=execution_input,
@@ -1188,6 +1212,96 @@ class RestrictedWriterExecutor:
             review_scope="chapter_execution",
             evidence_sources=[dict(item) for item in (execution_input.get("sources") or []) if isinstance(item, dict)],
         )
+
+    def _evaluate_external_length_budget(
+        self,
+        *,
+        draft_text: str,
+        length_budget: Mapping[str, Any],
+    ) -> list[ContinuityIssue]:
+        if str(length_budget.get("length_source") or "").strip() != "external":
+            return []
+        target_chars = _positive_int(length_budget.get("target_chars"))
+        min_chars = _positive_int(length_budget.get("min_chars"))
+        max_chars = _positive_int(length_budget.get("max_chars"))
+        if not target_chars or not min_chars or not max_chars:
+            return []
+        actual_chars = len(str(draft_text or "").strip())
+        if min_chars <= actual_chars <= max_chars:
+            return []
+        if actual_chars < min_chars:
+            message = (
+                f"正文长度低于外部长度预算：实际 {actual_chars} 字，"
+                f"要求 {min_chars}-{max_chars} 字（目标 {target_chars} 字）。"
+            )
+            fix = "补足当前授权梗概内的动作、对白和场景细节，不得改写前情或提前推进后续事件。"
+        else:
+            message = (
+                f"正文长度超过外部长度预算：实际 {actual_chars} 字，"
+                f"要求 {min_chars}-{max_chars} 字（目标 {target_chars} 字）。"
+            )
+            fix = "压缩前情回放、设定解释、旅程过场和未授权支线，只保留当前授权梗概的核心事件。"
+        return [
+            ContinuityIssue(
+                type="external_length_budget_violation",
+                severity="high",
+                message=message,
+                suggested_fix=fix,
+            )
+        ]
+
+    def _evaluate_history_replay(
+        self,
+        *,
+        draft_text: str,
+        execution_input: Mapping[str, Any],
+    ) -> list[ContinuityIssue]:
+        chapter_brief = dict(execution_input.get("chapter_brief") or {})
+        length_budget = dict(execution_input.get("length_budget") or {})
+        if (
+            str(length_budget.get("length_source") or "").strip() != "external"
+            and str(chapter_brief.get("chapter_role") or "").strip() != "expansion from authorized synopsis"
+        ):
+            return []
+        fact_inputs = dict(execution_input.get("fact_inputs") or {})
+        story_outline = dict(fact_inputs.get("story_outline") or {})
+        snippets: list[str] = [_normalize_text(story_outline.get("current_position"))]
+        for item in story_outline.get("timeline") or []:
+            if isinstance(item, Mapping) and str(item.get("scope") or "") == "past":
+                snippets.append(_normalize_text(item.get("summary")))
+        for item in fact_inputs.get("recent_story_synopses") or []:
+            if isinstance(item, Mapping):
+                snippets.append(_normalize_text(item.get("summary_short")))
+                snippets.append(_normalize_text(item.get("summary_md")))
+
+        draft_prefix = self._compact_for_replay_check(draft_text)[:360]
+        for snippet in snippets:
+            anchor = self._history_replay_anchor(snippet)
+            if not anchor:
+                continue
+            if anchor in draft_prefix:
+                return [
+                    ContinuityIssue(
+                        type="history_replay",
+                        severity="high",
+                        message="正文开头复述了历史上下文，而不是直接进入当前授权梗概。",
+                        quote=anchor,
+                        suggested_fix=(
+                            "删除上一章/current_position/recent_story_synopses 的复述，"
+                            "从当前 coverage_plot_beats 的第一个目标事件开始写。"
+                        ),
+                    )
+                ]
+        return []
+
+    def _history_replay_anchor(self, text: str) -> str:
+        compact = self._compact_for_replay_check(text)
+        if len(compact) < 24:
+            return ""
+        return compact[: min(96, len(compact))]
+
+    def _compact_for_replay_check(self, text: str) -> str:
+        return re.sub(r"\s+", "", str(text or ""))
 
     def _extract_state_delta(
         self,

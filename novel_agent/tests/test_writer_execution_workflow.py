@@ -344,8 +344,19 @@ def test_restricted_writer_executor_builds_authorized_synopsis_execution_input(t
                 "后续铺垫：参考角色短暂出现，为后续冲突留下疑问。",
             ],
         },
-        story_outline={"next_outline_node": "主角进入新地点。"},
-        story_context={"character_docs": [{"canonical_name": "主角"}]},
+        story_outline={
+            "next_outline_node": "主角进入新地点。",
+            "current_position": "上一章主角还在旧地点犹豫，这只是历史承接上下文。",
+            "timeline": [
+                {"scope": "past", "summary": "上一章主角还在旧地点犹豫，这只是历史承接上下文。"}
+            ],
+        },
+        story_context={
+            "recent_story_synopses": [
+                {"summary_short": "上一章主角还在旧地点犹豫。"}
+            ],
+            "character_docs": [{"canonical_name": "主角"}],
+        },
         target_chars=3000,
         synopsis_source="close_read_reference_story_synopsis",
     )
@@ -363,6 +374,107 @@ def test_restricted_writer_executor_builds_authorized_synopsis_execution_input(t
     assert "开始观察周围异常" not in str(chapter_brief["must_include"])
     assert "开始观察周围异常" in str(chapter_brief["coverage_plot_beats"])
     assert "选择接受这份机会" in str(chapter_brief["coverage_plot_beats"])
+    assert "已发生剧情的承接上下文" in str(execution_input["fact_inputs"])
+    prompt = executor.build_draft_prompt(execution_input)
+    assert "历史上下文和上一章正文只用于承接" in prompt["system_prompt"]
+    assert "不得复述上一章正文" in prompt["user_prompt"]
+
+
+def test_external_length_budget_violation_blocks_canon_ready(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "test.db")
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    execution_input = {
+        "chapter_id": "chapter-1",
+        "chapter_title": "长度测试",
+        "chapter_brief": {
+            "chapter_id": "chapter-1",
+            "title": "长度测试",
+            "chapter_role": "expansion from authorized synopsis",
+            "goal": "主角完成确认。",
+            "must_include": [],
+            "forbidden": [],
+            "relationship_targets": [],
+        },
+        "length_budget": {
+            "chapter_id": "chapter-1",
+            "target_chars": 100,
+            "min_chars": 80,
+            "max_chars": 120,
+            "length_source": "external",
+        },
+        "relation_state_gate": {"blocked": False, "targets": []},
+        "planned_character_constraints": [],
+        "sources": [],
+    }
+    draft_text = "主角完成确认。" + ("补充场景动作。" * 20)
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        report = executor._check_continuity_extended(  # noqa: SLF001
+            conn,
+            book_id="book-1",
+            execution_input=execution_input,
+            draft_md=draft_text,
+        )
+
+    assert report.canon_ready is False
+    assert report.blocked is True
+    issue_types = {issue.type for issue in report.issues}
+    assert "external_length_budget_violation" in issue_types
+
+
+def test_authorized_expansion_blocks_history_replay(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "test.db")
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    previous_opening = "上一章的车灯在夜色里缓慢退去，主角坐在副驾驶上反复回想失败的告白。"
+    execution_input = {
+        "chapter_id": "chapter-2",
+        "chapter_title": "承接测试",
+        "chapter_brief": {
+            "chapter_id": "chapter-2",
+            "title": "承接测试",
+            "chapter_role": "expansion from authorized synopsis",
+            "goal": "主角打出确认电话。",
+            "must_include": [],
+            "forbidden": [],
+            "relationship_targets": [],
+        },
+        "length_budget": {
+            "chapter_id": "chapter-2",
+            "target_chars": 500,
+            "min_chars": 1,
+            "max_chars": 1000,
+            "length_source": "external",
+        },
+        "fact_inputs": {
+            "story_outline": {
+                "current_position": previous_opening,
+                "timeline": [{"scope": "past", "summary": previous_opening}],
+            },
+            "recent_story_synopses": [{"summary_short": previous_opening}],
+        },
+        "relation_state_gate": {"blocked": False, "targets": []},
+        "planned_character_constraints": [],
+        "sources": [],
+    }
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        report = executor._check_continuity_extended(  # noqa: SLF001
+            conn,
+            book_id="book-1",
+            execution_input=execution_input,
+            draft_md=f"{previous_opening}然后他终于拨通了电话。",
+        )
+
+    assert report.canon_ready is False
+    assert "history_replay" in {issue.type for issue in report.issues}
 
 
 def test_chapter_package_prompt_includes_batch_boundary_contract() -> None:

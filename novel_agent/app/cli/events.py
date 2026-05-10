@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping
 
@@ -48,10 +49,12 @@ class RunEventStream:
 
     def __init__(self) -> None:
         self._events: list[RunEvent] = []
+        self._lock = threading.Lock()
 
     def emit(self, kind: str, message: str, *, payload: Mapping[str, Any] | None = None) -> RunEvent:
         event = RunEvent(kind=kind, message=message, payload=dict(payload or {}))
-        self._events.append(event)
+        with self._lock:
+            self._events.append(event)
         return event
 
     def progress_callback(self, event: Mapping[str, Any]) -> None:
@@ -71,26 +74,35 @@ class RunEventStream:
         self.emit("进度", message, payload=event)
 
     def events(self) -> list[RunEvent]:
-        return list(self._events)
+        with self._lock:
+            return list(self._events)
 
     def clear(self) -> None:
-        self._events.clear()
+        with self._lock:
+            self._events.clear()
+
+    def drain(self) -> list[RunEvent]:
+        with self._lock:
+            events = list(self._events)
+            self._events.clear()
+        return events
 
     @contextlib.contextmanager
-    def capture_stdout(self) -> Iterator[io.StringIO]:
+    def capture_stdout(self, *, ingest_progress: bool = True) -> Iterator[io.StringIO]:
         """Capture noisy legacy stdout/stderr so it can be summarized in the message flow."""
 
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             yield stdout
-        self._ingest_captured_output(stdout.getvalue(), stderr.getvalue())
+        self._ingest_captured_output(stdout.getvalue(), stderr.getvalue(), ingest_progress=ingest_progress)
 
-    def _ingest_captured_output(self, stdout: str, stderr: str) -> None:
-        for line in stdout.splitlines():
-            event = self._progress_event_from_json(line)
-            if event:
-                self.progress_callback(event)
+    def _ingest_captured_output(self, stdout: str, stderr: str, *, ingest_progress: bool = True) -> None:
+        if ingest_progress:
+            for line in stdout.splitlines():
+                event = self._progress_event_from_json(line)
+                if event:
+                    self.progress_callback(event)
         payload = {}
         if stdout.strip():
             payload["stdout"] = stdout.strip()

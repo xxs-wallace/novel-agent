@@ -120,6 +120,10 @@ dev = [
 [tool.pytest.ini_options]
 # Add the specified `OPTS` to the set of command line arguments as if they had been specified by the user.
 addopts = "-sv --durations=0"
+markers = [
+  "slow: explicitly enabled smoke tests that may call real services",
+  "timeout(seconds): per-test timeout used when pytest-timeout is installed",
+]
 
 [tool.ruff]
 line-length = 119

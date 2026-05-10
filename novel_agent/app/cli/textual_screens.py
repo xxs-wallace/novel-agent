@@ -161,6 +161,7 @@ class WorkbenchScreen(Screen[None]):
         self.initial_status = initial_status
         self.running_worker_name = ""
         self.running_worker = None
+        self.progress_refresh_timer = None
         self.running_stop_event: threading.Event | None = None
         self.show_logs = False
         self.scoped_revision_feedback_active = False
@@ -448,6 +449,10 @@ class WorkbenchScreen(Screen[None]):
                 options["use_real_model"] = True
                 index += 1
                 continue
+            if token == "--use-real-model":
+                options["use_real_model"] = True
+                index += 1
+                continue
             if token.startswith("--source="):
                 options["source_path"] = Path(token.split("=", 1)[1]).expanduser()
                 index += 1
@@ -488,8 +493,9 @@ class WorkbenchScreen(Screen[None]):
             "artifact_dir": None,
             "case_count": 3,
             "enable_writer_ab": False,
-            "use_real_model": True,
+            "use_real_model": False,
             "dry_run_model": False,
+            "model_mode_explicit": False,
         }
         index = 0
         explicit_target = False
@@ -519,6 +525,13 @@ class WorkbenchScreen(Screen[None]):
             if token == "--dry-run-model":
                 options["use_real_model"] = False
                 options["dry_run_model"] = True
+                options["model_mode_explicit"] = True
+                index += 1
+                continue
+            if token in {"--real", "--use-real-model"}:
+                options["use_real_model"] = True
+                options["dry_run_model"] = False
+                options["model_mode_explicit"] = True
                 index += 1
                 continue
             if token.startswith("--source="):
@@ -549,6 +562,8 @@ class WorkbenchScreen(Screen[None]):
             index += 1
         if explicit_target and options["source_path"] is not None:
             return {"error": "benchmark 目标与 --source 只能选择一种。"}
+        if not options["model_mode_explicit"]:
+            return {"error": "请显式选择模型模式：真实运行使用 --use-real-model，本地形状检查使用 --dry-run-model。"}
         return options
 
     @staticmethod
@@ -786,6 +801,7 @@ class WorkbenchScreen(Screen[None]):
         self.running_stop_event = threading.Event()
         self._append_message("进度", f"正在运行{name}…")
         self.refresh_all()
+        self._start_progress_refresh_timer()
 
         def run() -> None:
             try:
@@ -797,10 +813,21 @@ class WorkbenchScreen(Screen[None]):
 
         self.running_worker = self.app.run_worker(run, name=name, thread=True, exit_on_error=False)
 
+    def _start_progress_refresh_timer(self) -> None:
+        self._stop_progress_refresh_timer()
+        self.progress_refresh_timer = self.set_interval(0.5, self.refresh_all)
+
+    def _stop_progress_refresh_timer(self) -> None:
+        timer = self.progress_refresh_timer
+        self.progress_refresh_timer = None
+        if timer is not None and hasattr(timer, "stop"):
+            timer.stop()
+
     def _finish_worker(self, name: str, result: Any, exc: Exception | None) -> None:
         self.running_worker_name = ""
         self.running_worker = None
         self.running_stop_event = None
+        self._stop_progress_refresh_timer()
         if exc is not None:
             self._append_message("错误", f"{name}遇到问题：{exc}")
             self._append_message("恢复建议", "检查缺失文件、API Key 或最近 checkpoint 后，可从 /resume 或对应流程重试。")
@@ -826,6 +853,7 @@ class WorkbenchScreen(Screen[None]):
             self.refresh_all()
 
     def on_unmount(self) -> None:
+        self._stop_progress_refresh_timer()
         self.request_stop_worker(announce=False)
 
     def _worker_stop_requested(self) -> bool:

@@ -273,7 +273,7 @@ class WorkflowFacade:
         from .. import run_interactive
 
         self.event_stream.emit("系统", "开始在统一工作台中运行粗读/精读")
-        with self.event_stream.capture_stdout():
+        with self.event_stream.capture_stdout(ingest_progress=False):
             result = run_interactive._run_pipeline(  # noqa: SLF001 - facade intentionally delegates to legacy runner.
                 repo_root=self.repo_root,
                 book_id=book_id,
@@ -288,6 +288,7 @@ class WorkflowFacade:
                 close_step_batches=close_step_batches,
                 build_creative_kb=build_creative_kb,
                 should_stop=should_stop,
+                progress_callback=self.event_stream.progress_callback,
             )
         self.event_stream.emit("系统", "粗读/精读本轮已完成", payload=result)
         return result

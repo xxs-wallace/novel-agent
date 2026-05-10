@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import threading
 from pathlib import Path
 
+import pytest
 from rich.align import Align
 from rich.panel import Panel
 from textual.widgets import Static, TextArea
@@ -29,13 +32,27 @@ class _TextualFakeFacade:
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
         self.calls: list[str] = []
+        self.call_records: list[dict[str, object]] = []
         self.read_runs: list[dict[str, object]] = []
         self.benchmark_runs: list[dict[str, object]] = []
         self.creative_kb_benchmark_runs: list[dict[str, object]] = []
+        self.failures: dict[str, Exception] = {}
         self.last_read_kwargs: dict[str, object] = {}
         self.scoped_revision_requests: list[dict[str, object]] = []
         self.scoped_revision_applies: list[dict[str, object]] = []
         self.next_scoped_revision_result: dict[str, object] | None = None
+
+    def fail_next(self, operation: str, exc: Exception) -> None:
+        self.failures[operation] = exc
+
+    def _record(self, operation: str, **payload: object) -> None:
+        self.call_records.append({"operation": operation, **payload})
+
+    def _raise_if_configured(self, *keys: str) -> None:
+        for key in keys:
+            exc = self.failures.pop(key, None)
+            if exc is not None:
+                raise exc
 
     def db_path_for_book(self, book_id: str) -> Path:
         return self.repo_root / ".indexes" / f"{book_id}.db"
@@ -92,6 +109,8 @@ class _TextualFakeFacade:
         self.calls.append("read")
         self.last_read_kwargs = dict(kwargs)
         self.read_runs.append(dict(kwargs))
+        run_mode = str(kwargs.get("run_mode") or "new")
+        self._record(f"read:{run_mode}", kwargs=dict(kwargs))
         return {
             "inserted_documents": 2,
             "segmentation_batches": 1,
@@ -102,10 +121,12 @@ class _TextualFakeFacade:
 
     def build_creative_kb(self, **_kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("kb")
+        self._record("kb")
         return {"fragment_cards": 3, "clusters": 1, "representatives": 1}
 
     def start_writer(self, **_kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("writer")
+        self._record("writer")
         artifact_path = self.repo_root / "runs" / "writer" / "batch_plan.json"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
@@ -120,10 +141,12 @@ class _TextualFakeFacade:
 
     def writer_action(self, **_kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("writer_action")
+        self._record("writer_action")
         return {"status": "chapter_review", "checkpoint": {"stage": "chapter_review"}}
 
     def request_scoped_artifact_revision(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("request_scoped_artifact_revision")
+        self._record("request_scoped_artifact_revision", kwargs=dict(kwargs))
         self.scoped_revision_requests.append(dict(kwargs))
         if self.next_scoped_revision_result is not None:
             return dict(self.next_scoped_revision_result)
@@ -138,6 +161,7 @@ class _TextualFakeFacade:
 
     def apply_scoped_artifact_revision(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("apply_scoped_artifact_revision")
+        self._record("apply_scoped_artifact_revision", kwargs=dict(kwargs))
         self.scoped_revision_applies.append(dict(kwargs))
         artifact_path = self.scoped_revision_requests[-1]["target_artifact_path"]
         return {
@@ -157,6 +181,11 @@ class _TextualFakeFacade:
     def run_smoke_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("benchmark")
         self.benchmark_runs.append(dict(kwargs))
+        target = str(kwargs.get("target") or "")
+        self._record("benchmark", target=target, kwargs=dict(kwargs))
+        self._raise_if_configured(f"benchmark:{target}", "benchmark")
+        if target not in {"", "longzu-32kb"}:
+            raise ValueError(f"未知 benchmark 目标：{target}")
         return {
             "summary_text": (
                 "梗概层 Reviewer：CLI 梗概链路通过 (pass, 0.80)\n"
@@ -169,6 +198,9 @@ class _TextualFakeFacade:
     def run_creative_kb_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("creative_kb_benchmark")
         self.creative_kb_benchmark_runs.append(dict(kwargs))
+        target = str(kwargs.get("target") or "longzu-32kb")
+        self._record("creative_kb_benchmark", target=target, kwargs=dict(kwargs))
+        self._raise_if_configured(f"creative_kb_benchmark:{target}", "creative_kb_benchmark")
         return {
             "summary_text": (
                 "Creative KB Benchmark\n"
@@ -190,6 +222,43 @@ def _app(tmp_path: Path) -> TextualNovelAgentApp:
         facade=_TextualFakeFacade(tmp_path),  # type: ignore[arg-type]
     )
     return TextualNovelAgentApp(repo_root=tmp_path, session=session)
+
+
+class TuiSmokeHarness:
+    def __init__(self, app: TextualNovelAgentApp, pilot) -> None:  # type: ignore[no-untyped-def]
+        self.app = app
+        self.pilot = pilot
+
+    @property
+    def prompt(self) -> PromptInput:
+        return self.app.screen.query_one("#workbench-prompt", PromptInput)
+
+    async def submit_command(self, command: str, *, wait_pauses: int = 24) -> str:
+        self.prompt.value = command
+        self.prompt.query_one("#prompt-text", TextArea).focus()
+        await self.pilot.press("enter")
+        await self.pilot.pause()
+        assert self.prompt.value == ""
+        rendered = self.app.session.messages.render(limit=100)
+        assert f"你 · {command}" in rendered
+        await self.wait_for_worker(wait_pauses=wait_pauses)
+        return self.app.session.messages.render(limit=120)
+
+    async def wait_for_worker(self, *, wait_pauses: int = 24) -> None:
+        for _ in range(wait_pauses):
+            await self.pilot.pause()
+            if not getattr(self.app.screen, "running_worker_name", ""):
+                return
+        pytest.fail(f"worker still running: {getattr(self.app.screen, 'running_worker_name', '')}")
+
+    async def assert_prompt_editable(self, value: str = "失败后仍可继续编辑") -> None:
+        self.prompt.value = value
+        self.prompt.query_one("#prompt-text", TextArea).focus()
+        await self.pilot.pause()
+        assert self.prompt.value == value
+
+    def rendered(self, *, limit: int = 120) -> str:
+        return self.app.session.messages.render(limit=limit)
 
 
 def test_home_screen_is_prompt_first_and_actions_are_split_by_line(tmp_path: Path) -> None:
@@ -522,35 +591,83 @@ def test_textual_worker_e2e_read_kb_writer_minimal_path(tmp_path: Path) -> None:
     _run(scenario())
 
 
+def test_textual_close_read_worker_streams_document_progress_before_completion(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        progress_emitted = threading.Event()
+        allow_finish = threading.Event()
+
+        def start_read_pipeline(**_kwargs):  # type: ignore[no-untyped-def]
+            app.session.event_stream.progress_callback(
+                {
+                    "stage": "close_reading",
+                    "event": "batch_start",
+                    "batch_index": 3,
+                    "chapter_title": "旧楼追踪",
+                    "first_doc_id": 7,
+                    "last_doc_id": 9,
+                    "completed_documents": 6,
+                    "total_documents": 20,
+                }
+            )
+            progress_emitted.set()
+            allow_finish.wait(timeout=2)
+            return {
+                "inserted_documents": 0,
+                "segmentation_batches": 0,
+                "close_read_batches": 1,
+                "segmentation_progress_chars": 2400,
+                "close_read_progress_chars": 1800,
+            }
+
+        app.session.facade.start_read_pipeline = start_read_pipeline  # type: ignore[method-assign]
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            prompt = app.screen.query_one("#workbench-prompt", PromptInput)
+            prompt.value = "/close-read --batches 1"
+            prompt.query_one("#prompt-text", TextArea).focus()
+            await pilot.press("enter")
+
+            for _ in range(20):
+                await pilot.pause()
+                rendered = app.session.messages.render(limit=80)
+                if progress_emitted.is_set() and "正在精读：旧楼追踪（doc 7-9）" in rendered:
+                    break
+            else:
+                raise AssertionError(app.session.messages.render(limit=80))
+
+            assert getattr(app.screen, "running_worker_name", "") == "精读建模"
+            assert "已完成 6/20 documents" in app.session.messages.render(limit=80)
+            allow_finish.set()
+            for _ in range(20):
+                await pilot.pause()
+                if not getattr(app.screen, "running_worker_name", ""):
+                    break
+
+    _run(scenario())
+
+
 def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmarks(tmp_path: Path) -> None:
     async def scenario() -> None:
         app = _app(tmp_path)
         source_path = tmp_path / "source.txt"
         source_path.write_text("第一章\n雨夜旧案开始。\n第二章\n人物关系出现裂痕。", encoding="utf-8")
 
-        async def submit(command: str) -> None:
-            prompt = app.screen.query_one("#workbench-prompt", PromptInput)
-            prompt.value = command
-            prompt.query_one("#prompt-text", TextArea).focus()
-            await pilot.press("enter")
-            for _ in range(12):
-                await pilot.pause()
-                if not getattr(app.screen, "running_worker_name", ""):
-                    break
-
         async with app.run_test(size=(120, 40)) as pilot:
             app.open_workbench()
             await pilot.pause()
+            harness = TuiSmokeHarness(app, pilot)
 
-            await submit(f"/new-task smoke {source_path}")
-            await submit("/read")
-            await submit("/close-read --batches 2")
-            await submit("/query character 沈青")
-            await submit("/query summary total")
-            await submit("/benchmark longzu-32kb")
-            await submit("/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model")
+            await harness.submit_command(f"/new-task smoke {source_path}")
+            await harness.submit_command("/read")
+            await harness.submit_command("/close-read --batches 2")
+            await harness.submit_command("/query character 沈青")
+            await harness.submit_command("/query summary total")
+            await harness.submit_command("/benchmark longzu-32kb")
+            await harness.submit_command("/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model")
 
-            rendered = app.session.messages.render(limit=80)
+            rendered = harness.rendered()
             facade = app.session.facade
             assert app.session.config.book_id == "smoke"
             assert app.session.config.source_path == str(source_path)
@@ -558,6 +675,10 @@ def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmark
             assert "query:smoke:character:沈青:None:None:all:markdown" in facade.calls  # type: ignore[attr-defined]
             assert "query:smoke:summary::None:None:total:markdown" in facade.calls  # type: ignore[attr-defined]
             assert facade.calls[-2:] == ["benchmark", "creative_kb_benchmark"]  # type: ignore[attr-defined]
+            assert [item["operation"] for item in facade.call_records if str(item["operation"]).startswith("read:")] == [  # type: ignore[attr-defined]
+                "read:new",
+                "read:resume",
+            ]
             assert facade.read_runs[0]["run_mode"] == "new"  # type: ignore[attr-defined]
             assert facade.read_runs[0]["max_read_kb"] == 64  # type: ignore[attr-defined]
             assert facade.read_runs[1]["run_mode"] == "resume"  # type: ignore[attr-defined]
@@ -576,6 +697,85 @@ def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmark
             assert "Creative KB Benchmark" in rendered
             assert "artifact_dir" in rendered
             assert "artifact saved" not in rendered
+
+    _run(scenario())
+
+
+def test_textual_cli_benchmark_failures_show_recovery_and_keep_prompt_editable(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            harness = TuiSmokeHarness(app, pilot)
+
+            rendered = await harness.submit_command("/benchmark unknown-target")
+            assert "你 · /benchmark unknown-target" in rendered
+            assert "错误 · MVP smoke benchmark遇到问题：未知 benchmark 目标：unknown-target" in rendered
+            assert "恢复建议" in rendered
+            await harness.assert_prompt_editable()
+
+            rendered = await harness.submit_command("/benchmark --case-count nope")
+            assert "你 · /benchmark --case-count nope" in rendered
+            assert "错误 · 未知 /benchmark 参数：--case-count" in rendered
+            assert "/benchmark longzu-32kb" in rendered
+            await harness.assert_prompt_editable()
+
+            rendered = await harness.submit_command("/creative-kb-benchmark longzu-32kb")
+            assert "你 · /creative-kb-benchmark longzu-32kb" in rendered
+            assert "错误 · 请显式选择模型模式" in rendered
+            assert "--dry-run-model" in rendered
+            await harness.assert_prompt_editable()
+
+            facade = app.session.facade
+            facade.fail_next(  # type: ignore[attr-defined]
+                "creative_kb_benchmark",
+                FileExistsError(f"产物写入失败：artifact_dir {tmp_path / 'not-a-directory'} 已存在且不是目录"),
+            )
+            rendered = await harness.submit_command(
+                f"/creative-kb-benchmark longzu-32kb --dry-run-model --artifact-dir {tmp_path / 'not-a-directory'}"
+            )
+            assert "产物写入失败" in rendered
+            assert "恢复建议" in rendered
+            await harness.assert_prompt_editable()
+
+            facade.fail_next("creative_kb_benchmark", RuntimeError("Reviewer 失败：无法解析评分 JSON"))  # type: ignore[attr-defined]
+            rendered = await harness.submit_command("/creative-kb-benchmark longzu-32kb --dry-run-model")
+            assert "Reviewer 失败" in rendered
+            assert "恢复建议" in rendered
+            await harness.assert_prompt_editable()
+
+    _run(scenario())
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(900)
+def test_real_llm_cli_tui_benchmark_smoke_is_explicitly_gated() -> None:
+    if not os.getenv("NOVEL_AGENT_RUN_REAL_CLI_TUI_SMOKE"):
+        pytest.skip("set NOVEL_AGENT_RUN_REAL_CLI_TUI_SMOKE=1 to run the real LLM CLI TUI smoke")
+
+    async def scenario() -> None:
+        repo_root = Path.cwd()
+        session = TuiApp(repo_root=repo_root, config=TuiSessionConfig(project="Couple", book_id="real-smoke"))
+        app = TextualNovelAgentApp(repo_root=repo_root, session=session)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            harness = TuiSmokeHarness(app, pilot)
+            await harness.submit_command("/benchmark longzu-32kb --real", wait_pauses=900)
+            rendered = harness.rendered(limit=160)
+            has_reviewer_decision = any(token in rendered for token in ("pass", "fail", "borderline"))
+            if not all(fragment in rendered for fragment in ("Reviewer", "产物目录", "综合 Reviewer")) or not has_reviewer_decision:
+                runs_dir = repo_root / "runs" / "benchmarks"
+                recent = sorted(runs_dir.glob("*"), key=lambda path: path.stat().st_mtime)[-3:] if runs_dir.exists() else []
+                pytest.fail(
+                    "真实 CLI TUI smoke 没有回流完整 Reviewer 摘要。\n"
+                    f"最近产物：{[str(path) for path in recent]}\n"
+                    "恢复建议：检查 DEEPSEEK_API_KEY、最近 runs/benchmarks 产物和 TUI 消息流错误。\n"
+                    f"消息流：\n{rendered}"
+                )
 
     _run(scenario())
 

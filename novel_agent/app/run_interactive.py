@@ -1415,6 +1415,7 @@ def _run_pipeline(
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
     include_reasoning_content: bool = True,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, object]:
     should_stop = should_stop or (lambda: False)
     remaining_read_chars = _kb_to_chars(max_read_kb)
@@ -1428,6 +1429,8 @@ def _run_pipeline(
     progress_snapshot = _load_progress_snapshot(db_path=db_path, book_id=book_id)
 
     def print_prompt_progress(event: dict[str, Any]) -> None:
+        if progress_callback is not None:
+            progress_callback(event)
         print(json.dumps({"prompt_timing": event}, ensure_ascii=False))
 
     while True:

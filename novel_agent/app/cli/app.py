@@ -173,6 +173,7 @@ class TuiApp:
             "source_path": None,
             "sample_path": None,
             "db_path": None,
+            "use_real_model": True,
         }
         index = 0
         while index < len(args):
@@ -200,6 +201,10 @@ class TuiApp:
                 options["db_path"] = Path(token.split("=", 1)[1]).expanduser()
                 index += 1
                 continue
+            if token in {"--real", "--use-real-model"}:
+                options["use_real_model"] = True
+                index += 1
+                continue
             if token.startswith("--"):
                 return f"未知 /benchmark 参数：{token}"
             if options["target"]:
@@ -215,6 +220,7 @@ class TuiApp:
             source_path=options["source_path"],  # type: ignore[arg-type]
             sample_path=options["sample_path"],  # type: ignore[arg-type]
             db_path=options["db_path"],  # type: ignore[arg-type]
+            use_real_model=bool(options["use_real_model"]),
         )
         return str(payload.get("summary_text") or payload.get("reviewer_summary") or payload)
 
@@ -243,8 +249,9 @@ class TuiApp:
             "artifact_dir": None,
             "case_count": 3,
             "enable_writer_ab": False,
-            "use_real_model": True,
+            "use_real_model": False,
             "dry_run_model": False,
+            "model_mode_explicit": False,
         }
         index = 0
         explicit_target = False
@@ -274,6 +281,13 @@ class TuiApp:
             if token == "--dry-run-model":
                 options["use_real_model"] = False
                 options["dry_run_model"] = True
+                options["model_mode_explicit"] = True
+                index += 1
+                continue
+            if token in {"--real", "--use-real-model"}:
+                options["use_real_model"] = True
+                options["dry_run_model"] = False
+                options["model_mode_explicit"] = True
                 index += 1
                 continue
             if token.startswith("--source="):
@@ -304,6 +318,8 @@ class TuiApp:
             index += 1
         if explicit_target and options["source_path"] is not None:
             return {"error": "benchmark 目标与 --source 只能选择一种。"}
+        if not options["model_mode_explicit"]:
+            return {"error": "请显式选择模型模式：真实运行使用 --use-real-model，本地形状检查使用 --dry-run-model。"}
         return options
 
     @staticmethod
@@ -333,8 +349,7 @@ class TuiApp:
         return parsed if parsed >= 0 else None
 
     def ingest_facade_events(self) -> None:
-        self.messages.extend(self.event_stream.events())
-        self.event_stream.clear()
+        self.messages.extend(self.event_stream.drain())
 
     def render(self, *, width: int | None = None) -> str:
         width = width or self.config.width
