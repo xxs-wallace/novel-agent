@@ -62,6 +62,8 @@ class RunEventStream:
             message = self._close_read_message(event)
         elif stage == "creative_kb":
             message = "正在构建 Creative KB"
+        elif stage == "creative_kb_benchmark":
+            message = self._creative_kb_benchmark_message(event)
         else:
             message = "后台任务正在运行"
         if not message:
@@ -112,6 +114,59 @@ class RunEventStream:
         if "creative_kb" in payload:
             return {"stage": "creative_kb", **dict(payload.get("creative_kb") or {})}
         return None
+
+    @staticmethod
+    def _creative_kb_benchmark_message(event: Mapping[str, Any]) -> str:
+        phase = str(event.get("phase") or "")
+        if phase == "benchmark_start":
+            return "Creative KB Benchmark 准备开始"
+        if phase == "windows_start":
+            return "正在切分 benchmark prefix 与 reference windows"
+        if phase == "windows_ready":
+            return (
+                "benchmark windows 已就绪："
+                f"prefix={event.get('prefix_segment_count', '?')}，"
+                f"references={event.get('reference_segment_count', '?')}"
+            )
+        if phase == "documents_start":
+            return "正在写入 benchmark prefix documents"
+        if phase == "documents_ready":
+            return f"已写入 {event.get('document_count', '?')} 个 prefix documents"
+        if phase == "creative_kb_build_start":
+            return "正在构建 benchmark Creative KB"
+        if phase == "creative_kb_build_done":
+            return (
+                "Creative KB 构建完成："
+                f"cards={event.get('built_fragment_count', '?')}，"
+                f"clusters={event.get('built_cluster_count', '?')}"
+            )
+        if phase == "kb_quality_review_start":
+            return "正在运行建卡与聚类质量 Reviewer"
+        if phase == "kb_quality_review_done":
+            return f"建卡质量 Reviewer 完成：{event.get('decision', 'pending')} / {event.get('score', 0)}"
+        if phase == "cases_start":
+            return "正在构造 SceneBrief benchmark cases"
+        if phase == "cases_ready":
+            return f"已构造 {event.get('case_count', '?')} 个 benchmark cases"
+        if phase == "retrieval_case_start":
+            return (
+                "正在评测检索与 rerank "
+                f"{event.get('case_id', '')} ({event.get('case_index', '?')}/{event.get('case_count', '?')})"
+            )
+        if phase == "retrieval_case_done":
+            return (
+                "检索 case 完成："
+                f"{event.get('case_id', '')}，{event.get('decision', 'pending')} / {event.get('score', 0)}"
+            )
+        if phase == "retrieval_review_done":
+            return f"检索与 rerank 汇总完成：{event.get('decision', 'pending')} / {event.get('score', 0)}"
+        if phase == "writer_ab_start":
+            return "正在运行 Writer A/B 诊断"
+        if phase == "writer_ab_done":
+            return f"Writer A/B 完成：{event.get('status', 'pending')}，winner={event.get('winner', 'pending')}"
+        if phase == "summary_written":
+            return "Creative KB Benchmark summary 已写入"
+        return "Creative KB Benchmark 正在运行"
 
     @staticmethod
     def _close_read_message(event: Mapping[str, Any]) -> str:

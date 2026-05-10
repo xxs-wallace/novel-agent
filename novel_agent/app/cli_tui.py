@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import sys
+
 from .bootstrap import resolve_repo_root
 
 
-def main() -> int:
+CREATIVE_KB_BENCHMARK_COMMANDS = {"creative-kb-benchmark", "creative-kb-bench", "kb-benchmark"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in CREATIVE_KB_BENCHMARK_COMMANDS:
+        from .run_creative_kb_benchmark import main as run_creative_kb_benchmark
+
+        return run_creative_kb_benchmark(argv[1:])
+
     try:
         from .cli.textual_app import TextualNovelAgentApp
     except ModuleNotFoundError as exc:

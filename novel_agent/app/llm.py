@@ -6,9 +6,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, cast
 import time
 
-from smolagents.cli import load_model
-from smolagents.models import ChatMessage, MessageRole, OpenAIModel
-
 from .bootstrap import read_api_key
 from .utils.json_utils import extract_json_blob
 
@@ -63,6 +60,8 @@ class JsonModelClient:
     def _build_model(self, settings: ModelSettings | None = None):
         settings = settings or self.settings
         if settings.model_type == "OpenAIModel":
+            from smolagents.models import OpenAIModel
+
             extra_body = {"thinking": {"type": settings.thinking}} if settings.thinking else None
             return OpenAIModel(
                 model_id=settings.model_name,
@@ -79,6 +78,8 @@ class JsonModelClient:
                 extra_body=extra_body,
                 include_reasoning_content=settings.include_reasoning_content,
             )
+        from smolagents.cli import load_model
+
         return load_model(
             model_type=settings.model_type,
             model_id=settings.model_name,
@@ -94,7 +95,9 @@ class JsonModelClient:
             return fallback_text
         if self.model is None:
             raise RuntimeError("Model client is not initialized")
-        messages: list[ChatMessage | dict[str, Any]] = [
+        from smolagents.models import ChatMessage, MessageRole
+
+        messages: list[Any | dict[str, Any]] = [
             ChatMessage(role=MessageRole.SYSTEM, content=system_prompt),
             ChatMessage(role=MessageRole.USER, content=user_prompt),
         ]
@@ -150,7 +153,7 @@ class JsonModelClient:
         self,
         *,
         model: Any,
-        messages: list[ChatMessage | dict[str, Any]],
+        messages: list[Any | dict[str, Any]],
         attempts: int,
         backoff: float,
         prompt_chars: int,

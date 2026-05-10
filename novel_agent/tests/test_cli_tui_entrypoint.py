@@ -4,6 +4,8 @@ from pathlib import Path
 
 import tomllib
 
+from novel_agent.app import cli_tui
+
 
 def test_novel_agent_project_script_points_to_textual_entrypoint() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
@@ -33,3 +35,18 @@ def test_cli_design_declares_textual_as_formal_tui() -> None:
     assert "novel-agent" in design
     assert "正式 TUI 框架选型为 Textual" in design
     assert "`run_interactive.py` 中的 `_prompt_text()`" in design
+
+
+def test_cli_tui_dispatches_creative_kb_benchmark_subcommand(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, object] = {}
+
+    def _fake_main(argv):  # type: ignore[no-untyped-def]
+        captured["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr("novel_agent.app.run_creative_kb_benchmark.main", _fake_main)
+
+    exit_code = cli_tui.main(["creative-kb-benchmark", "--dry-run-model", "--run-id", "kb-run"])
+
+    assert exit_code == 0
+    assert captured["argv"] == ["--dry-run-model", "--run-id", "kb-run"]

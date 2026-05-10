@@ -19,6 +19,15 @@ from .creative_kb_schema import (
     SceneBrief,
     StyleFeatures,
 )
+from .creative_kb_benchmark_schema import (
+    CreativeKBBenchmarkInput,
+    CreativeKBBenchmarkResult,
+    KBClusterReviewReport,
+    KBFragmentCardReviewReport,
+    KBRetrievalReviewReport,
+    KBWriterABReport,
+    KBBenchmarkCase,
+)
 from .orchestration_schema import (
     ChapterLengthBudget,
     ChapterLengthPlan,
@@ -58,9 +67,16 @@ __all__ = [
     "CharacterProfileContextItem",
     "ContextAssemblyPayload",
     "CoarseRetrievalResult",
+    "CreativeKBBenchmarkInput",
+    "CreativeKBBenchmarkResult",
     "CreativeKBRetrievalInput",
     "FragmentCard",
     "FragmentCluster",
+    "KBClusterReviewReport",
+    "KBFragmentCardReviewReport",
+    "KBRetrievalReviewReport",
+    "KBWriterABReport",
+    "KBBenchmarkCase",
     "MemoryAssemblyBudget",
     "MemoryAssemblyInput",
     "ParagraphBenchmarkIssue",

@@ -15,6 +15,11 @@ from ..repos.creative_kb_storage import init_creative_kb_schema
 from ..repos.db import NovelAgentDB
 from ..services.paragraph_benchmark_service import ParagraphBenchmarkService
 from ..services.smoke_benchmark_service import AgenticSmokeBenchmarkService
+from ..runner.creative_kb_benchmark_runner import (
+    CreativeKBBenchmarkRunConfig,
+    CreativeKBBenchmarkRunner,
+    CreativeKBBenchmarkSummaryPresenter,
+)
 from .events import RunEventStream
 
 
@@ -559,6 +564,73 @@ class WorkflowFacade:
         )
         self.event_stream.emit("系统", "端到端 Agentic smoke benchmark 已完成", payload=payload)
         return payload
+
+    def run_creative_kb_benchmark(
+        self,
+        *,
+        target: str = "longzu-32kb",
+        source_path: Path | None = None,
+        run_id: str | None = None,
+        artifact_dir: Path | None = None,
+        case_count: int = 3,
+        enable_writer_ab: bool = False,
+        use_real_model: bool = True,
+        dry_run_model: bool = False,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        self.event_stream.emit(
+            "系统",
+            "开始运行 Creative KB Benchmark",
+            payload={
+                "target": target,
+                "source_path": str(source_path or ""),
+                "run_id": run_id or "",
+                "artifact_dir": str(artifact_dir or ""),
+                "case_count": case_count,
+                "enable_writer_ab": enable_writer_ab,
+                "dry_run_model": dry_run_model,
+            },
+        )
+        fixture = self._creative_kb_fixture_from_target(target)
+        if source_path is not None:
+            fixture = None
+        runner = CreativeKBBenchmarkRunner(
+            repo_root=self.repo_root,
+            progress_callback=self.event_stream.progress_callback,
+        )
+        result = runner.run(
+            CreativeKBBenchmarkRunConfig(
+                source_path=source_path,
+                fixture=fixture,
+                run_id=run_id,
+                artifact_dir=artifact_dir,
+                case_count=case_count,
+                enable_writer_ab=enable_writer_ab,
+                use_real_model=use_real_model,
+                dry_run_model=dry_run_model,
+                api_key=api_key,
+                api_key_env="DEEPSEEK_API_KEY",
+            )
+        )
+        presenter = CreativeKBBenchmarkSummaryPresenter()
+        payload = result.to_dict()
+        payload["summary_text"] = presenter.to_text(result)
+        payload["summary"] = str(result.retrieval_review_summary.get("summary") or "")
+        payload["decision"] = str(result.retrieval_review_summary.get("decision") or "pending")
+        payload["score"] = float(result.retrieval_review_summary.get("score") or 0.0)
+        payload["run_dir"] = result.artifact_dir
+        self.event_stream.emit("系统", "Creative KB Benchmark 已完成", payload=payload)
+        return payload
+
+    @staticmethod
+    def _creative_kb_fixture_from_target(target: str) -> str:
+        normalized = str(target or "longzu-32kb").strip()
+        return {
+            "longzu-32kb": "longzu_32kb",
+            "longzu_32kb": "longzu_32kb",
+            "longzu-96kb": "longzu_96kb",
+            "longzu_96kb": "longzu_96kb",
+        }.get(normalized, normalized)
 
     @staticmethod
     def _count(conn: sqlite3.Connection, table: str, *, book_id: str | None = None) -> int:

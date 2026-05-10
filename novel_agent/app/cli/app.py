@@ -105,6 +105,8 @@ class TuiApp:
             return self._dispatch_close_read_query(invocation.args)
         if invocation.handler_name == "run_smoke_benchmark":
             return self._dispatch_smoke_benchmark(invocation.args)
+        if invocation.handler_name == "run_creative_kb_benchmark":
+            return self._dispatch_creative_kb_benchmark(invocation.args)
         if invocation.handler_name == "show_command_palette":
             return self.command_router.render_panel(context)
         if invocation.handler_name == "show_help":
@@ -215,6 +217,94 @@ class TuiApp:
             db_path=options["db_path"],  # type: ignore[arg-type]
         )
         return str(payload.get("summary_text") or payload.get("reviewer_summary") or payload)
+
+    def _dispatch_creative_kb_benchmark(self, args: tuple[str, ...]) -> str:
+        options = self._parse_creative_kb_benchmark_options(args)
+        error = options.get("error")
+        if error:
+            return str(error)
+        payload = self.facade.run_creative_kb_benchmark(
+            target=str(options["target"]),
+            source_path=options["source_path"],  # type: ignore[arg-type]
+            run_id=options["run_id"],  # type: ignore[arg-type]
+            artifact_dir=options["artifact_dir"],  # type: ignore[arg-type]
+            case_count=int(options["case_count"]),
+            enable_writer_ab=bool(options["enable_writer_ab"]),
+            use_real_model=bool(options["use_real_model"]),
+            dry_run_model=bool(options["dry_run_model"]),
+        )
+        return str(payload.get("summary_text") or payload.get("summary") or payload)
+
+    def _parse_creative_kb_benchmark_options(self, args: tuple[str, ...]) -> dict[str, object]:
+        options: dict[str, object] = {
+            "target": "longzu-32kb",
+            "source_path": None,
+            "run_id": None,
+            "artifact_dir": None,
+            "case_count": 3,
+            "enable_writer_ab": False,
+            "use_real_model": True,
+            "dry_run_model": False,
+        }
+        index = 0
+        explicit_target = False
+        while index < len(args):
+            token = args[index]
+            if token in {"--source", "--run-id", "--artifact-dir", "--case-count"}:
+                if index + 1 >= len(args):
+                    return {"error": f"{token} 需要一个值。"}
+                value = args[index + 1]
+                if token == "--source":
+                    options["source_path"] = Path(value).expanduser()
+                elif token == "--run-id":
+                    options["run_id"] = value
+                elif token == "--artifact-dir":
+                    options["artifact_dir"] = Path(value).expanduser()
+                else:
+                    parsed = self._parse_positive_int(value)
+                    if parsed is None:
+                        return {"error": "--case-count 需要一个正整数。"}
+                    options["case_count"] = parsed
+                index += 2
+                continue
+            if token in {"--writer-ab", "--enable-writer-ab"}:
+                options["enable_writer_ab"] = True
+                index += 1
+                continue
+            if token == "--dry-run-model":
+                options["use_real_model"] = False
+                options["dry_run_model"] = True
+                index += 1
+                continue
+            if token.startswith("--source="):
+                options["source_path"] = Path(token.split("=", 1)[1]).expanduser()
+                index += 1
+                continue
+            if token.startswith("--run-id="):
+                options["run_id"] = token.split("=", 1)[1]
+                index += 1
+                continue
+            if token.startswith("--artifact-dir="):
+                options["artifact_dir"] = Path(token.split("=", 1)[1]).expanduser()
+                index += 1
+                continue
+            if token.startswith("--case-count="):
+                parsed = self._parse_positive_int(token.split("=", 1)[1])
+                if parsed is None:
+                    return {"error": "--case-count 需要一个正整数。"}
+                options["case_count"] = parsed
+                index += 1
+                continue
+            if token.startswith("--"):
+                return {"error": f"未知 /creative-kb-benchmark 参数：{token}"}
+            if explicit_target:
+                return {"error": "只能提供一个 Creative KB benchmark 目标。"}
+            options["target"] = token
+            explicit_target = True
+            index += 1
+        if explicit_target and options["source_path"] is not None:
+            return {"error": "benchmark 目标与 --source 只能选择一种。"}
+        return options
 
     @staticmethod
     def _parse_summary_selector(args: tuple[str, ...]) -> dict[str, object]:

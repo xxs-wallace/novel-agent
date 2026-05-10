@@ -124,6 +124,13 @@ class CommandRouter:
                 "run_smoke_benchmark",
                 aliases=("bench", "smoke-benchmark"),
             ),
+            CommandSpec(
+                "creative-kb-benchmark",
+                "运行 Creative KB Benchmark：/creative-kb-benchmark longzu-32kb [--writer-ab]",
+                "debug",
+                "run_creative_kb_benchmark",
+                aliases=("kb-benchmark", "creative-kb-bench"),
+            ),
             CommandSpec("writer", "开始或恢复 Writer 分层生成", "Writer", "start_writer"),
             CommandSpec("resume", "恢复最近一次未完成流程", "Writer", "resume"),
             CommandSpec(

@@ -209,6 +209,8 @@ def test_command_router_supports_slash_commands_palette_and_context_filtering() 
     assert router.parse("/reset-close-read", context).handler_name == "reset_close_read"
     assert router.parse("/query summary", context).handler_name == "query_close_read"
     assert router.parse("/benchmark longzu-32kb", context).handler_name == "run_smoke_benchmark"
+    assert router.parse("/creative-kb-benchmark longzu-32kb", context).handler_name == "run_creative_kb_benchmark"
+    assert router.parse("/kb-benchmark --writer-ab", context).handler_name == "run_creative_kb_benchmark"
     assert router.parse("/benchmark --source novel_agent/tests/longzu_32kb.txt", context).args == (
         "--source",
         "novel_agent/tests/longzu_32kb.txt",
@@ -217,6 +219,7 @@ def test_command_router_supports_slash_commands_palette_and_context_filtering() 
     assert router.parse("\x10", context).handler_name == "show_command_palette"
     assert "/close-read  运行精读；用法 /close-read [source_path] [--batches N]" in router.render_panel(context)
     assert "/benchmark  运行端到端 Agentic benchmark" in router.render_panel(context)
+    assert "/creative-kb-benchmark  运行 Creative KB Benchmark" in router.render_panel(context)
     assert "默认 1 batch/约 20000 字预算" in router.render_panel(context)
     panel = router.command_panel(context)
     assert "Writer" in panel
@@ -297,6 +300,22 @@ def test_tui_app_benchmark_command_renders_reviewer_summary(tmp_path: Path) -> N
 
     assert "Reviewer：中文结论" in rendered
     assert "产物目录" in rendered
+
+
+def test_tui_app_creative_kb_benchmark_command_renders_summary(tmp_path: Path) -> None:
+    class _FacadeWithCreativeKBBenchmark:
+        def run_creative_kb_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["target"] == "longzu-32kb"
+            assert kwargs["enable_writer_ab"] is True
+            assert kwargs["dry_run_model"] is True
+            return {"summary_text": "Creative KB Benchmark\n建卡质量：pass / 0.72\nartifact_dir：/tmp/kb"}
+
+    app = TuiApp(repo_root=tmp_path, facade=_FacadeWithCreativeKBBenchmark())  # type: ignore[arg-type]
+
+    rendered = app.dispatch_command("/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model")
+
+    assert "Creative KB Benchmark" in rendered
+    assert "artifact_dir" in rendered
 
 
 def test_workflow_facade_scoped_revision_boundary_payload_is_thin(tmp_path: Path) -> None:

@@ -289,6 +289,23 @@ class WorkbenchScreen(Screen[None]):
                 use_real_model=bool(options["use_real_model"]),
             )
             return
+        if invocation.handler_name == "run_creative_kb_benchmark":
+            options = self._parse_creative_kb_benchmark_options(invocation.args)
+            if "error" in options:
+                self._append_message("错误", str(options["error"]))
+                self._append_message("恢复建议", self._creative_kb_benchmark_usage())
+                return
+            self.start_creative_kb_benchmark_worker(
+                target=str(options["target"]),
+                source_path=options["source_path"],  # type: ignore[arg-type]
+                run_id=options["run_id"],  # type: ignore[arg-type]
+                artifact_dir=options["artifact_dir"],  # type: ignore[arg-type]
+                case_count=int(options["case_count"]),
+                enable_writer_ab=bool(options["enable_writer_ab"]),
+                use_real_model=bool(options["use_real_model"]),
+                dry_run_model=bool(options["dry_run_model"]),
+            )
+            return
         if invocation.handler_name in {"start_writer", "resume"}:
             self.start_writer_worker()
             return
@@ -463,6 +480,81 @@ class WorkbenchScreen(Screen[None]):
     def _benchmark_usage() -> str:
         return "/benchmark longzu-32kb | /benchmark --source novel_agent/tests/longzu_32kb.txt"
 
+    def _parse_creative_kb_benchmark_options(self, args: tuple[str, ...]) -> dict[str, object]:
+        options: dict[str, object] = {
+            "target": "longzu-32kb",
+            "source_path": None,
+            "run_id": None,
+            "artifact_dir": None,
+            "case_count": 3,
+            "enable_writer_ab": False,
+            "use_real_model": True,
+            "dry_run_model": False,
+        }
+        index = 0
+        explicit_target = False
+        while index < len(args):
+            token = args[index]
+            if token in {"--source", "--run-id", "--artifact-dir", "--case-count"}:
+                if index + 1 >= len(args):
+                    return {"error": f"{token} 需要一个值。"}
+                value = args[index + 1]
+                if token == "--source":
+                    options["source_path"] = Path(value).expanduser()
+                elif token == "--run-id":
+                    options["run_id"] = value
+                elif token == "--artifact-dir":
+                    options["artifact_dir"] = Path(value).expanduser()
+                else:
+                    parsed = self._parse_positive_int(value)
+                    if parsed is None:
+                        return {"error": "--case-count 需要一个正整数。"}
+                    options["case_count"] = parsed
+                index += 2
+                continue
+            if token in {"--writer-ab", "--enable-writer-ab"}:
+                options["enable_writer_ab"] = True
+                index += 1
+                continue
+            if token == "--dry-run-model":
+                options["use_real_model"] = False
+                options["dry_run_model"] = True
+                index += 1
+                continue
+            if token.startswith("--source="):
+                options["source_path"] = Path(token.split("=", 1)[1]).expanduser()
+                index += 1
+                continue
+            if token.startswith("--run-id="):
+                options["run_id"] = token.split("=", 1)[1]
+                index += 1
+                continue
+            if token.startswith("--artifact-dir="):
+                options["artifact_dir"] = Path(token.split("=", 1)[1]).expanduser()
+                index += 1
+                continue
+            if token.startswith("--case-count="):
+                parsed = self._parse_positive_int(token.split("=", 1)[1])
+                if parsed is None:
+                    return {"error": "--case-count 需要一个正整数。"}
+                options["case_count"] = parsed
+                index += 1
+                continue
+            if token.startswith("--"):
+                return {"error": f"未知 /creative-kb-benchmark 参数：{token}"}
+            if explicit_target:
+                return {"error": "只能提供一个 Creative KB benchmark 目标。"}
+            options["target"] = token
+            explicit_target = True
+            index += 1
+        if explicit_target and options["source_path"] is not None:
+            return {"error": "benchmark 目标与 --source 只能选择一种。"}
+        return options
+
+    @staticmethod
+    def _creative_kb_benchmark_usage() -> str:
+        return "/creative-kb-benchmark longzu-32kb [--writer-ab] 或 /creative-kb-benchmark --source ./novel.txt"
+
     def _read_int_option(self, args: tuple[str, ...], index: int, token: str) -> tuple[int | None, int]:
         if index + 1 >= len(args):
             return None, index + 1
@@ -507,6 +599,33 @@ class WorkbenchScreen(Screen[None]):
                 sample_path=sample_path,
                 db_path=db_path,
                 use_real_model=use_real_model,
+                api_key=os.getenv("DEEPSEEK_API_KEY", "unused"),
+            ),
+        )
+
+    def start_creative_kb_benchmark_worker(
+        self,
+        *,
+        target: str,
+        source_path: Path | None,
+        run_id: str | None,
+        artifact_dir: Path | None,
+        case_count: int,
+        enable_writer_ab: bool,
+        use_real_model: bool,
+        dry_run_model: bool,
+    ) -> None:
+        self._start_worker(
+            "Creative KB Benchmark",
+            lambda: self.session.facade.run_creative_kb_benchmark(
+                target=target,
+                source_path=source_path,
+                run_id=run_id,
+                artifact_dir=artifact_dir,
+                case_count=case_count,
+                enable_writer_ab=enable_writer_ab,
+                use_real_model=use_real_model,
+                dry_run_model=dry_run_model,
                 api_key=os.getenv("DEEPSEEK_API_KEY", "unused"),
             ),
         )
@@ -718,6 +837,9 @@ class WorkbenchScreen(Screen[None]):
             return
         checkpoint = result.get("checkpoint")
         status = str(result.get("status") or "")
+        if result.get("summary_text"):
+            self._append_message("Reviewer", str(result["summary_text"]))
+            return
         if "decision" in result and "score" in result:
             self._append_message(
                 "Reviewer",
