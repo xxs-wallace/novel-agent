@@ -10,6 +10,10 @@ class ChapterContextItem:
     chapter_title: str
     summary_md: str
     importance_score: int = 0
+    summary_status: str = "provisional"
+    summary_evidence_window: str = ""
+    summary_target_range: str = ""
+    structure_status: str = "provisional"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -37,6 +41,9 @@ class SourceArcContextItem:
     start_document_title_index: int
     end_document_title_index: int
     source_arc_role: str
+    status: str = "committed"
+    evidence_window: str = ""
+    target_range: str = ""
     core_events: list[str] = field(default_factory=list)
     transition_from_previous: str = ""
     setup_for_next: str = ""
@@ -53,6 +60,7 @@ class ContextAssemblyPayload:
     world_summary_md: str = ""
     character_profiles: list[CharacterProfileContextItem] = field(default_factory=list)
     story_outline_md: str = ""
+    memory_status: dict[str, str] = field(default_factory=dict)
     missing_context: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,5 +70,6 @@ class ContextAssemblyPayload:
             "world_summary_md": self.world_summary_md,
             "character_profiles": [item.to_dict() for item in self.character_profiles],
             "story_outline_md": self.story_outline_md,
+            "memory_status": dict(self.memory_status),
             "missing_context": list(self.missing_context),
         }

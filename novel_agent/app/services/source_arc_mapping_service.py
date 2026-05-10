@@ -180,6 +180,7 @@ class SourceArcMappingService:
                     f"- plot_summary_units: {len(source_arc_map.plot_summary_units)}",
                 ]
             )
+        lines.append(f"- structural_status: {source_arc_map.structural_status}")
         for arc in source_arc_map.arcs:
             lines.extend(
                 [
@@ -188,6 +189,9 @@ class SourceArcMappingService:
                     "",
                     f"- range: {arc.start_document_title_index}-{arc.end_document_title_index}",
                     f"- role: {arc.source_arc_role}",
+                    f"- role_status: {arc.role_status}",
+                    f"- evidence_window: {arc.evidence_window or f'{arc.start_document_title_index}-{arc.end_document_title_index}'}",
+                    f"- target_range: {arc.target_range or f'{arc.start_document_title_index}-{arc.end_document_title_index}'}",
                     f"- transition_from_previous: {arc.transition_from_previous or 'N/A'}",
                     f"- setup_for_next: {arc.setup_for_next or 'N/A'}",
                     f"- pacing_notes: {arc.pacing_notes}",
@@ -225,6 +229,8 @@ class SourceArcMappingService:
                     chapter_title=f"压缩单元 {unit.start_document_title_index}-{unit.end_document_title_index}",
                     role=self._infer_role(unit.unit_summary),
                     reason=self._role_reason(unit.unit_summary),
+                    evidence_window=f"{unit.start_document_title_index}-{unit.end_document_title_index}",
+                    target_range=f"{unit.start_document_title_index}-{unit.end_document_title_index}",
                     source_doc_ids=list(unit.source_doc_ids),
                 )
                 for unit in units
@@ -235,6 +241,8 @@ class SourceArcMappingService:
                 chapter_title=item.chapter_title,
                 role=self._infer_role(self._summary_text(item)),
                 reason=self._role_reason(self._summary_text(item)),
+                evidence_window=f"{item.document_title_index}-{item.document_title_index}",
+                target_range=f"{item.document_title_index}-{item.document_title_index}",
                 source_doc_ids=list(item.source_doc_ids),
             )
             for item in summaries
@@ -276,6 +284,8 @@ class SourceArcMappingService:
                     start_document_title_index=start_index,
                     end_document_title_index=end_index,
                     source_arc_role=role,
+                    evidence_window=f"{start_index}-{end_index}",
+                    target_range=f"{start_index}-{end_index}",
                     core_events=core_events,
                     main_character_threads=self._character_threads(group, character_names=character_names),
                     world_or_rule_reveals=self._world_reveals(group),
@@ -370,6 +380,17 @@ class SourceArcMappingService:
             start_document_title_index=start_index,
             end_document_title_index=end_index,
             source_arc_role=role,
+            role_status=self._payload_text(payload, "role_status", fallback_arc.role_status if fallback_arc else "committed"),
+            evidence_window=self._payload_text(
+                payload,
+                "evidence_window",
+                fallback_arc.evidence_window if fallback_arc else f"{start_index}-{end_index}",
+            ),
+            target_range=self._payload_text(
+                payload,
+                "target_range",
+                fallback_arc.target_range if fallback_arc else f"{start_index}-{end_index}",
+            ),
             core_events=self._payload_str_list(payload, "core_events", fallback_arc.core_events if fallback_arc else []),
             main_character_threads=self._payload_str_list(
                 payload,
@@ -419,6 +440,17 @@ class SourceArcMappingService:
                     chapter_title=self._payload_text(item, "chapter_title", fallback.chapter_title if fallback else ""),
                     role=self._payload_text(item, "role", fallback.role if fallback else "主线推进"),
                     reason=self._payload_text(item, "reason", fallback.reason if fallback else ""),
+                    role_status=self._payload_text(item, "role_status", fallback.role_status if fallback else "committed"),
+                    evidence_window=self._payload_text(
+                        item,
+                        "evidence_window",
+                        fallback.evidence_window if fallback else f"{title_index}-{title_index}",
+                    ),
+                    target_range=self._payload_text(
+                        item,
+                        "target_range",
+                        fallback.target_range if fallback else f"{title_index}-{title_index}",
+                    ),
                     source_doc_ids=self._payload_int_list(item, "source_doc_ids", fallback.source_doc_ids if fallback else []),
                     narrative_function_summary=self._payload_text(
                         item,
@@ -653,6 +685,9 @@ def _compact_arc_context(arc: dict[str, Any]) -> dict[str, Any]:
         "start_document_title_index": int(arc.get("start_document_title_index") or 0),
         "end_document_title_index": int(arc.get("end_document_title_index") or 0),
         "source_arc_role": str(arc.get("source_arc_role") or ""),
+        "status": str(arc.get("role_status") or arc.get("structural_status") or "committed"),
+        "evidence_window": str(arc.get("evidence_window") or ""),
+        "target_range": str(arc.get("target_range") or ""),
         "core_events": [safe_excerpt(str(item), limit=160) for item in _list_items(arc.get("core_events"))[:4]],
         "transition_from_previous": safe_excerpt(str(arc.get("transition_from_previous") or ""), limit=160),
         "setup_for_next": safe_excerpt(str(arc.get("setup_for_next") or ""), limit=160),

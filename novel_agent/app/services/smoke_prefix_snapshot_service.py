@@ -237,12 +237,18 @@ class SmokePrefixSnapshotService:
                     "summary_intermediate": list(json.loads(row["summary_intermediate_json"] or "[]")),
                     "summary_md": str(row["summary_md"] or ""),
                     "summary_short": str(row["summary_short"] or ""),
+                    "summary_status": _row_text(row, "summary_status", "provisional"),
+                    "summary_evidence_window": _row_text(row, "summary_evidence_window"),
+                    "summary_target_range": _row_text(row, "summary_target_range"),
                     "importance_score": int(row["importance_score"] or 0),
                     "importance_reason": row["importance_reason"],
                     "related_chapters": related_chapters,
                     "mentioned_characters": list(json.loads(row["mentioned_characters_json"] or "[]")),
                     "world_update": json.loads(row["world_update_json"] or "{}"),
                     "outline_update": json.loads(row["outline_update_json"] or "{}"),
+                    "outline_status": _row_text(row, "outline_status", "provisional"),
+                    "outline_evidence_window": _row_text(row, "outline_evidence_window"),
+                    "outline_target_range": _row_text(row, "outline_target_range"),
                     "close_read_run_id": str(row["close_read_run_id"] or ""),
                     "created_at": str(row["created_at"] or _utc_now()),
                     "updated_at": str(row["updated_at"] or _utc_now()),
@@ -485,3 +491,11 @@ class SmokePrefixSnapshotService:
             fragment_card_builder_service=builder,
             fragment_cards_repo=fragment_cards_repo,
         )
+
+
+def _row_text(row, column: str, default: str = "") -> str:
+    try:
+        value = row[column]
+    except (IndexError, KeyError):
+        return default
+    return str(value or default).strip()

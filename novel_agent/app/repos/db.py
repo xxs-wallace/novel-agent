@@ -65,12 +65,18 @@ class NovelAgentDB:
                 summary_intermediate_json TEXT NOT NULL DEFAULT '[]',
                 summary_md TEXT NOT NULL DEFAULT '',
                 summary_short TEXT,
+                summary_status TEXT NOT NULL DEFAULT 'provisional',
+                summary_evidence_window TEXT NOT NULL DEFAULT '',
+                summary_target_range TEXT NOT NULL DEFAULT '',
                 importance_score INTEGER NOT NULL DEFAULT 0,
                 importance_reason TEXT,
                 related_chapters_json TEXT NOT NULL DEFAULT '[]',
                 mentioned_characters_json TEXT NOT NULL DEFAULT '[]',
                 world_update_json TEXT NOT NULL DEFAULT '{}',
                 outline_update_json TEXT NOT NULL DEFAULT '{}',
+                outline_status TEXT NOT NULL DEFAULT 'provisional',
+                outline_evidence_window TEXT NOT NULL DEFAULT '',
+                outline_target_range TEXT NOT NULL DEFAULT '',
                 close_read_run_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -78,6 +84,7 @@ class NovelAgentDB:
             )
             '''
         )
+        self._ensure_chapters_columns(conn)
         conn.execute(
             '''
             CREATE TABLE IF NOT EXISTS character_profiles (
@@ -163,6 +170,20 @@ class NovelAgentDB:
             conn.execute("ALTER TABLE book_assets ADD COLUMN toc_markdown TEXT NOT NULL DEFAULT ''")
         if "toc_source_path" not in columns:
             conn.execute("ALTER TABLE book_assets ADD COLUMN toc_source_path TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_chapters_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(chapters)").fetchall()}
+        additions = {
+            "summary_status": "TEXT NOT NULL DEFAULT 'provisional'",
+            "summary_evidence_window": "TEXT NOT NULL DEFAULT ''",
+            "summary_target_range": "TEXT NOT NULL DEFAULT ''",
+            "outline_status": "TEXT NOT NULL DEFAULT 'provisional'",
+            "outline_evidence_window": "TEXT NOT NULL DEFAULT ''",
+            "outline_target_range": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, ddl in additions.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE chapters ADD COLUMN {column} {ddl}")
 
     def _ensure_character_profiles_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(character_profiles)").fetchall()}

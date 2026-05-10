@@ -76,7 +76,7 @@ class ContextAssemblyService:
 
         source_arc_context = self._assemble_source_arc_context(assembly_input=assembly_input)
 
-        world_summary_md, story_outline_md, asset_missing = self._assemble_book_assets(
+        world_summary_md, story_outline_md, story_outline_status, asset_missing = self._assemble_book_assets(
             conn,
             assembly_input=assembly_input,
         )
@@ -95,6 +95,11 @@ class ContextAssemblyService:
             world_summary_md=world_summary_md,
             character_profiles=character_profiles,
             story_outline_md=story_outline_md,
+            memory_status={
+                "chapter_context": self._combined_status([item.summary_status for item in chapter_context]),
+                "story_outline": story_outline_status,
+                "source_arc_context": self._combined_status([item.status for item in source_arc_context]),
+            },
             missing_context=self._dedupe(missing_context),
         )
 
@@ -135,6 +140,10 @@ class ContextAssemblyService:
                 chapter_title=str(row["chapter_title"]),
                 summary_md=summary_fit.text,
                 importance_score=int(row["importance_score"] or 0),
+                summary_status=self._row_status(row, "summary_status"),
+                summary_evidence_window=self._row_text(row, "summary_evidence_window"),
+                summary_target_range=self._row_text(row, "summary_target_range"),
+                structure_status=self._row_status(row, "summary_status"),
             )
             selected_items.append(item)
             selected_rows.append(row)
@@ -188,6 +197,9 @@ class ContextAssemblyService:
                 start_document_title_index=int(item.get("start_document_title_index") or 0),
                 end_document_title_index=int(item.get("end_document_title_index") or 0),
                 source_arc_role=str(item.get("source_arc_role") or ""),
+                status=str(item.get("status") or "committed"),
+                evidence_window=str(item.get("evidence_window") or ""),
+                target_range=str(item.get("target_range") or ""),
                 core_events=[str(event) for event in item.get("core_events", []) if str(event).strip()],
                 transition_from_previous=str(item.get("transition_from_previous") or ""),
                 setup_for_next=str(item.get("setup_for_next") or ""),
@@ -201,7 +213,7 @@ class ContextAssemblyService:
         conn: sqlite3.Connection,
         *,
         assembly_input: MemoryAssemblyInput,
-    ) -> tuple[str, str, list[str]]:
+    ) -> tuple[str, str, str, list[str]]:
         resolved_assets = self.memory_asset_adapter.resolve(conn, book_id=assembly_input.book_id)
         missing_context = list(resolved_assets.missing_context)
 
@@ -209,12 +221,13 @@ class ContextAssemblyService:
             resolved_assets.world_summary_path,
             max_chars=assembly_input.token_budget.world_summary_chars,
         )
-        story_outline_fit = self._read_clamped_text(
-            resolved_assets.story_outline_path,
+        story_outline_md, story_outline_status, story_outline_truncated = self._assemble_story_outline(
+            conn,
+            book_id=assembly_input.book_id,
+            fallback_path=resolved_assets.story_outline_path,
             max_chars=assembly_input.token_budget.story_outline_chars,
         )
         world_summary_md = world_summary_fit.text
-        story_outline_md = story_outline_fit.text
 
         if not world_summary_md.strip():
             missing_context.append("world_summary_md.empty")
@@ -223,10 +236,44 @@ class ContextAssemblyService:
 
         if not story_outline_md.strip():
             missing_context.append("story_outline_md.empty")
-        elif story_outline_fit.truncated:
+        elif story_outline_truncated:
             missing_context.append("story_outline_md.truncated")
 
-        return world_summary_md, story_outline_md, missing_context
+        return world_summary_md, story_outline_md, story_outline_status, missing_context
+
+    def _assemble_story_outline(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        fallback_path: Path,
+        max_chars: int,
+    ) -> tuple[str, str, bool]:
+        if max_chars <= 0:
+            return "", "provisional", False
+        rows = self.chapters_repo.list_by_book(conn, book_id=book_id)
+        outline_rows: list[tuple[str, str]] = []
+        for row in rows:
+            outline_update = self._load_json_dict(row["outline_update_json"])
+            chapter_line = str(outline_update.get("chapter_line") or "").strip()
+            if not chapter_line:
+                continue
+            status = self._row_status(row, "outline_status")
+            evidence_window = self._row_text(row, "outline_evidence_window")
+            target_range = self._row_text(row, "outline_target_range")
+            metadata = f"status={status}"
+            if evidence_window:
+                metadata += f"; evidence_window={evidence_window}"
+            if target_range:
+                metadata += f"; target_range={target_range}"
+            outline_rows.append((f"- {chapter_line} ({metadata})", status))
+        if outline_rows:
+            statuses = [status for _, status in outline_rows]
+            markdown = "# 故事大纲\n\n## 分章节进度\n" + "\n".join(line for line, _ in outline_rows)
+            fit = fit_text_with_budget(text=markdown, remaining_chars=max_chars)
+            return fit.text, self._combined_status(statuses), fit.truncated
+        fit = self._read_clamped_text(fallback_path, max_chars=max_chars)
+        return fit.text, "provisional" if fit.text.strip() else "provisional", fit.truncated
 
     def _assemble_character_profiles(
         self,
@@ -320,6 +367,37 @@ class ContextAssemblyService:
         if not isinstance(value, list):
             return []
         return [str(item).strip() for item in value if str(item).strip()]
+
+    def _load_json_dict(self, raw_value: object) -> dict[str, object]:
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            return {}
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _row_status(self, row: sqlite3.Row, column: str) -> str:
+        text = self._row_text(row, column, default="provisional")
+        return text if text in {"provisional", "committed"} else "provisional"
+
+    def _row_text(self, row: sqlite3.Row, column: str, default: str = "") -> str:
+        try:
+            value = row[column]
+        except (IndexError, KeyError):
+            return default
+        return str(value or default).strip()
+
+    def _combined_status(self, statuses: list[str]) -> str:
+        cleaned = [status if status in {"provisional", "committed"} else "provisional" for status in statuses]
+        if not cleaned:
+            return "provisional"
+        unique = set(cleaned)
+        if unique == {"committed"}:
+            return "committed"
+        if unique == {"provisional"}:
+            return "provisional"
+        return "mixed"
 
     def _recent_activity_summary(self, row: sqlite3.Row) -> str:
         try:

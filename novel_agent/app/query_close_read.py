@@ -178,8 +178,14 @@ def _chapter_row_to_dict(row) -> dict[str, Any]:
         "source_total_chars": int(row["source_total_chars"] or 0),
         "summary_short": str(row["summary_short"] or ""),
         "summary_md": str(row["summary_md"] or ""),
+        "summary_status": _row_text(row, "summary_status", "provisional"),
+        "summary_evidence_window": _row_text(row, "summary_evidence_window"),
+        "summary_target_range": _row_text(row, "summary_target_range"),
         "importance_score": int(row["importance_score"] or 0),
         "importance_reason": str(row["importance_reason"] or ""),
+        "outline_status": _row_text(row, "outline_status", "provisional"),
+        "outline_evidence_window": _row_text(row, "outline_evidence_window"),
+        "outline_target_range": _row_text(row, "outline_target_range"),
     }
 
 
@@ -423,6 +429,14 @@ def _format_source_arc_markdown(payload: dict[str, Any]) -> str:
             lines.extend(["", "### Core Events"])
             lines.extend(f"- {item}" for item in core_events)
     return "\n".join(lines).rstrip()
+
+
+def _row_text(row, column: str, default: str = "") -> str:
+    try:
+        value = row[column]
+    except (IndexError, KeyError):
+        return default
+    return str(value or default).strip()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -63,6 +63,9 @@ class SourceArcChapterRole:
     chapter_title: str
     role: str
     reason: str
+    role_status: str = "committed"
+    evidence_window: str = ""
+    target_range: str = ""
     source_doc_ids: list[int] = field(default_factory=list)
     source_total_chars: int = 0
     structure_signals: dict[str, Any] = field(default_factory=dict)
@@ -81,6 +84,9 @@ class SourceArc:
     start_document_title_index: int
     end_document_title_index: int
     source_arc_role: str
+    role_status: str = "committed"
+    evidence_window: str = ""
+    target_range: str = ""
     core_events: list[str] = field(default_factory=list)
     main_character_threads: list[str] = field(default_factory=list)
     world_or_rule_reveals: list[str] = field(default_factory=list)
@@ -104,6 +110,7 @@ class SourceArcMap:
     source_summary_count: int
     used_compression: bool
     compression: PlotSummaryCompressionResult
+    structural_status: str = "committed"
     arcs: list[SourceArc] = field(default_factory=list)
     plot_summary_units: list[PlotSummaryUnit] = field(default_factory=list)
 
@@ -114,6 +121,7 @@ class SourceArcMap:
             "source_summary_count": self.source_summary_count,
             "used_compression": self.used_compression,
             "compression": self.compression.to_dict(),
+            "structural_status": self.structural_status,
             "plot_summary_units": [unit.to_dict() for unit in self.plot_summary_units],
             "arcs": [arc.to_dict() for arc in self.arcs],
         }
