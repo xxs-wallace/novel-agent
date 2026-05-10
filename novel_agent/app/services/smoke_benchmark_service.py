@@ -606,6 +606,7 @@ class AgenticSmokeBenchmarkService:
         prefix_min_chars: int = 4_000,
         recent_window_size: int = 3,
         reference_min_chars: int = 2_700,
+        sequence_chapter_count: int = 1,
         benchmark_cache_dir: Path | None = None,
         reuse_modeling_cache: bool = False,
         rebuild_modeling_cache: bool = False,
@@ -623,6 +624,7 @@ class AgenticSmokeBenchmarkService:
             prefix_min_chars=prefix_min_chars,
             recent_window_size=recent_window_size,
             reference_min_chars=reference_min_chars,
+            sequence_chapter_count=sequence_chapter_count,
             benchmark_cache_dir=benchmark_cache_dir,
             reuse_modeling_cache=reuse_modeling_cache,
             rebuild_modeling_cache=rebuild_modeling_cache,
@@ -643,6 +645,7 @@ class AgenticSmokeBenchmarkService:
         prefix_min_chars: int = 4_000,
         recent_window_size: int = 3,
         reference_min_chars: int = 2_700,
+        sequence_chapter_count: int = 1,
         benchmark_cache_dir: Path | None = None,
         reuse_modeling_cache: bool = False,
         rebuild_modeling_cache: bool = False,
@@ -865,6 +868,7 @@ class AgenticSmokeBenchmarkService:
 
         book_id = modeling_artifacts.book_id
         db_path = modeling_artifacts.db_path
+        reference_close_read = modeling_artifacts.reference_context
         reference_synopsis = modeling_artifacts.reference_synopsis
         story_context = modeling_artifacts.story_context
         story_outline = modeling_artifacts.story_outline
@@ -888,6 +892,26 @@ class AgenticSmokeBenchmarkService:
             reasoning_effort=None,
             include_reasoning_content=False,
         )
+        normalized_sequence_count = max(1, int(sequence_chapter_count))
+        if normalized_sequence_count > 1:
+            return self._run_sequence_benchmark(
+                run_interactive=run_interactive,
+                db=db,
+                workflow=workflow,
+                run_id=run_id,
+                run_dir=run_dir,
+                book_id=book_id,
+                db_path=db_path,
+                writer_db_path=writer_db_path,
+                resolved_source=resolved_source,
+                prefix_source_path=prefix_source_path,
+                reference_truth_path=reference_truth_path,
+                reference_truth=reference_truth,
+                reference_context=reference_close_read,
+                story_outline=story_outline,
+                sequence_chapter_count=normalized_sequence_count,
+                api_key=api_key,
+            )
         with db.connect() as conn:
             db.init_schema(conn)
             init_creative_kb_schema(conn)
@@ -1118,8 +1142,489 @@ class AgenticSmokeBenchmarkService:
         summary_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return result
 
+    def _run_sequence_benchmark(
+        self,
+        *,
+        run_interactive: Any,
+        db: Any,
+        workflow: Any,
+        run_id: str,
+        run_dir: Path,
+        book_id: str,
+        db_path: Path,
+        writer_db_path: Path,
+        resolved_source: Path,
+        prefix_source_path: Path,
+        reference_truth_path: Path,
+        reference_truth: str,
+        reference_context: dict[str, object],
+        story_outline: dict[str, object],
+        sequence_chapter_count: int,
+        api_key: str,
+    ) -> AgenticSmokeBenchmarkResult:
+        reviewer_config = RunConfig(
+            prompt=None,
+            model_type="OpenAIModel",
+            model_id=run_interactive.DEFAULT_WRITER_MODEL_NAME,
+            provider=None,
+            api_base="https://api.deepseek.com",
+            api_key=api_key,
+            thinking="disabled",
+            reasoning_effort=None,
+            save_reasoning=False,
+            action_type="tool_calling",
+            tools=[],
+            imports=[],
+            verbosity_level=1,
+            dry_run=False,
+        )
+        generation_service = ContinuationGenerationService()
+        sequence_dir = run_dir / "sequence"
+        sequence_dir.mkdir(parents=True, exist_ok=True)
+        reference_groups = self._split_reference_context_for_sequence(
+            reference_context=reference_context,
+            sequence_chapter_count=sequence_chapter_count,
+        )
+        reference_texts = self._split_reference_truth_by_weights(
+            reference_truth=reference_truth,
+            weights=[
+                self._reference_context_source_chars(group) for group in reference_groups
+            ],
+        )
+
+        chapter_summaries: list[dict[str, object]] = []
+        generated_synopses: list[dict[str, object]] = []
+        reference_synopses: list[dict[str, object]] = []
+        synopsis_reports: list[dict[str, object]] = []
+        expansion_reports: list[dict[str, object]] = []
+        draft_parts: list[str] = []
+        writer_results: list[dict[str, object]] = []
+
+        with db.connect() as conn:
+            db.init_schema(conn)
+            init_creative_kb_schema(conn)
+            for index, step_reference_context in enumerate(reference_groups, start=1):
+                step_dir = sequence_dir / f"chapter_{index:02d}"
+                step_dir.mkdir(parents=True, exist_ok=True)
+                step_run_id = f"{run_id}_chapter_{index:02d}"
+                step_reference_text = reference_texts[index - 1] if index - 1 < len(reference_texts) else ""
+                step_source_chars = len(step_reference_text.strip()) or self._reference_context_source_chars(
+                    step_reference_context
+                )
+                step_reference_synopsis = self._build_reference_synopsis_from_close_read(
+                    reference_context=step_reference_context,
+                    source_chars=step_source_chars,
+                )
+                step_reference_synopsis_path = step_dir / "reference_story_synopsis.json"
+                step_reference_synopsis_path.write_text(
+                    json.dumps(step_reference_synopsis, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                reference_synopses.append(step_reference_synopsis)
+
+                step_story_context = self._load_story_context(db_path=writer_db_path, book_id=book_id)
+                step_story_outline = self._build_story_outline_from_close_read(
+                    story_context=step_story_context,
+                    reference_context=step_reference_context,
+                    target_chars=step_source_chars,
+                    prefer_story_outline_node=False,
+                )
+                step_story_outline_path = step_dir / "benchmark_story_outline.json"
+                step_story_outline_path.write_text(
+                    json.dumps(step_story_outline, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                step_writer_planning_input = self._build_benchmark_writer_planning_input(
+                    story_outline=step_story_outline,
+                    story_context=step_story_context,
+                    target_chars=step_source_chars,
+                )
+                (step_dir / "writer_planning_input.json").write_text(
+                    json.dumps(step_writer_planning_input, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                writer_result = run_interactive.run_writer_guided_flow(
+                    workflow=workflow,
+                    conn=conn,
+                    run_id=step_run_id,
+                    book_id=book_id,
+                    product_mode="auto_novel",
+                    intent_payload=dict(step_writer_planning_input["intent_payload"]),
+                    user_world_notes=str(step_writer_planning_input["user_world_notes"]),
+                    target_chapter_count=1,
+                    chapter_count=1,
+                    default_target_chars=step_source_chars,
+                    allow_incomplete_modeling=False,
+                    confirm_review=lambda _stage, _artifact_path: True,
+                    accept_chapter_review=lambda _artifact_path: "accepted",
+                    execute_chapter=False,
+                )
+                writer_results.append(run_interactive.redact_writer_result_for_terminal(writer_result))
+                step_writer_run_dir = run_dir / "writer_runs" / step_run_id
+                execution_input_path = step_writer_run_dir / "chapter_execution_input.json"
+                if not execution_input_path.exists():
+                    raise FileNotFoundError(
+                        f"writer synopsis input not found after benchmark run: {execution_input_path}"
+                    )
+                execution_data = self._unwrap_run_data(
+                    json.loads(execution_input_path.read_text(encoding="utf-8"))
+                )
+                generated_synopsis = self._build_writer_generated_synopsis(
+                    execution_data=execution_data,
+                    writer_run_dir=step_writer_run_dir,
+                    fallback_target_chars=step_source_chars,
+                )
+                generated_synopsis_path = step_dir / "generated_story_synopsis.json"
+                generated_synopsis_path.write_text(
+                    json.dumps(generated_synopsis, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                generated_synopses.append(generated_synopsis)
+
+                synopsis_review_prompt = self._build_synopsis_review_prompt(
+                    story_outline=step_story_outline,
+                    recent_story_synopses=step_story_context["recent_story_synopses"],
+                    character_docs=step_story_context["character_docs"],
+                    generated_synopsis=generated_synopsis,
+                    reference_synopsis=step_reference_synopsis,
+                )
+                (step_dir / "synopsis_reviewer_prompt.json").write_text(
+                    json.dumps(synopsis_review_prompt, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                synopsis_report = self._generate_json_with_model(
+                    generation_service=generation_service,
+                    generation_config=reviewer_config,
+                    prompt_payload=synopsis_review_prompt,
+                )
+                (step_dir / "synopsis_reviewer_report.json").write_text(
+                    json.dumps(synopsis_report, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                synopsis_reports.append(synopsis_report)
+
+                expansion_execution_input = self._build_reference_synopsis_execution_input(
+                    base_execution_data=execution_data,
+                    reference_synopsis=step_reference_synopsis,
+                    story_outline=step_story_outline,
+                    story_context=step_story_context,
+                    target_chars=step_source_chars,
+                )
+                expansion_dir = step_dir / "expansion"
+                expansion_dir.mkdir(parents=True, exist_ok=True)
+                expansion_execution_input_path = expansion_dir / "writer_execution_input.json"
+                expansion_execution_input_path.write_text(
+                    json.dumps(expansion_execution_input, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                draft_prompt = workflow.executor.build_draft_prompt(expansion_execution_input)
+                workflow.run_writer.write_json(step_run_id, "chapter_execution_input.json", expansion_execution_input)
+                workflow.run_writer.write_json(
+                    step_run_id,
+                    "chapter_brief.json",
+                    dict(expansion_execution_input.get("chapter_brief") or {}),
+                )
+                workflow.run_writer.write_json(
+                    step_run_id,
+                    "chapter_length_budget.json",
+                    dict(expansion_execution_input.get("length_budget") or {}),
+                )
+                workflow.executor.confirm_freeze_d(run_id=step_run_id)
+                execution_result = workflow.execute_current_chapter(
+                    conn,
+                    run_id=step_run_id,
+                    book_id=book_id,
+                    product_mode="auto_novel",
+                )
+                draft_path = step_writer_run_dir / "draft.md"
+                generated_text = draft_path.read_text(encoding="utf-8", errors="replace").strip()
+                (expansion_dir / "draft.md").write_text(generated_text + "\n", encoding="utf-8")
+                expansion_prompt = {
+                    "source": "writer_execution_freeze_d",
+                    "note": (
+                        "The benchmark wraps close-read reference_story_synopsis into a Writer execution input, "
+                        "overrides Freeze D, and executes Writer's official execute_current_chapter path."
+                    ),
+                    "writer_run_dir": str(step_writer_run_dir),
+                    "writer_execution_input_path": str(expansion_execution_input_path),
+                    "reference_story_synopsis_path": str(step_reference_synopsis_path),
+                    "benchmark_draft_path": str(expansion_dir / "draft.md"),
+                    "generation_prompt": draft_prompt,
+                    "execution_result": run_interactive.redact_writer_result_for_terminal(execution_result),
+                }
+                (expansion_dir / "prompt.json").write_text(
+                    json.dumps(expansion_prompt, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if bool(execution_result.get("canon_ready")):
+                    run_interactive._write_writer_review_decision_status(  # noqa: SLF001
+                        workflow=workflow,
+                        run_id=step_run_id,
+                        status="accepted",
+                    )
+                    workflow.continue_after_chapter_acceptance(run_id=step_run_id)
+                    writeback_result = workflow.approve_writeback(conn, run_id=step_run_id, book_id=book_id)
+                else:
+                    writeback_result = {
+                        "status": "skipped",
+                        "reason": "continuity_report_not_canon_ready",
+                    }
+                (step_dir / "writeback_result.json").write_text(
+                    json.dumps(writeback_result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
+                expansion_review_prompt = self._build_expansion_review_prompt(
+                    reference_synopsis=step_reference_synopsis,
+                    reference_truth=step_reference_text,
+                    generated_text=generated_text,
+                )
+                (step_dir / "expansion_reviewer_prompt.json").write_text(
+                    json.dumps(expansion_review_prompt, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                expansion_report = self._generate_json_with_model(
+                    generation_service=generation_service,
+                    generation_config=reviewer_config,
+                    prompt_payload=expansion_review_prompt,
+                )
+                (step_dir / "expansion_reviewer_report.json").write_text(
+                    json.dumps(expansion_report, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                expansion_reports.append(expansion_report)
+                draft_parts.append(generated_text)
+                chapter_summaries.append(
+                    {
+                        "chapter_index": index,
+                        "run_id": step_run_id,
+                        "writer_run_dir": str(step_writer_run_dir),
+                        "draft_path": str(expansion_dir / "draft.md"),
+                        "generated_chars": len(generated_text),
+                        "reference_truth_chars": len(step_reference_text.strip()),
+                        "synopsis_decision": self._report_decision(synopsis_report),
+                        "synopsis_score": self._report_score(synopsis_report),
+                        "synopsis_summary": self._report_summary(synopsis_report),
+                        "expansion_decision": self._report_decision(expansion_report),
+                        "expansion_score": self._report_score(expansion_report),
+                        "expansion_summary": self._report_summary(expansion_report),
+                        "writeback_committed": bool(
+                            isinstance(writeback_result, dict)
+                            and writeback_result.get("canon_ready")
+                        ),
+                    }
+                )
+                conn.commit()
+
+        combined_draft_path = sequence_dir / "draft.md"
+        combined_text = "\n\n".join(part for part in draft_parts if part).strip()
+        combined_draft_path.write_text(combined_text + "\n", encoding="utf-8")
+        generated_synopsis_path = sequence_dir / "generated_story_synopses.json"
+        generated_synopsis_path.write_text(
+            json.dumps(generated_synopses, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        reference_synopsis_path = sequence_dir / "reference_story_synopses.json"
+        reference_synopsis_path.write_text(
+            json.dumps(reference_synopses, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        writer_results_path = sequence_dir / "writer_results.json"
+        writer_results_path.write_text(
+            json.dumps(writer_results, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        synopsis_reviewer_report_path = sequence_dir / "synopsis_reviewer_report.json"
+        synopsis_reviewer_report_path.write_text(
+            json.dumps(
+                {
+                    "decision": self._combined_layer_decision(synopsis_reports),
+                    "score": self._average_report_score(synopsis_reports),
+                    "summary": " / ".join(self._report_summary(report) for report in synopsis_reports),
+                    "chapters": synopsis_reports,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        expansion_reviewer_report_path = sequence_dir / "expansion_reviewer_report.json"
+        expansion_reviewer_report_path.write_text(
+            json.dumps(
+                {
+                    "decision": self._combined_layer_decision(expansion_reports),
+                    "score": self._average_report_score(expansion_reports),
+                    "summary": " / ".join(self._report_summary(report) for report in expansion_reports),
+                    "chapters": expansion_reports,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        reviewer_report_path = run_dir / "reviewer_report.json"
+        combined_reviewer_report = {
+            "decision": self._combined_sequence_decision(synopsis_reports, expansion_reports),
+            "score": round(
+                (self._average_report_score(synopsis_reports) + self._average_report_score(expansion_reports)) / 2,
+                4,
+            ),
+            "summary": (
+                f"连续 {sequence_chapter_count} 章；"
+                f"梗概层均分 {self._average_report_score(synopsis_reports):.2f}，"
+                f"扩写层均分 {self._average_report_score(expansion_reports):.2f}。"
+            ),
+            "sequence_chapter_count": sequence_chapter_count,
+            "chapters": chapter_summaries,
+            "layers": {
+                "synopsis": json.loads(synopsis_reviewer_report_path.read_text(encoding="utf-8")),
+                "expansion": json.loads(expansion_reviewer_report_path.read_text(encoding="utf-8")),
+            },
+            "generated_chars": len(combined_text),
+            "reference_truth_chars": len(reference_truth.strip()),
+        }
+        reviewer_report_path.write_text(
+            json.dumps(combined_reviewer_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        summary_path = run_dir / "summary.json"
+        result = AgenticSmokeBenchmarkResult(
+            run_id=run_id,
+            run_dir=str(run_dir),
+            book_id=book_id,
+            source_path=str(resolved_source),
+            prefix_source_path=str(prefix_source_path),
+            db_path=str(db_path),
+            writer_run_dir=str(run_dir / "writer_runs"),
+            draft_path=str(combined_draft_path),
+            reference_truth_path=str(reference_truth_path),
+            generated_synopsis_path=str(generated_synopsis_path),
+            reference_synopsis_path=str(reference_synopsis_path),
+            synopsis_reviewer_report_path=str(synopsis_reviewer_report_path),
+            expansion_prompt_path=str(sequence_dir),
+            expansion_reviewer_report_path=str(expansion_reviewer_report_path),
+            reviewer_report_path=str(reviewer_report_path),
+            summary_path=str(summary_path),
+            generated_chars=len(combined_text),
+            reference_truth_chars=len(reference_truth.strip()),
+            synopsis_decision=self._combined_layer_decision(synopsis_reports),
+            synopsis_score=self._average_report_score(synopsis_reports),
+            synopsis_summary=" / ".join(self._report_summary(report) for report in synopsis_reports),
+            expansion_decision=self._combined_layer_decision(expansion_reports),
+            expansion_score=self._average_report_score(expansion_reports),
+            expansion_summary=" / ".join(self._report_summary(report) for report in expansion_reports),
+            reviewer_decision=str(combined_reviewer_report["decision"]),
+            reviewer_score=float(combined_reviewer_report["score"]),
+            reviewer_summary=str(combined_reviewer_report["summary"]),
+        )
+        summary_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+    def _combined_layer_decision(self, reports: list[dict[str, object]]) -> str:
+        decisions = {self._report_decision(report) for report in reports}
+        if "fail" in decisions:
+            return "fail"
+        if "borderline" in decisions:
+            return "borderline"
+        return self._decision_for_score(self._average_report_score(reports))
+
+    def _combined_sequence_decision(
+        self,
+        synopsis_reports: list[dict[str, object]],
+        expansion_reports: list[dict[str, object]],
+    ) -> str:
+        return self._combined_layer_decision([*synopsis_reports, *expansion_reports])
+
+    def _average_report_score(self, reports: list[dict[str, object]]) -> float:
+        if not reports:
+            return 0.0
+        return round(sum(self._report_score(report) for report in reports) / len(reports), 4)
+
     def _default_modeling_cache_root(self, *, runs_dir: Path) -> Path:
         return runs_dir / "_modeling_cache"
+
+    def _split_reference_context_for_sequence(
+        self,
+        *,
+        reference_context: dict[str, object],
+        sequence_chapter_count: int,
+    ) -> list[dict[str, object]]:
+        summaries = [
+            item for item in reference_context.get("reference_chapter_summaries", [])
+            if isinstance(item, dict)
+        ]
+        count = max(1, int(sequence_chapter_count))
+        if len(summaries) < count:
+            raise ValueError(
+                f"reference close-read produced {len(summaries)} summaries; "
+                f"need at least {count} for sequence benchmark"
+            )
+        groups: list[list[dict[str, object]]] = [[] for _ in range(count)]
+        total_chars = sum(max(1, int(item.get("source_total_chars") or 1)) for item in summaries)
+        target_chars = max(1, total_chars // count)
+        group_index = 0
+        current_chars = 0
+        remaining_groups = count
+        for remaining_items, item in enumerate(summaries, start=1):
+            groups[group_index].append(item)
+            current_chars += max(1, int(item.get("source_total_chars") or 1))
+            items_left = len(summaries) - remaining_items
+            if (
+                group_index < count - 1
+                and current_chars >= target_chars
+                and items_left >= remaining_groups - 1
+            ):
+                group_index += 1
+                remaining_groups -= 1
+                current_chars = 0
+        story_outline_md = _normalize_text(reference_context.get("story_outline_md"))
+        character_docs = [
+            item for item in reference_context.get("reference_character_docs", [])
+            if isinstance(item, dict)
+        ]
+        return [
+            {
+                "reference_chapter_summaries": group,
+                "reference_character_docs": character_docs,
+                "story_outline_md": story_outline_md,
+            }
+            for group in groups
+        ]
+
+    def _reference_context_source_chars(self, reference_context: dict[str, object]) -> int:
+        summaries = [
+            item for item in reference_context.get("reference_chapter_summaries", [])
+            if isinstance(item, dict)
+        ]
+        return sum(max(0, int(item.get("source_total_chars") or 0)) for item in summaries)
+
+    def _split_reference_truth_by_weights(self, *, reference_truth: str, weights: list[int]) -> list[str]:
+        text = reference_truth.strip()
+        if not weights:
+            return [text]
+        total = sum(max(0, weight) for weight in weights)
+        if total <= 0:
+            chunk_size = max(1, len(text) // len(weights))
+            return [
+                text[index * chunk_size : (index + 1) * chunk_size].strip()
+                for index in range(len(weights) - 1)
+            ] + [text[(len(weights) - 1) * chunk_size :].strip()]
+        parts: list[str] = []
+        start = 0
+        consumed_weight = 0
+        for index, weight in enumerate(weights):
+            if index == len(weights) - 1:
+                parts.append(text[start:].strip())
+                break
+            consumed_weight += max(0, weight)
+            end = int(len(text) * consumed_weight / total)
+            newline = text.rfind("\n", start, max(start + 1, end))
+            if newline > start:
+                end = newline + 1
+            parts.append(text[start:end].strip())
+            start = end
+        return parts
 
     def _resolve_modeling_cache_dir(self, *, cache_root: Path | None, cache_key: str) -> Path | None:
         if cache_root is None:
@@ -1500,6 +2005,7 @@ class AgenticSmokeBenchmarkService:
         story_context: dict[str, object],
         reference_context: dict[str, object],
         target_chars: int,
+        prefer_story_outline_node: bool = True,
     ) -> dict[str, object]:
         reference_summaries = [
             item for item in reference_context.get("reference_chapter_summaries", [])
@@ -1516,9 +2022,11 @@ class AgenticSmokeBenchmarkService:
                 timeline.append({"order": order, "scope": "past", "summary": summary})
         character_names = self._character_names_from_context(story_context)
         story_outline_md = _normalize_text(reference_context.get("story_outline_md"))
-        target_summary = self._target_outline_node_from_story_outline(story_outline_md) or self._target_outline_summary(
-            reference_summaries
-        )
+        target_summary = (
+            self._target_outline_node_from_story_outline(story_outline_md)
+            if prefer_story_outline_node
+            else ""
+        ) or self._target_outline_summary(reference_summaries)
         timeline.append(
             {
                 "order": len(timeline) + 1,

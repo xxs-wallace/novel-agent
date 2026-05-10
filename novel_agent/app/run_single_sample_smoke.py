@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum held-out reference truth characters for agentic source mode",
     )
     parser.add_argument(
+        "--sequence-chapter-count",
+        type=int,
+        default=1,
+        help="Run a multi-chapter agentic smoke sequence with Writer writeback between chapters",
+    )
+    parser.add_argument(
         "--benchmark-cache-dir",
         type=str,
         default=None,
@@ -125,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             prefix_min_chars=args.prefix_min_chars,
             recent_window_size=args.recent_window_size,
             reference_min_chars=args.reference_min_chars,
+            sequence_chapter_count=args.sequence_chapter_count,
             benchmark_cache_dir=Path(args.benchmark_cache_dir) if args.benchmark_cache_dir else None,
             reuse_modeling_cache=bool(args.reuse_modeling_cache),
             rebuild_modeling_cache=bool(args.rebuild_modeling_cache),

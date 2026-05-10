@@ -29,6 +29,9 @@ class _TextualFakeFacade:
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
         self.calls: list[str] = []
+        self.read_runs: list[dict[str, object]] = []
+        self.benchmark_runs: list[dict[str, object]] = []
+        self.creative_kb_benchmark_runs: list[dict[str, object]] = []
         self.last_read_kwargs: dict[str, object] = {}
         self.scoped_revision_requests: list[dict[str, object]] = []
         self.scoped_revision_applies: list[dict[str, object]] = []
@@ -88,6 +91,7 @@ class _TextualFakeFacade:
     def start_read_pipeline(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("read")
         self.last_read_kwargs = dict(kwargs)
+        self.read_runs.append(dict(kwargs))
         return {
             "inserted_documents": 2,
             "segmentation_batches": 1,
@@ -148,6 +152,30 @@ class _TextualFakeFacade:
                 "current_stage": "batch_review",
                 "pending_checkpoint": {"stage": "batch_review", "artifact_path": str(artifact_path)},
             },
+        }
+
+    def run_smoke_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append("benchmark")
+        self.benchmark_runs.append(dict(kwargs))
+        return {
+            "summary_text": (
+                "梗概层 Reviewer：CLI 梗概链路通过 (pass, 0.80)\n"
+                "扩写层 Reviewer：CLI 正文链路通过 (pass, 0.82)\n"
+                "综合 Reviewer：CLI 端到端链路通过 (pass, 0.81)\n"
+                f"产物目录：{self.repo_root / 'runs' / 'benchmarks' / 'cli-smoke'}"
+            )
+        }
+
+    def run_creative_kb_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append("creative_kb_benchmark")
+        self.creative_kb_benchmark_runs.append(dict(kwargs))
+        return {
+            "summary_text": (
+                "Creative KB Benchmark\n"
+                "建卡质量：pass / 0.72\n"
+                "检索与 rerank：pass / 0.68\n"
+                f"artifact_dir：{self.repo_root / 'runs' / 'creative_kb_benchmarks' / 'cli-smoke'}"
+            )
         }
 
 
@@ -490,6 +518,64 @@ def test_textual_worker_e2e_read_kb_writer_minimal_path(tmp_path: Path) -> None:
             assert app.session.current_artifact.path.name == "batch_plan.json"
             assert "artifact saved" not in app.session.messages.render()
             assert "batch_review" not in app.session.messages.render()
+
+    _run(scenario())
+
+
+def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmarks(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("第一章\n雨夜旧案开始。\n第二章\n人物关系出现裂痕。", encoding="utf-8")
+
+        async def submit(command: str) -> None:
+            prompt = app.screen.query_one("#workbench-prompt", PromptInput)
+            prompt.value = command
+            prompt.query_one("#prompt-text", TextArea).focus()
+            await pilot.press("enter")
+            for _ in range(12):
+                await pilot.pause()
+                if not getattr(app.screen, "running_worker_name", ""):
+                    break
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+
+            await submit(f"/new-task smoke {source_path}")
+            await submit("/read")
+            await submit("/close-read --batches 2")
+            await submit("/query character 沈青")
+            await submit("/query summary total")
+            await submit("/benchmark longzu-32kb")
+            await submit("/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model")
+
+            rendered = app.session.messages.render(limit=80)
+            facade = app.session.facade
+            assert app.session.config.book_id == "smoke"
+            assert app.session.config.source_path == str(source_path)
+            assert facade.calls[:2] == ["read", "read"]  # type: ignore[attr-defined]
+            assert "query:smoke:character:沈青:None:None:all:markdown" in facade.calls  # type: ignore[attr-defined]
+            assert "query:smoke:summary::None:None:total:markdown" in facade.calls  # type: ignore[attr-defined]
+            assert facade.calls[-2:] == ["benchmark", "creative_kb_benchmark"]  # type: ignore[attr-defined]
+            assert facade.read_runs[0]["run_mode"] == "new"  # type: ignore[attr-defined]
+            assert facade.read_runs[0]["max_read_kb"] == 64  # type: ignore[attr-defined]
+            assert facade.read_runs[1]["run_mode"] == "resume"  # type: ignore[attr-defined]
+            assert facade.read_runs[1]["max_read_kb"] == 0  # type: ignore[attr-defined]
+            assert facade.read_runs[1]["max_close_batches"] == 2  # type: ignore[attr-defined]
+            assert facade.read_runs[1]["build_creative_kb"] is True  # type: ignore[attr-defined]
+            assert facade.benchmark_runs[-1]["target"] == "longzu-32kb"  # type: ignore[attr-defined]
+            assert facade.creative_kb_benchmark_runs[-1]["enable_writer_ab"] is True  # type: ignore[attr-defined]
+            assert facade.creative_kb_benchmark_runs[-1]["dry_run_model"] is True  # type: ignore[attr-defined]
+            assert "已创建并进入任务 smoke" in rendered
+            assert "粗读/精读本轮已完成" in rendered
+            assert "精读建模本轮已完成" in rendered
+            assert "# 人物档案：smoke" in rendered
+            assert "# 当前精读总览：smoke" in rendered
+            assert "综合 Reviewer：CLI 端到端链路通过" in rendered
+            assert "Creative KB Benchmark" in rendered
+            assert "artifact_dir" in rendered
+            assert "artifact saved" not in rendered
 
     _run(scenario())
 

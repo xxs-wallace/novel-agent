@@ -103,6 +103,47 @@ def test_agentic_benchmark_windows_can_select_later_120kb_reference_truth() -> N
     assert len(reference_truth) >= 10_000
 
 
+def test_sequence_reference_context_splits_close_read_summaries_in_order() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    groups = service._split_reference_context_for_sequence(
+        reference_context={
+            "story_outline_md": "# 大纲",
+            "reference_character_docs": [{"canonical_name": "主角"}],
+            "reference_chapter_summaries": [
+                {"document_title_index": 1, "summary_short": "一", "source_total_chars": 1000},
+                {"document_title_index": 2, "summary_short": "二", "source_total_chars": 1000},
+                {"document_title_index": 3, "summary_short": "三", "source_total_chars": 1000},
+                {"document_title_index": 4, "summary_short": "四", "source_total_chars": 1000},
+                {"document_title_index": 5, "summary_short": "五", "source_total_chars": 1000},
+                {"document_title_index": 6, "summary_short": "六", "source_total_chars": 1000},
+            ],
+        },
+        sequence_chapter_count=3,
+    )
+
+    assert len(groups) == 3
+    assert [item["document_title_index"] for item in groups[0]["reference_chapter_summaries"]] == [1, 2]  # type: ignore[index]
+    assert [item["document_title_index"] for item in groups[1]["reference_chapter_summaries"]] == [3, 4]  # type: ignore[index]
+    assert [item["document_title_index"] for item in groups[2]["reference_chapter_summaries"]] == [5, 6]  # type: ignore[index]
+
+
+def test_sequence_story_outline_uses_step_reference_summary() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    story_outline = service._build_story_outline_from_close_read(
+        story_context={"recent_story_synopses": [{"summary_short": "前情"}], "character_docs": []},
+        reference_context={
+            "story_outline_md": "# 大纲\n- [9] 全局最后节点，不应覆盖当前 step。",
+            "reference_chapter_summaries": [
+                {"summary_short": "当前 step 的 close-read 梗概。", "summary_md": ""}
+            ],
+        },
+        target_chars=1200,
+        prefer_story_outline_node=False,
+    )
+
+    assert story_outline["next_outline_node"] == "当前 step 的 close-read 梗概。"
+
+
 def test_agentic_benchmark_cache_key_tracks_source_window_and_pipeline_params() -> None:
     service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
     source_text = LONGZU_96KB_FIXTURE.read_text(encoding="utf-8")
