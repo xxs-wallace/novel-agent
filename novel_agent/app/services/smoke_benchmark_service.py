@@ -6,13 +6,13 @@ import re
 import shutil
 import sqlite3
 import uuid
-from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ...schemas import RunConfig
+from ..orchestrators.writer_execution import build_authorized_synopsis_execution_input
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.creative_kb_storage import init_creative_kb_schema
@@ -1556,8 +1556,13 @@ class AgenticSmokeBenchmarkService:
         ]
         count = max(1, int(sequence_chapter_count))
         if len(summaries) < count:
+            summaries = self._split_close_read_summary_for_sequence(
+                summaries=summaries,
+                sequence_chapter_count=count,
+            )
+        if len(summaries) < count:
             raise ValueError(
-                f"reference close-read produced {len(summaries)} summaries; "
+                f"reference close-read produced {len(summaries)} usable summary groups; "
                 f"need at least {count} for sequence benchmark"
             )
         groups: list[list[dict[str, object]]] = [[] for _ in range(count)]
@@ -1591,6 +1596,66 @@ class AgenticSmokeBenchmarkService:
             }
             for group in groups
         ]
+
+    def _split_close_read_summary_for_sequence(
+        self,
+        *,
+        summaries: list[dict[str, object]],
+        sequence_chapter_count: int,
+    ) -> list[dict[str, object]]:
+        if not summaries:
+            return []
+        if len(summaries) >= sequence_chapter_count:
+            return summaries
+        if len(summaries) != 1:
+            return summaries
+        source_summary = summaries[0]
+        summary_md = _normalize_text(source_summary.get("summary_md"))
+        event_chain = self._extract_markdown_section(summary_md, "剧情事件链")
+        beats = []
+        for line in event_chain.splitlines():
+            cleaned = re.sub(r"^\s*[-*]\s*", "", line).strip()
+            if cleaned:
+                beats.append(cleaned)
+        if len(beats) < sequence_chapter_count:
+            return summaries
+        source_chars = max(1, int(source_summary.get("source_total_chars") or 1))
+        groups: list[list[str]] = [[] for _ in range(sequence_chapter_count)]
+        for index, beat in enumerate(beats):
+            group_index = min(sequence_chapter_count - 1, int(index * sequence_chapter_count / len(beats)))
+            groups[group_index].append(beat)
+        base_title = _normalize_text(source_summary.get("chapter_title")) or "close-read reference"
+        character_section = self._extract_markdown_section(summary_md, "人物状态/关系变化")
+        setting_section = self._extract_markdown_section(summary_md, "关键信息/设定")
+        pacing_section = self._extract_markdown_section(summary_md, "结构功能/节奏")
+        split_summaries: list[dict[str, object]] = []
+        for index, group in enumerate(groups, start=1):
+            if not group:
+                continue
+            part_md = "\n\n".join(
+                section
+                for section in (
+                    "## 剧情事件链\n" + "\n".join(f"- {item}" for item in group),
+                    "## 人物状态/关系变化\n" + character_section if character_section else "",
+                    "## 关键信息/设定\n" + setting_section if setting_section else "",
+                    "## 结构功能/节奏\n" + pacing_section if pacing_section else "",
+                )
+                if section
+            )
+            split_summaries.append(
+                {
+                    **source_summary,
+                    "document_title_index": f"{source_summary.get('document_title_index', 1)}.{index}",
+                    "chapter_title": f"{base_title} / sequence part {index}",
+                    "summary_short": "；".join(group),
+                    "summary_md": part_md,
+                    "source_total_chars": max(1, int(source_chars / sequence_chapter_count)),
+                    "sequence_split_source": "close_read_event_chain",
+                    "sequence_split_part": index,
+                    "sequence_split_total": sequence_chapter_count,
+                }
+            )
+        return split_summaries
 
     def _reference_context_source_chars(self, reference_context: dict[str, object]) -> int:
         summaries = [
@@ -1694,7 +1759,9 @@ class AgenticSmokeBenchmarkService:
             return None
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(db_cache_path, db_path)
+        if not self._sqlite_table_has_rows(db_cache_path, table_name="documents"):
+            return None
+        self._copy_sqlite_database(source_path=db_cache_path, target_path=db_path)
         self._restore_cached_memory_files(cache_dir=cache_dir, manifest=manifest)
 
         for name in (
@@ -1759,7 +1826,7 @@ class AgenticSmokeBenchmarkService:
         if cache_dir.exists():
             shutil.rmtree(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(artifacts.db_path, cache_dir / "prefix.db")
+        self._copy_sqlite_database(source_path=artifacts.db_path, target_path=cache_dir / "prefix.db")
         run_dir = artifacts.reference_truth_path.parent
         for name in (
             "source_prefix.txt",
@@ -1825,6 +1892,37 @@ class AgenticSmokeBenchmarkService:
                 }
             )
         return memory_files
+
+    def _copy_sqlite_database(self, *, source_path: Path, target_path: Path) -> None:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if target_path.exists():
+            target_path.unlink()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{target_path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
+        with sqlite3.connect(str(source_path)) as source_conn:
+            with sqlite3.connect(str(target_path)) as target_conn:
+                source_conn.backup(target_conn)
+
+    def _sqlite_table_has_rows(self, path: Path, *, table_name: str) -> bool:
+        if not path.exists():
+            return False
+        conn = sqlite3.connect(path)
+        try:
+            row = conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                """,
+                (table_name,),
+            ).fetchone()
+            if row is None:
+                return False
+            count_row = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            return bool(count_row and int(count_row[0] or 0) > 0)
+        finally:
+            conn.close()
 
     def _restore_cached_memory_files(self, *, cache_dir: Path, manifest: dict[str, object]) -> None:
         for item in manifest.get("memory_files", []):
@@ -1988,12 +2086,18 @@ class AgenticSmokeBenchmarkService:
             )
             if section
         ).strip()
+        characters_used = [
+            _normalize_text(item.get("canonical_name"))
+            for item in reference_context.get("reference_character_docs", [])
+            if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
+        ]
         return {
             "source": "close_read_chapter_summary",
             "source_chars": int(source_chars),
             "combined_synopsis": combined_synopsis,
             "document_synopses": document_synopses,
             "plot_beats": plot_beats,
+            "characters_used": [name for name in dict.fromkeys(characters_used) if name],
             "tone_and_style": tone_and_style,
             "must_preserve": plot_beats,
             "must_avoid": ["不得新增 close-read 梗概未覆盖的大剧情。"],
@@ -2095,8 +2199,8 @@ class AgenticSmokeBenchmarkService:
         if recent_briefs:
             desired_actions.append("最近故事梗概：" + " / ".join(recent_briefs))
         avoidances = [
-            "不得把 Creative KB、世界观摘要或结构知识库中的抽象模式替换为新的剧情目标。",
-            "不得新增目标故事大纲节点之外的大型超自然事件、梦境线、机构远程监测或神秘物件。",
+            "不得让 Creative KB、世界观摘要或结构知识库中的抽象模式替换为新的剧情目标。",
+            "不得新增目标故事大纲节点之外的大型新事件、新势力、新规则或替代主线。",
             "不得使用 reference_story_synopsis、reference_truth 原文或 Reviewer 对照信息生成 ChapterBrief。",
         ]
         intent_payload = {
@@ -2133,91 +2237,14 @@ class AgenticSmokeBenchmarkService:
         story_context: dict[str, object],
         target_chars: int,
     ) -> dict[str, object]:
-        execution_input = deepcopy(base_execution_data)
-        chapter_id = _normalize_text(execution_input.get("chapter_id")) or "benchmark-expansion"
-        chapter_title = (
-            _normalize_text(story_outline.get("next_outline_node"))
-            or _normalize_text(execution_input.get("chapter_title"))
-            or "close-read 梗概扩写"
+        return build_authorized_synopsis_execution_input(
+            base_execution_data=base_execution_data,
+            authorized_synopsis=reference_synopsis,
+            story_outline=story_outline,
+            story_context=story_context,
+            target_chars=target_chars,
+            synopsis_source="close_read_reference_story_synopsis",
         )
-        source_chars = int(reference_synopsis.get("source_chars") or target_chars or 0)
-        target_length = int(target_chars or source_chars or 1800)
-        plot_beats = _normalize_string_list(reference_synopsis.get("plot_beats"))
-        must_preserve = _normalize_string_list(reference_synopsis.get("must_preserve")) or plot_beats
-        combined_synopsis = _normalize_text(reference_synopsis.get("combined_synopsis"))
-        document_synopses = [
-            item for item in reference_synopsis.get("document_synopses", [])
-            if isinstance(item, dict)
-        ]
-        tone_and_style = _normalize_text(reference_synopsis.get("tone_and_style"))
-        chapter_brief = {
-            "chapter_id": chapter_id,
-            "title": chapter_title,
-            "goal": _safe_excerpt(combined_synopsis, limit=360) or chapter_title,
-            "chapter_role": "benchmark expansion from close-read synopsis",
-            "plot_function": _normalize_text(story_outline.get("next_outline_node")) or chapter_title,
-            "emotional_goal": tone_and_style,
-            "conflict_goal": _safe_excerpt("; ".join(plot_beats[:2]), limit=240),
-            "relationship_targets": [],
-            "must_include": must_preserve,
-            "forbidden": _normalize_string_list(reference_synopsis.get("must_avoid")),
-            "structure_hint": {
-                "theory": "close-read event chain",
-                "beats": plot_beats,
-                "document_synopses": document_synopses,
-            },
-            "ending_hook": plot_beats[-1] if plot_beats else "",
-            "target_word_count": target_length,
-            "combined_synopsis": combined_synopsis,
-            "reference_document_synopses": document_synopses,
-            "sources": [
-                {
-                    "type": "reference_story_synopsis",
-                    "evidence_level": "close_read_summary",
-                    "note": "Expansion benchmark input; no reference truth text is included.",
-                }
-            ],
-        }
-        execution_input["chapter_title"] = chapter_title
-        execution_input["chapter_brief"] = chapter_brief
-        execution_input["length_budget"] = {
-            "chapter_id": chapter_id,
-            "target_chars": target_length,
-            "min_chars": max(1, int(target_length * 0.85)),
-            "max_chars": max(1, int(target_length * 1.15)),
-            "is_focus_chapter": True,
-            "focus_reason": "Expansion benchmark must expand the close-read reference synopsis at the held-out source length.",
-            "expansion_notes": [
-                "严格覆盖 chapter_brief.combined_synopsis 与 must_include 中的每个核心事件。",
-                "不得引入 close-read 梗概未覆盖的大剧情或替代性主线。",
-                f"正文目标长度约 {target_length} 个中文字符，允许在 min_chars 与 max_chars 范围内浮动。",
-            ],
-            "source_chapter_target_word_count": target_length,
-        }
-        execution_input["fact_inputs"] = {
-            "benchmark_layer": "expansion",
-            "input_synopsis_source": "close_read_reference_story_synopsis",
-            "story_outline": story_outline,
-            "reference_document_synopses": document_synopses,
-            "recent_story_synopses": story_context.get("recent_story_synopses", []),
-            "character_docs": story_context.get("character_docs", []),
-            "creative_kb_note": "Style and continuity references are inherited from the Writer execution input built over prefix close-read/Creative KB artifacts.",
-        }
-        forbidden_inputs = _normalize_string_list(execution_input.get("forbidden_inputs"))
-        execution_input["forbidden_inputs"] = [
-            *forbidden_inputs,
-            *_normalize_string_list(reference_synopsis.get("must_avoid")),
-            "不得使用 reference_truth 原文；只能根据 close-read 梗概扩写。",
-        ]
-        writer_rules = _normalize_string_list(execution_input.get("writer_rules"))
-        execution_input["writer_rules"] = [
-            *writer_rules,
-            "本次 benchmark 的正文扩写事实源只以 chapter_brief 中的 close-read 梗概为准。",
-            "如果 chapter_brief.reference_document_synopses 存在，必须把连续多个 document 梗概按 order 顺序合并为一个长场景/长章节来写，不得只扩写第一条。",
-            "若 fact_inputs 与 chapter_brief 冲突，必须优先遵守 chapter_brief。",
-            f"正文长度必须接近目标 {target_length} 字，覆盖梗概全部关键事件后再做场景化展开。",
-        ]
-        return execution_input
 
     def _plot_beats_from_chapter_summaries(self, summaries: list[dict[str, object]]) -> list[str]:
         beats: list[str] = []

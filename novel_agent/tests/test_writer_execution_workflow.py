@@ -23,7 +23,9 @@ from novel_agent.schemas import (
     GenerationReviewDecision,
     LengthPlanUpdate,
 )
+from novel_agent.app.prompts.writer_planning_prompt import build_chapter_package_prompt
 from novel_agent.app.schemas.orchestration_schema import (
+    BatchPlan,
     BookContinuationPlan,
     ModelingStatus,
     WorldExpansionPack,
@@ -259,7 +261,192 @@ def test_restricted_writer_executor_prompts_for_merged_reference_document_synops
 
     assert "连续多个 document 梗概" in prompt["system_prompt"]
     assert "reference_document_synopses" in prompt["user_prompt"]
+    assert "coverage_plot_beats" in prompt["user_prompt"]
     assert "必须按 order 顺序" in prompt["user_prompt"]
+
+
+def test_restricted_writer_executor_applies_external_length_budget(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    execution_input = executor.apply_external_length_budget(
+        {
+            "chapter_title": "测试长度",
+            "chapter_brief": {
+                "chapter_id": "chapter-1",
+                "title": "测试长度",
+                "goal": "主角完成一个短场景。",
+                "target_word_count": 9999,
+            },
+            "length_budget": {"target_chars": 9999, "min_chars": 9000, "max_chars": 11000},
+            "writer_rules": [],
+        },
+        target_chars=1800,
+        min_chars=1600,
+        max_chars=2000,
+        reason="benchmark_reference_source_chars",
+        note="benchmark 使用 close-read 梗概对应原文字数作为扩写长度。",
+        source_chapter_target_chars=1800,
+    )
+    prompt = executor.build_draft_prompt(execution_input)
+
+    assert execution_input["length_budget"]["target_chars"] == 1800
+    assert execution_input["length_budget"]["min_chars"] == 1600
+    assert execution_input["length_budget"]["max_chars"] == 2000
+    assert execution_input["length_budget"]["length_source"] == "external"
+    assert execution_input["chapter_brief"]["target_word_count"] == 1800
+    assert "不要超过 max_chars" in prompt["system_prompt"]
+    assert "不得用前情回放" in prompt["user_prompt"]
+    assert "benchmark 使用 close-read 梗概对应原文字数" in prompt["user_prompt"]
+
+
+def test_restricted_writer_executor_builds_authorized_synopsis_execution_input(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    execution_input = executor.build_execution_input_from_authorized_synopsis(
+        base_execution_data={
+            "chapter_id": "chapter-1",
+            "chapter_title": "Writer 自生成章节",
+            "chapter_brief": {
+                "goal": "Writer 自己规划的关系推进。",
+                "relationship_targets": [
+                    {
+                        "relation_type": "友情",
+                        "current_state": "陌生",
+                        "target_state": "信任",
+                        "required_bridge": ["共同危机"],
+                    }
+                ],
+            },
+            "relation_state_gate": {
+                "blocked": True,
+                "targets": [{"relation_type": "友情", "allowed": False}],
+            },
+            "planned_character_constraints": [{"canonical_name": "Writer 新角色"}],
+        },
+        authorized_synopsis={
+            "source_chars": 3000,
+            "combined_synopsis": "主角收到邀请后进入新地点，参考角色短暂出现。",
+            "characters_used": ["参考角色", "未出现在梗概里的旁支角色"],
+            "plot_beats": [
+                "起点：主角收到邀请后进入新地点，并开始观察周围异常。",
+                "行动/冲突：主角在压力中，最终选择接受这份机会。",
+                "转折/结果：主角口头确认身份。",
+                "后续铺垫：参考角色短暂出现，为后续冲突留下疑问。",
+            ],
+            "must_preserve": [
+                "起点：主角收到邀请后进入新地点，并开始观察周围异常。",
+                "行动/冲突：主角在压力中，最终选择接受这份机会。",
+                "转折/结果：主角口头确认身份。",
+                "后续铺垫：参考角色短暂出现，为后续冲突留下疑问。",
+            ],
+        },
+        story_outline={"next_outline_node": "主角进入新地点。"},
+        story_context={"character_docs": [{"canonical_name": "主角"}]},
+        target_chars=3000,
+        synopsis_source="close_read_reference_story_synopsis",
+    )
+
+    chapter_brief = execution_input["chapter_brief"]
+    assert chapter_brief["relationship_targets"] == []
+    assert execution_input["relation_state_gate"]["targets"] == []
+    assert "Writer 新角色" not in str(execution_input["planned_character_constraints"])
+    assert "主角" in str(execution_input["planned_character_constraints"])
+    assert "参考角色" in str(execution_input["planned_character_constraints"])
+    assert "未出现在梗概里的旁支角色" not in str(execution_input["planned_character_constraints"])
+    assert "主角收到邀请" in str(chapter_brief["must_include"])
+    assert "主角 确认身份" in str(chapter_brief["must_include"])
+    assert "选择接受" not in str(chapter_brief["must_include"])
+    assert "开始观察周围异常" not in str(chapter_brief["must_include"])
+    assert "开始观察周围异常" in str(chapter_brief["coverage_plot_beats"])
+    assert "选择接受这份机会" in str(chapter_brief["coverage_plot_beats"])
+
+
+def test_chapter_package_prompt_includes_batch_boundary_contract() -> None:
+    _system_prompt, user_prompt = build_chapter_package_prompt(
+        book_id="book-1",
+        batch_plan={
+            "batch_id": "batch-01",
+            "book_id": "book-1",
+            "batch_goal": "主角确认邀请并离开旧环境。",
+            "must_resolve": ["主角确认邀请", "主角离开旧环境"],
+            "must_not_consume": ["不得提前进入学院正课"],
+            "exit_hook": "新地点露出异常迹象",
+        },
+        character_introduction_plan=None,
+        story_structure_kb="三幕结构只能作为节奏参考。",
+        relationship_arc_kb="关系只小步推进。",
+        chapter_count=2,
+    )
+
+    assert "章节边界契约" in user_prompt
+    assert "assigned_must_resolve" in user_prompt
+    assert "主角确认邀请" in user_prompt
+    assert "不得提前进入学院正课" in user_prompt
+    assert "不要额外输出 boundary_contract 字段" in user_prompt
+
+
+def test_chapter_package_is_constrained_to_batch_boundaries(tmp_path: Path) -> None:
+    orchestrator = WriterLayeredGenerationOrchestrator(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    batch_plan = BatchPlan(
+        batch_id="batch-01",
+        book_id="book-1",
+        scope_start="chapter-1",
+        scope_end="chapter-2",
+        batch_goal="主角确认邀请并离开旧环境。",
+        must_resolve=["主角确认邀请", "主角离开旧环境"],
+        must_not_consume=["不得提前进入学院正课"],
+        exit_hook="新地点露出异常迹象",
+    )
+    payload = {
+        "package_id": "pkg-1",
+        "batch_id": "batch-01",
+        "chapters": [
+            {
+                "chapter_id": "batch01-ch01",
+                "title": "漂移章节",
+                "goal": "主角提前参加学院正课并发现新势力。",
+                "plot_function": "引入新势力。",
+                "must_include": ["原创高潮"],
+                "forbidden": [],
+                "structure_hint": {"beats": ["原创大事件"]},
+                "ending_hook": "新地点露出异常迹象",
+            },
+            {
+                "chapter_id": "batch01-ch02",
+                "title": "第二章",
+                "goal": "",
+                "plot_function": "",
+                "must_include": [],
+                "forbidden": [],
+                "structure_hint": {},
+            },
+        ],
+    }
+
+    constrained = orchestrator._constrain_chapter_package_to_batch_boundaries(  # noqa: SLF001
+        payload=payload,
+        batch_plan=batch_plan,
+        chapter_count=2,
+    )
+    first, second = constrained["chapters"]
+
+    assert first["goal"] == "主角确认邀请"
+    assert first["plot_function"] == "主角确认邀请"
+    assert "主角确认邀请" in first["must_include"]
+    assert "不得提前进入学院正课" in first["forbidden"]
+    assert "不得提前消费批次出口钩子：新地点露出异常迹象" in first["forbidden"]
+    assert first["structure_hint"]["beats"][0] == "主角确认邀请"
+    assert second["goal"] == "主角离开旧环境"
+    assert "主角离开旧环境" in second["must_include"]
+    assert "不得提前消费批次出口钩子：新地点露出异常迹象" not in second["forbidden"]
+    assert "ChapterBrief 已按 BatchPlan.must_resolve/must_not_consume 收紧剧情边界。" in constrained["review_notes"]
 
 
 def test_prepare_freeze_a_can_disable_character_cast_planning(tmp_path: Path) -> None:

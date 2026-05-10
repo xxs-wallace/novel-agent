@@ -144,6 +144,39 @@ def test_sequence_story_outline_uses_step_reference_summary() -> None:
     assert story_outline["next_outline_node"] == "当前 step 的 close-read 梗概。"
 
 
+def test_sequence_reference_context_can_split_single_close_read_event_chain() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    groups = service._split_reference_context_for_sequence(
+        reference_context={
+            "story_outline_md": "# 大纲",
+            "reference_character_docs": [],
+            "reference_chapter_summaries": [
+                {
+                    "document_title_index": 1,
+                    "chapter_title": "目标窗口",
+                    "source_total_chars": 9000,
+                    "summary_md": (
+                        "## 剧情事件链\n"
+                        "- 起点：主角做出选择。\n"
+                        "- 触发：外部系统确认身份。\n"
+                        "- 行动/冲突：主角抵达新地点。\n"
+                        "- 转折/结果：主角遭遇异常迹象。\n"
+                        "- 后续铺垫：更大冲突露出边缘。\n\n"
+                        "## 结构功能/节奏\n"
+                        "- 从决定转入新阶段。"
+                    ),
+                }
+            ],
+        },
+        sequence_chapter_count=3,
+    )
+
+    assert len(groups) == 3
+    assert "起点：主角做出选择" in str(groups[0]["reference_chapter_summaries"])  # type: ignore[index]
+    assert "主角抵达新地点" in str(groups[1]["reference_chapter_summaries"])  # type: ignore[index]
+    assert "更大冲突露出边缘" in str(groups[2]["reference_chapter_summaries"])  # type: ignore[index]
+
+
 def test_agentic_benchmark_cache_key_tracks_source_window_and_pipeline_params() -> None:
     service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
     source_text = LONGZU_96KB_FIXTURE.read_text(encoding="utf-8")
@@ -374,7 +407,67 @@ def test_expansion_execution_input_uses_reference_close_read_synopsis() -> None:
     assert execution_input["fact_inputs"]["input_synopsis_source"] == "close_read_reference_story_synopsis"  # type: ignore[index]
     assert "错误的 Writer 计划" not in str(execution_input["fact_inputs"])
     assert execution_input["length_budget"]["target_chars"] == 2700  # type: ignore[index]
-    assert "不得使用 reference_truth 原文" in str(execution_input["forbidden_inputs"])
+    assert execution_input["length_budget"]["length_source"] == "external"  # type: ignore[index]
+    assert "外部长度预算" in str(execution_input["length_budget"])  # type: ignore[index]
+    assert "不得使用未授权原文" in str(execution_input["forbidden_inputs"])
+
+
+def test_expansion_execution_input_rebuilds_teacher_forced_continuity_gates() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    execution_input = service._build_reference_synopsis_execution_input(
+        base_execution_data={
+            "chapter_id": "chapter-1",
+            "chapter_title": "Writer 自生成章节",
+            "chapter_brief": {
+                "goal": "Writer 自己规划的关系推进。",
+                "relationship_targets": [
+                    {
+                        "relation_type": "友情",
+                        "current_state": "陌生",
+                        "target_state": "信任",
+                        "required_bridge": ["共同危机"],
+                    }
+                ],
+            },
+            "relation_state_gate": {
+                "blocked": True,
+                "targets": [{"relation_type": "友情", "allowed": False}],
+            },
+            "planned_character_constraints": [{"canonical_name": "Writer 新角色"}],
+        },
+        reference_synopsis={
+            "source": "close_read_chapter_summary",
+            "source_chars": 3000,
+            "combined_synopsis": "主角收到邀请后进入新地点，参考角色短暂出现。",
+            "characters_used": ["参考角色", "未出现在梗概里的旁支角色"],
+            "plot_beats": [
+                "起点：主角收到邀请后进入新地点，并开始观察周围异常。",
+                "后续铺垫：参考角色短暂出现，为后续冲突留下疑问。",
+            ],
+            "must_preserve": [
+                "起点：主角收到邀请后进入新地点，并开始观察周围异常。",
+                "后续铺垫：参考角色短暂出现，为后续冲突留下疑问。",
+            ],
+        },
+        story_outline={"next_outline_node": "主角进入新地点。"},
+        story_context={
+            "recent_story_synopses": [{"summary_short": "前情"}],
+            "character_docs": [{"canonical_name": "主角"}],
+        },
+        target_chars=3000,
+    )
+
+    chapter_brief = execution_input["chapter_brief"]  # type: ignore[index]
+    assert chapter_brief["relationship_targets"] == []  # type: ignore[index]
+    assert execution_input["relation_state_gate"]["targets"] == []  # type: ignore[index]
+    assert "Writer 新角色" not in str(execution_input["planned_character_constraints"])
+    assert "主角" in str(execution_input["planned_character_constraints"])
+    assert "参考角色" in str(execution_input["planned_character_constraints"])
+    assert "未出现在梗概里的旁支角色" not in str(execution_input["planned_character_constraints"])
+    assert "主角收到邀请" in str(chapter_brief["must_include"])  # type: ignore[index]
+    assert "后进入新地点" in str(chapter_brief["must_include"])  # type: ignore[index]
+    assert "开始观察周围异常" not in str(chapter_brief["must_include"])  # type: ignore[index]
+    assert "开始观察周围异常" in str(chapter_brief["coverage_plot_beats"])  # type: ignore[index]
 
 
 def test_synopsis_reviewer_prompt_requires_core_beat_alignment() -> None:

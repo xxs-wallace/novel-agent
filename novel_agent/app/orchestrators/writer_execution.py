@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,317 @@ def _safe_excerpt(text: str, *, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def build_authorized_synopsis_execution_input(
+    *,
+    base_execution_data: Mapping[str, Any],
+    authorized_synopsis: Mapping[str, Any],
+    story_outline: Mapping[str, Any] | None = None,
+    story_context: Mapping[str, Any] | None = None,
+    target_chars: int | None = None,
+    synopsis_source: str = "authorized_story_synopsis",
+) -> dict[str, Any]:
+    """Build a Writer execution input from an authorized synopsis without re-planning prose generation."""
+    story_outline = story_outline or {}
+    story_context = story_context or {}
+    execution_input = deepcopy(dict(base_execution_data))
+    chapter_id = _normalize_text(execution_input.get("chapter_id")) or "authorized-synopsis-expansion"
+    chapter_title = (
+        _normalize_text(story_outline.get("next_outline_node"))
+        or _normalize_text(execution_input.get("chapter_title"))
+        or "授权梗概扩写"
+    )
+    source_chars = _positive_int(authorized_synopsis.get("source_chars"), fallback=target_chars or 0)
+    target_length = _positive_int(target_chars, fallback=source_chars or 1800)
+    plot_beats = _normalize_string_list(authorized_synopsis.get("plot_beats"))
+    coverage_plot_beats = _normalize_string_list(authorized_synopsis.get("must_preserve")) or plot_beats
+    continuity_must_include = _continuity_requirements_from_plot_beats(coverage_plot_beats or plot_beats)
+    combined_synopsis = _normalize_text(authorized_synopsis.get("combined_synopsis"))
+    document_synopses = [
+        dict(item)
+        for item in authorized_synopsis.get("document_synopses", [])
+        if isinstance(item, Mapping)
+    ]
+    tone_and_style = _normalize_text(authorized_synopsis.get("tone_and_style"))
+    chapter_brief = {
+        "chapter_id": chapter_id,
+        "title": chapter_title,
+        "goal": _safe_excerpt(combined_synopsis, limit=360) or chapter_title,
+        "chapter_role": "expansion from authorized synopsis",
+        "plot_function": _normalize_text(story_outline.get("next_outline_node")) or chapter_title,
+        "emotional_goal": tone_and_style,
+        "conflict_goal": _safe_excerpt("; ".join(plot_beats[:2]), limit=240),
+        "relationship_targets": [],
+        "must_include": continuity_must_include,
+        "coverage_plot_beats": coverage_plot_beats,
+        "forbidden": _normalize_string_list(authorized_synopsis.get("must_avoid")),
+        "structure_hint": {
+            "theory": "authorized synopsis event chain",
+            "beats": plot_beats,
+            "coverage_plot_beats": coverage_plot_beats,
+            "continuity_check_anchors": continuity_must_include,
+            "document_synopses": document_synopses,
+        },
+        "ending_hook": plot_beats[-1] if plot_beats else "",
+        "target_word_count": target_length,
+        "combined_synopsis": combined_synopsis,
+        "reference_document_synopses": document_synopses,
+        "sources": [
+            {
+                "type": synopsis_source,
+                "evidence_level": "authorized_synopsis",
+                "note": "Execution input built by Writer from an authorized synopsis; no reference truth text is included.",
+            }
+        ],
+    }
+    execution_input["chapter_title"] = chapter_title
+    execution_input["chapter_brief"] = chapter_brief
+    execution_input["length_budget"] = build_external_length_budget(
+        chapter_id=chapter_id,
+        target_chars=target_length,
+        reason="authorized_synopsis_length",
+        note=(
+            "覆盖 chapter_brief.combined_synopsis 与 coverage_plot_beats 中的核心事件；"
+            "不得引入授权梗概未覆盖的大剧情或替代性主线。"
+        ),
+        source_chapter_target_chars=source_chars or target_length,
+    )
+    execution_input["fact_inputs"] = {
+        "input_synopsis_source": synopsis_source,
+        "story_outline": dict(story_outline),
+        "reference_document_synopses": document_synopses,
+        "recent_story_synopses": story_context.get("recent_story_synopses", []),
+        "character_docs": story_context.get("character_docs", []),
+        "creative_kb_note": "Style and continuity references are inherited from the prepared Writer execution input; they cannot override authorized facts.",
+    }
+    execution_input["relation_state_gate"] = {
+        "blocked": False,
+        "targets": [],
+        "source": f"{synopsis_source}_expansion",
+        "note": (
+            "Authorized-synopsis expansion replaces the prior planned chapter brief, so stale "
+            "relationship gates from the discarded brief are not applicable."
+        ),
+    }
+    execution_input["planned_character_constraints"] = _authorized_planned_character_constraints(
+        authorized_synopsis=authorized_synopsis,
+        story_context=story_context,
+    )
+    forbidden_inputs = _normalize_string_list(execution_input.get("forbidden_inputs"))
+    execution_input["forbidden_inputs"] = [
+        *forbidden_inputs,
+        *_normalize_string_list(authorized_synopsis.get("must_avoid")),
+        "不得使用未授权原文；只能根据授权梗概扩写。",
+    ]
+    writer_rules = _normalize_string_list(execution_input.get("writer_rules"))
+    execution_input["writer_rules"] = [
+        *writer_rules,
+        "正文扩写事实源以 chapter_brief.combined_synopsis、coverage_plot_beats 与 reference_document_synopses 为准。",
+        "若 fact_inputs、风格参考或 Creative KB 与 chapter_brief 冲突，必须优先遵守 chapter_brief。",
+    ]
+    return execution_input
+
+
+def build_external_length_budget(
+    *,
+    chapter_id: str,
+    target_chars: int,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+    reason: str = "external_length_override",
+    note: str = "",
+    source_chapter_target_chars: int = 0,
+) -> dict[str, Any]:
+    """Build a normalized Writer length budget from an external caller's character target."""
+    target, normalized_min, normalized_max = _normalized_length_bounds(
+        target_chars=target_chars,
+        min_chars=min_chars,
+        max_chars=max_chars,
+    )
+    expansion_notes = [
+        (
+            f"外部长度预算：目标 {target} 个中文字符，允许区间 "
+            f"{normalized_min}-{normalized_max}；不得为了凑字补前情、旁支或后续设定解释。"
+        )
+    ]
+    if note:
+        expansion_notes.append(_normalize_text(note))
+    return {
+        "chapter_id": _normalize_text(chapter_id),
+        "target_chars": target,
+        "min_chars": normalized_min,
+        "max_chars": normalized_max,
+        "is_focus_chapter": True,
+        "focus_reason": _normalize_text(reason) or "external_length_override",
+        "expansion_notes": expansion_notes,
+        "source_chapter_target_word_count": int(source_chapter_target_chars or target),
+        "length_source": "external",
+    }
+
+
+def apply_external_length_budget(
+    execution_input: Mapping[str, Any],
+    *,
+    target_chars: int,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+    reason: str = "external_length_override",
+    note: str = "",
+    source_chapter_target_chars: int = 0,
+) -> dict[str, Any]:
+    """Return a copy of a Writer execution input with an externally supplied length budget."""
+    updated = deepcopy(dict(execution_input))
+    chapter_brief = dict(updated.get("chapter_brief") or {})
+    chapter_id = (
+        _normalize_text(chapter_brief.get("chapter_id"))
+        or _normalize_text(updated.get("chapter_id"))
+        or "chapter"
+    )
+    budget = build_external_length_budget(
+        chapter_id=chapter_id,
+        target_chars=target_chars,
+        min_chars=min_chars,
+        max_chars=max_chars,
+        reason=reason,
+        note=note,
+        source_chapter_target_chars=source_chapter_target_chars,
+    )
+    chapter_brief["target_word_count"] = budget["target_chars"]
+    updated["chapter_brief"] = chapter_brief
+    updated["length_budget"] = budget
+    writer_rules = _normalize_string_list(updated.get("writer_rules"))
+    writer_rules.append(
+        (
+            f"正文长度必须遵守外部长度预算：目标 {budget['target_chars']} 字，"
+            f"允许区间 {budget['min_chars']}-{budget['max_chars']} 字；不要用前情回放或后续设定解释凑字。"
+        )
+    )
+    updated["writer_rules"] = [item for item in dict.fromkeys(writer_rules) if item]
+    return updated
+
+
+def _positive_int(value: object, *, fallback: int = 0) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    return parsed if parsed > 0 else int(fallback or 0)
+
+
+def _normalized_length_bounds(
+    *,
+    target_chars: int,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+) -> tuple[int, int, int]:
+    target = int(target_chars or 0)
+    if target <= 0:
+        raise ValueError("target_chars must be a positive integer")
+    normalized_min = int(min_chars or max(1, target * 85 // 100))
+    normalized_max = int(max_chars or max(target, target * 115 // 100))
+    if min(normalized_min, normalized_max) <= 0:
+        raise ValueError("min_chars and max_chars must be positive integers")
+    if not normalized_min <= target <= normalized_max:
+        raise ValueError("min_chars must be <= target_chars <= max_chars")
+    return target, normalized_min, normalized_max
+
+
+def _continuity_requirements_from_plot_beats(plot_beats: list[str]) -> list[str]:
+    requirements: list[str] = []
+    for beat in plot_beats:
+        cleaned = re.sub(r"^\s*(起点|触发|行动/冲突|转折/结果|后续铺垫|结果|铺垫)\s*[：:]\s*", "", beat).strip()
+        first_sentence = re.split(r"(?<=[。！？!?])\s*", cleaned)[0] if cleaned else ""
+        clauses = re.split(r"[；;，,]", first_sentence)
+        for clause in clauses:
+            anchor = _continuity_requirement_anchor(clause)
+            if not anchor:
+                continue
+            requirements.append(anchor)
+            break
+    return [item for item in dict.fromkeys(requirements) if item]
+
+
+def _continuity_requirement_anchor(clause: str) -> str:
+    anchor = _normalize_text(clause)
+    if not anchor:
+        return ""
+    anchor = re.sub(r"^(并|且|同时|随后|然后|但|而|从而|因此)", "", anchor).strip()
+    if re.search(r"在.+中$", anchor) or re.search(r"(之前|之后|以后|过后|接通后|开始时|结束时)$", anchor):
+        return ""
+    subject_probe = re.sub(
+        r"^(最终|正式|亲自|口头|突然|突如其来|这份|这场|这个|那个|一份|一种|一场)\s*",
+        "",
+        anchor,
+    ).strip()
+    if re.match(
+        r"^(选择|接受|确认|完成|进入|抵达|发现|看到|遭遇|观察|离开|到达|收到|拿到|触发|开启|关闭|接走|出现|留下|转为|成为)",
+        subject_probe,
+    ):
+        return ""
+    normalized = re.sub(
+        r"(最终|正式|亲自|口头|突然|突如其来|这份|这场|这个|那个|一份|一种|一场)",
+        " ",
+        anchor,
+    )
+    tokens = [
+        token
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_.·-]*|[\u4e00-\u9fff]{2,6}", normalized)
+        if token not in {"然后", "随后", "同时", "开始", "继续", "进行", "完成"}
+    ]
+    if not tokens:
+        return _safe_excerpt(anchor, limit=28) if len(anchor) >= 4 else ""
+    return " ".join(tokens[:4])
+
+
+def _authorized_planned_character_constraints(
+    *,
+    authorized_synopsis: Mapping[str, Any],
+    story_context: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    constraints: list[dict[str, Any]] = []
+    prefix_character_docs = [
+        item for item in story_context.get("character_docs", [])
+        if isinstance(item, Mapping)
+    ]
+    reference_character_docs = [
+        {"canonical_name": name}
+        for name in _normalize_string_list(authorized_synopsis.get("characters_used"))
+    ]
+    reference_text = " ".join(
+        _normalize_text(value)
+        for value in (
+            authorized_synopsis.get("combined_synopsis"),
+            " ".join(_normalize_string_list(authorized_synopsis.get("plot_beats"))),
+            " ".join(_normalize_string_list(authorized_synopsis.get("must_preserve"))),
+        )
+        if _normalize_text(value)
+    )
+    for source_name, source_items in (
+        ("prefix_context", prefix_character_docs),
+        ("authorized_synopsis", reference_character_docs),
+    ):
+        for item in source_items:
+            name = _normalize_text(item.get("canonical_name") or item.get("name"))
+            if not name:
+                continue
+            if source_name == "authorized_synopsis" and reference_text and name not in reference_text:
+                continue
+            constraints.append(
+                {
+                    "canonical_name": name,
+                    "status": "authorized",
+                    "narrative_role": "authorized synopsis or prefix context character",
+                    "introduction_required_in_chapter": False,
+                    "source": f"writer_{source_name}",
+                }
+            )
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in constraints:
+        name = _normalize_text(item.get("canonical_name") or item.get("name"))
+        if name and name not in deduped:
+            deduped[name] = item
+    return list(deduped.values())
 
 
 @dataclass(slots=True)
@@ -528,6 +840,48 @@ class RestrictedWriterExecutor:
         """Generate a draft from a prepared execution input without requiring freeze records."""
         return self._generate_draft(execution_input)
 
+    def build_execution_input_from_authorized_synopsis(
+        self,
+        *,
+        base_execution_data: Mapping[str, Any],
+        authorized_synopsis: Mapping[str, Any],
+        story_outline: Mapping[str, Any] | None = None,
+        story_context: Mapping[str, Any] | None = None,
+        target_chars: int | None = None,
+        synopsis_source: str = "authorized_story_synopsis",
+    ) -> dict[str, Any]:
+        """Build a reusable execution input for expanding an authorized synopsis."""
+        return build_authorized_synopsis_execution_input(
+            base_execution_data=base_execution_data,
+            authorized_synopsis=authorized_synopsis,
+            story_outline=story_outline,
+            story_context=story_context,
+            target_chars=target_chars,
+            synopsis_source=synopsis_source,
+        )
+
+    def apply_external_length_budget(
+        self,
+        execution_input: Mapping[str, Any],
+        *,
+        target_chars: int,
+        min_chars: int | None = None,
+        max_chars: int | None = None,
+        reason: str = "external_length_override",
+        note: str = "",
+        source_chapter_target_chars: int = 0,
+    ) -> dict[str, Any]:
+        """Apply an externally supplied character budget to a prepared execution input."""
+        return apply_external_length_budget(
+            execution_input,
+            target_chars=target_chars,
+            min_chars=min_chars,
+            max_chars=max_chars,
+            reason=reason,
+            note=note,
+            source_chapter_target_chars=source_chapter_target_chars,
+        )
+
     def apply_memory_writeback(
         self,
         conn: sqlite3.Connection,
@@ -674,13 +1028,30 @@ class RestrictedWriterExecutor:
                 if isinstance(structure_hint, dict) and isinstance(structure_hint.get("document_synopses"), list)
                 else []
             )
+        coverage_plot_beats = _normalize_string_list(chapter_brief.get("coverage_plot_beats"))
+        if not coverage_plot_beats:
+            structure_hint = chapter_brief.get("structure_hint")
+            coverage_plot_beats = _normalize_string_list(
+                structure_hint.get("coverage_plot_beats") if isinstance(structure_hint, dict) else []
+            ) or _normalize_string_list(
+                structure_hint.get("beats") if isinstance(structure_hint, dict) else []
+            )
         expansion_guidance = {
             "target_chars": int(length_budget.get("target_chars") or self._chapter_target_chars(chapter_brief)),
+            "min_chars": int(length_budget.get("min_chars") or 0),
+            "max_chars": int(length_budget.get("max_chars") or 0),
             "combined_synopsis": chapter_brief.get("combined_synopsis"),
+            "coverage_plot_beats": coverage_plot_beats,
             "reference_document_synopses": reference_document_synopses,
             "rule": (
+                "必须覆盖 combined_synopsis 与 coverage_plot_beats 的核心事件。"
                 "如果 reference_document_synopses 非空，必须按 order 顺序把这些连续 document 梗概合并成"
                 "一个连贯长段/章节来扩写；目标是覆盖整组梗概，而不是只写第一条或摘要式带过。"
+            ),
+            "length_rule": (
+                "正文必须接近 target_chars，并落在 min_chars/max_chars 区间内。"
+                "如果核心事件已经写完但字数未达目标，只做场景内动作、对白和感官细节的适度展开；"
+                "不得用前情回放、未授权旁支、后续设定讲解或下一章节事件凑字。"
             ),
         }
         return {
@@ -688,7 +1059,10 @@ class RestrictedWriterExecutor:
                 "你是受限正文执行器。你只能消费冻结的 ChapterBrief 与已冻结事实输入。"
                 "事实优先于风格输入。不得自由创建关键新角色，不得新增大型设定，不得跳过关系桥接，"
                 "不得越过当前批次边界。必须遵守原作叙事契约，不得擅自更换叙述者或视角机制。"
+                "Creative KB、风格参考和结构知识只能辅助表达，不得替换 ChapterBrief 的剧情目标。"
                 "若输入包含连续多个 document 梗概，必须按顺序合并为同一段连续正文并写到长度预算附近。"
+                "长度预算是硬约束：不要超过 max_chars，不要为了凑字补写前情回放、原创支线、旅程过场或设定讲解。"
+                "chapter_brief.must_include 主要是连续性校验锚点，coverage_plot_beats 才是完整剧情覆盖目标。"
                 "只输出正文，不要解释。"
             ),
             "user_prompt": json.dumps(

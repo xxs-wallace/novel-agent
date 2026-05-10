@@ -84,6 +84,13 @@ def _normalize_string_list(items: list[object] | tuple[object, ...] | set[object
     return normalized
 
 
+def _append_unique(items: list[str], value: str) -> list[str]:
+    text = _normalize_text(value)
+    if text and text not in items:
+        items.append(text)
+    return items
+
+
 @dataclass(slots=True)
 class FreezeABundle:
     modeling_status: ModelingStatus
@@ -981,7 +988,62 @@ class WriterLayeredGenerationOrchestrator:
             )
         payload.setdefault("package_id", f"{batch_plan.batch_id}-package")
         payload.setdefault("batch_id", batch_plan.batch_id)
+        payload = self._constrain_chapter_package_to_batch_boundaries(
+            payload=payload,
+            batch_plan=batch_plan,
+            chapter_count=chapter_count,
+        )
         return self._chapter_package_from_dict(payload)
+
+    def _constrain_chapter_package_to_batch_boundaries(
+        self,
+        *,
+        payload: dict[str, Any],
+        batch_plan: BatchPlan,
+        chapter_count: int,
+    ) -> dict[str, Any]:
+        """Keep ChapterBrief planning bounded by the frozen BatchPlan."""
+        constrained = dict(payload)
+        chapters = [dict(item) for item in (constrained.get("chapters") or []) if isinstance(item, Mapping)]
+        if not chapters:
+            return constrained
+        must_resolve = list(batch_plan.must_resolve) or ([batch_plan.batch_goal] if batch_plan.batch_goal else [])
+        forbidden_consumption = list(batch_plan.must_not_consume)
+        count = max(1, int(chapter_count or len(chapters) or 1))
+        for index, chapter in enumerate(chapters):
+            assigned_goal = must_resolve[min(index, len(must_resolve) - 1)] if must_resolve else ""
+            if assigned_goal:
+                goal = _normalize_text(chapter.get("goal"))
+                if assigned_goal not in goal:
+                    chapter["goal"] = assigned_goal
+                plot_function = _normalize_text(chapter.get("plot_function"))
+                if assigned_goal not in plot_function:
+                    chapter["plot_function"] = assigned_goal
+                must_include = _normalize_string_list(list(chapter.get("must_include") or []))
+                _append_unique(must_include, assigned_goal)
+                chapter["must_include"] = must_include
+            forbidden = _normalize_string_list(list(chapter.get("forbidden") or []))
+            for item in forbidden_consumption:
+                _append_unique(forbidden, item)
+            if batch_plan.exit_hook and index < count - 1:
+                _append_unique(forbidden, f"不得提前消费批次出口钩子：{batch_plan.exit_hook}")
+            _append_unique(forbidden, "不得新增 BatchPlan.must_resolve 之外的大型剧情节点。")
+            chapter["forbidden"] = forbidden
+            structure_hint = dict(chapter.get("structure_hint") or {})
+            beats = _normalize_string_list(list(structure_hint.get("beats") or []))
+            if assigned_goal and assigned_goal not in beats:
+                beats.insert(0, assigned_goal)
+            structure_hint["beats"] = beats
+            if not _normalize_text(structure_hint.get("theory")):
+                structure_hint["theory"] = "BatchPlan boundary contract"
+            chapter["structure_hint"] = structure_hint
+            if batch_plan.exit_hook and index == count - 1 and not _normalize_text(chapter.get("ending_hook")):
+                chapter["ending_hook"] = batch_plan.exit_hook
+        constrained["chapters"] = chapters
+        review_notes = _normalize_string_list(list(constrained.get("review_notes") or []))
+        _append_unique(review_notes, "ChapterBrief 已按 BatchPlan.must_resolve/must_not_consume 收紧剧情边界。")
+        constrained["review_notes"] = review_notes
+        return constrained
 
     def _generate_json_payload(
         self,

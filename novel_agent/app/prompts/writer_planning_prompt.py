@@ -20,6 +20,8 @@ def build_book_continuation_plan_prompt(
         "2. 不得擅自改变核心角色人格、既有重大结局或关键关系基础。\n"
         "3. 每项关键判断都要提供 evidence_level 和 source_paths。\n"
         "4. 证据不足时，将内容写入 open_questions，不要硬编。\n"
+        "5. continuation_intent.desired_actions 与 preferred_outcome 是本次规划边界；"
+        "stage_highlights 只能拆解或复述该边界，不得新增未授权高潮、地点跳转、势力或替代主线。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n\n"
@@ -124,6 +126,10 @@ def build_batch_plan_prompt(
         "1. BatchPlan 必须承接 BookContinuationPlan，不得绕开全书方向。\n"
         "2. 必须写出 must_resolve、must_not_consume、exit_hook。\n"
         "3. 若存在 CharacterCastPlan，必须为首次登场角色预留批次级执行位置。\n"
+        "4. must_resolve 只能是 BookContinuationPlan.continuation_goal/stage_highlights 的忠实拆解；"
+        "不得把 WorldExpansionPack 或 CharacterCastPlan 中的背景信息升级成新的剧情主线。\n"
+        "5. must_not_consume 必须继承 BookContinuationPlan.must_preserve 与 WorldExpansionPack.open_items 中不应提前消费的信息。\n"
+        "6. exit_hook 只能停在当前批次边界上的悬念，不得直接写成下一批次的完整事件。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
@@ -149,6 +155,7 @@ def build_chapter_package_prompt(
     relationship_arc_kb: str,
     chapter_count: int,
 ) -> tuple[str, str]:
+    boundary_contract = _chapter_boundary_contract(batch_plan=batch_plan, chapter_count=chapter_count)
     system_prompt = (
         "你是小说续写 Layer 3 章节包规划助手。\n"
         "你的任务是基于 BatchPlan 生成最近一批章节的 ChapterPackage，并内嵌可执行的 ChapterBrief。\n"
@@ -158,12 +165,20 @@ def build_chapter_package_prompt(
         "2. 每章都要给出 relationship_targets，并标注 required_bridge。\n"
         "3. 若涉及计划角色首次登场，必须编入对应章节。\n"
         "4. 可以参考剧情结构与关系弧线知识库，但不得覆盖上游冻结事实。\n"
+        "5. Creative KB 与结构知识只能作为表达、节奏和桥接参考，不得替换 BatchPlan 或用户授权目标。\n"
+        "6. 不得新增上游目标未授权的大型新事件、新势力、新规则或替代主线。\n"
+        "7. 每个 ChapterBrief.goal、plot_function、must_include 必须对应章节边界契约 assigned_must_resolve，"
+        "可以细化为场景动作，但不得扩写到 other_batch_must_resolve 或 exit_hook 之后。\n"
+        "8. 每章 forbidden 必须包含 batch_forbidden_consumption；非最后一章不得提前消费 batch_exit_hook。\n"
+        "9. 剧情结构知识库和关系弧线知识库只能用于节奏安排，若它们暗示的事件超出章节边界契约，必须忽略。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
         f"目标章节数: {chapter_count}\n\n"
         "BatchPlan：\n"
         f"{json.dumps(batch_plan, ensure_ascii=False, indent=2)}\n\n"
+        "章节边界契约（只用于约束输出，不要额外输出 boundary_contract 字段）：\n"
+        f"{json.dumps(boundary_contract, ensure_ascii=False, indent=2)}\n\n"
         "CharacterIntroductionPlan：\n"
         f"{json.dumps(character_introduction_plan or {}, ensure_ascii=False, indent=2)}\n\n"
         "剧情结构知识库摘录：\n"
@@ -174,6 +189,34 @@ def build_chapter_package_prompt(
         f"{json.dumps(_chapter_package_example(), ensure_ascii=False, indent=2)}"
     )
     return system_prompt, user_prompt
+
+
+def _chapter_boundary_contract(*, batch_plan: dict[str, Any], chapter_count: int) -> dict[str, Any]:
+    must_resolve = [str(item).strip() for item in (batch_plan.get("must_resolve") or []) if str(item).strip()]
+    if not must_resolve:
+        goal = str(batch_plan.get("batch_goal") or "").strip()
+        must_resolve = [goal] if goal else []
+    count = max(1, int(chapter_count or 1))
+    chapter_boundaries: list[dict[str, Any]] = []
+    for index in range(count):
+        assigned = must_resolve[min(index, len(must_resolve) - 1)] if must_resolve else ""
+        other = [item for item in must_resolve if item != assigned]
+        chapter_boundaries.append(
+            {
+                "chapter_order": index + 1,
+                "assigned_must_resolve": assigned,
+                "other_batch_must_resolve": other,
+                "may_use_batch_exit_hook": index == count - 1,
+            }
+        )
+    return {
+        "batch_goal": str(batch_plan.get("batch_goal") or "").strip(),
+        "batch_forbidden_consumption": [
+            str(item).strip() for item in (batch_plan.get("must_not_consume") or []) if str(item).strip()
+        ],
+        "batch_exit_hook": str(batch_plan.get("exit_hook") or "").strip(),
+        "chapter_boundaries": chapter_boundaries,
+    }
 
 
 def _book_plan_example() -> dict[str, Any]:
