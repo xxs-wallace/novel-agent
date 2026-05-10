@@ -19,6 +19,50 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=str, default=None, help="Repository root for resolving relative assets")
     parser.add_argument("--db", type=str, default=None, help="Source SQLite database path")
     parser.add_argument("--runs-dir", type=str, default="runs", help="Directory to write smoke run artifacts into")
+    parser.add_argument("--prefix-count", type=int, default=1, help="Minimum prefix chunk count for agentic source mode")
+    parser.add_argument(
+        "--prefix-min-chars",
+        type=int,
+        default=4_000,
+        help="Minimum prefix character count before selecting held-out reference truth",
+    )
+    parser.add_argument(
+        "--recent-window-size",
+        type=int,
+        default=3,
+        help="Recent prefix chunk count exposed to benchmark planning/review artifacts",
+    )
+    parser.add_argument(
+        "--reference-min-chars",
+        type=int,
+        default=2_700,
+        help="Minimum held-out reference truth characters for agentic source mode",
+    )
+    parser.add_argument(
+        "--benchmark-cache-dir",
+        type=str,
+        default=None,
+        help="Directory for reusable rough-read/close-read/Creative KB modeling cache",
+    )
+    parser.add_argument(
+        "--reuse-modeling-cache",
+        action="store_true",
+        help="Reuse cached modeling artifacts and rerun only Writer/Reviewer layers when available",
+    )
+    parser.add_argument(
+        "--rebuild-modeling-cache",
+        action="store_true",
+        help="Rebuild modeling artifacts and refresh the cache for this source/window",
+    )
+    parser.add_argument(
+        "--clear-modeling-cache",
+        action="store_true",
+        help="Delete the matching modeling cache entry before running",
+    )
+    parser.add_argument("--max-read-kb", type=int, default=64, help="Rough-read byte window passed to pipeline")
+    parser.add_argument("--max-close-batches", type=int, default=12, help="Maximum close-read batches passed to pipeline")
+    parser.add_argument("--segment-step-kb", type=int, default=32, help="Segmentation step size passed to pipeline")
+    parser.add_argument("--close-step-batches", type=int, default=1, help="Close-read step size passed to pipeline")
     parser.add_argument(
         "--use-real-model",
         action="store_true",
@@ -77,12 +121,28 @@ def main(argv: list[str] | None = None) -> int:
             source_path=Path(args.source),
             api_key=args.api_key or "",
             runs_dir=Path(args.runs_dir),
+            prefix_count=args.prefix_count,
+            prefix_min_chars=args.prefix_min_chars,
+            recent_window_size=args.recent_window_size,
+            reference_min_chars=args.reference_min_chars,
+            benchmark_cache_dir=Path(args.benchmark_cache_dir) if args.benchmark_cache_dir else None,
+            reuse_modeling_cache=bool(args.reuse_modeling_cache),
+            rebuild_modeling_cache=bool(args.rebuild_modeling_cache),
+            clear_modeling_cache=bool(args.clear_modeling_cache),
+            max_read_kb=args.max_read_kb,
+            max_close_batches=args.max_close_batches,
+            segment_step_kb=args.segment_step_kb,
+            close_step_batches=args.close_step_batches,
         )
         payload = result.to_dict()
         payload["summary_text"] = (
-            f"Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+            f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
+            f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
+            f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
             f"run_id：{result.run_id}\n"
             f"产物目录：{result.run_dir}\n"
+            f"生成梗概：{result.generated_synopsis_path}\n"
+            f"原文梗概：{result.reference_synopsis_path}\n"
             f"Writer 草稿：{result.draft_path}\n"
             f"Reference truth：{result.reference_truth_path}"
         )

@@ -215,6 +215,10 @@ def build_writer_workflow(
     runs_dir: Path,
     dry_run: bool,
     api_key: str | None = None,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
+    revision_adapter: object | None = None,
 ) -> tuple[NovelAgentDB, WriterInteractiveWorkflow]:
     model_client = None
     if not dry_run:
@@ -226,9 +230,10 @@ def build_writer_workflow(
                 base_url="https://api.deepseek.com",
                 api_key=api_key,
                 api_key_env="DEEPSEEK_API_KEY",
-                thinking="enabled",
-                reasoning_effort="high",
-                include_reasoning_content=True,
+                retry_without_thinking_on_failure=True,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                include_reasoning_content=include_reasoning_content,
                 dry_run=False,
             )
         )
@@ -250,6 +255,7 @@ def build_writer_workflow(
         executor=executor,
         rollback_manager=rollback_manager,
         run_writer=run_writer,
+        revision_adapter=revision_adapter,
     )
     return db, workflow
 
@@ -351,6 +357,20 @@ def run_writer_workflow_action(
         )
     if action == "approve_writeback":
         return workflow.approve_writeback(conn, run_id=run_id, book_id=book_id)
+    if action == "request_scoped_artifact_revision":
+        return workflow.request_scoped_artifact_revision(
+            run_id=run_id,
+            user_feedback=str(payload.get("user_feedback") or ""),
+            request_id=str(payload.get("request_id") or "") or None,
+            target_stage=str(payload.get("target_stage") or "") or None,
+            target_artifact_type=str(payload.get("target_artifact_type") or "") or None,
+            target_artifact_path=str(payload.get("target_artifact_path") or "") or None,
+        )
+    if action == "apply_scoped_artifact_revision":
+        return workflow.apply_scoped_artifact_revision(
+            run_id=run_id,
+            request_id=str(payload.get("request_id") or ""),
+        )
     if action == "resume":
         return workflow.resume_from_latest_checkpoint(run_id=run_id) or {}
     if action == "character_cast_change":
@@ -491,6 +511,8 @@ def run_writer_guided_flow(
     target_chapter_count: int = 3,
     chapter_count: int = 3,
     chapter_id: str = "",
+    default_target_chars: int | None = None,
+    chapter_length_overrides: Mapping[str, Mapping[str, Any]] | None = None,
     allow_incomplete_modeling: bool = False,
     confirm_review: Callable[[str, str], bool] | None = None,
     accept_chapter_review: Callable[[str], str] | None = None,
@@ -575,12 +597,23 @@ def run_writer_guided_flow(
         return {**result, **pending}
     result["freeze_c"] = pending or {}
 
+    if default_target_chars is not None or chapter_length_overrides:
+        result["length_review_override"] = workflow.continue_after_length_review(
+            run_id=run_id,
+            default_target_chars=default_target_chars,
+            chapter_overrides=chapter_length_overrides or {},
+        )
+
     pending = _maybe_confirm_pending_review(
         workflow=workflow,
         run_id=run_id,
         stage="wait_length_review",
         confirm_review=confirm_review,
-        on_confirm=lambda: workflow.continue_after_length_review(run_id=run_id),
+        on_confirm=lambda: workflow.continue_after_length_review(
+            run_id=run_id,
+            default_target_chars=default_target_chars,
+            chapter_overrides=chapter_length_overrides or {},
+        ),
     )
     if pending and pending.get("status") == "waiting_for_review":
         return {**result, **pending}
@@ -1182,25 +1215,30 @@ def _build_segmentation_config(
     api_key: str,
     max_total_chars: int | None,
     resume_from_checkpoint: bool,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
 ) -> SegmentationAgentConfig:
+    model_config: dict[str, object] = {
+        "model_type": "OpenAIModel",
+        "model_name": DEFAULT_PIPELINE_SEGMENT_MODEL_NAME,
+        "provider": "openai_compatible",
+        "base_url": "https://api.deepseek.com",
+        "api_key": api_key,
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "thinking": thinking,
+        "include_reasoning_content": include_reasoning_content,
+        "max_output_tokens": 12288,
+    }
+    if reasoning_effort is not None:
+        model_config["reasoning_effort"] = reasoning_effort
     return SegmentationAgentConfig.from_mapping(
         {
             "book": {
                 "book_id": book_id,
                 "source_root": source_path.as_posix(),
             },
-            "model": {
-                "model_type": "OpenAIModel",
-                "model_name": DEFAULT_PIPELINE_SEGMENT_MODEL_NAME,
-                "provider": "openai_compatible",
-                "base_url": "https://api.deepseek.com",
-                "api_key": api_key,
-                "api_key_env": "DEEPSEEK_API_KEY",
-                "thinking": "enabled",
-                "reasoning_effort": "high",
-                "include_reasoning_content": True,
-                "max_output_tokens": 12288,
-            },
+            "model": model_config,
             "read_strategy": {"max_total_chars": max_total_chars},
             "storage": {"sqlite_path": db_path.as_posix()},
             "runtime": {"dry_run": False, "resume_from_checkpoint": resume_from_checkpoint},
@@ -1215,6 +1253,9 @@ def _build_close_read_config(
     api_key: str,
     debug_path: Path,
     max_chapters: int | None,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
 ) -> CloseReadAgentConfig:
     close_config = CloseReadAgentConfig(book_id=book_id, sqlite_path=db_path.as_posix())
     close_config.model.model_type = "OpenAIModel"
@@ -1223,9 +1264,9 @@ def _build_close_read_config(
     close_config.model.base_url = "https://api.deepseek.com"
     close_config.model.api_key = api_key
     close_config.model.api_key_env = "DEEPSEEK_API_KEY"
-    close_config.model.thinking = "enabled"
-    close_config.model.reasoning_effort = "high"
-    close_config.model.include_reasoning_content = True
+    close_config.model.thinking = thinking
+    close_config.model.reasoning_effort = reasoning_effort
+    close_config.model.include_reasoning_content = include_reasoning_content
     close_config.runtime.debug_markdown_path = debug_path.as_posix()
     close_config.runtime.max_chapters = max_chapters
     return close_config
@@ -1235,6 +1276,9 @@ def _build_creative_kb_facade(
     *,
     api_key: str,
     model_name: str = DEFAULT_PIPELINE_CREATIVE_KB_MODEL_NAME,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
 ) -> CreativeKnowledgeBaseFacade:
     fragment_cards_repo = FragmentCardsRepo()
     builder = FragmentCardBuilderService(
@@ -1247,6 +1291,10 @@ def _build_creative_kb_facade(
                 api_key=api_key,
                 api_key_env="DEEPSEEK_API_KEY",
                 max_output_tokens=8192,
+                retry_without_thinking_on_failure=True,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                include_reasoning_content=include_reasoning_content,
             )
         ),
         fragment_cards_repo=fragment_cards_repo,
@@ -1263,9 +1311,18 @@ def _build_creative_kb(
     book_id: str,
     api_key: str,
     creative_kb_facade: CreativeKnowledgeBaseFacade | None = None,
+    max_doc_id: int | None = None,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
 ) -> CreativeKBBuildResult:
     db = NovelAgentDB(db_path)
-    facade = creative_kb_facade or _build_creative_kb_facade(api_key=api_key)
+    facade = creative_kb_facade or _build_creative_kb_facade(
+        api_key=api_key,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
+        include_reasoning_content=include_reasoning_content,
+    )
 
     def print_progress(event: dict[str, Any]) -> None:
         print(json.dumps({"creative_kb_progress": event}, ensure_ascii=False))
@@ -1274,6 +1331,8 @@ def _build_creative_kb(
         db.init_schema(conn)
         init_creative_kb_schema(conn)
         documents = DocumentsRepo().fetch_after_doc_id(conn, book_id=book_id)
+        if max_doc_id is not None:
+            documents = [document for document in documents if document.doc_id <= int(max_doc_id)]
         try:
             result = facade.build_creative_kb(
                 conn,
@@ -1353,6 +1412,9 @@ def _run_pipeline(
     close_step_batches: int,
     build_creative_kb: bool,
     should_stop: Callable[[], bool] | None = None,
+    thinking: str | None = "enabled",
+    reasoning_effort: str | None = "high",
+    include_reasoning_content: bool = True,
 ) -> dict[str, object]:
     should_stop = should_stop or (lambda: False)
     remaining_read_chars = _kb_to_chars(max_read_kb)
@@ -1360,6 +1422,7 @@ def _run_pipeline(
     total_inserted_documents = 0
     total_segmentation_batches = 0
     total_close_read_batches = 0
+    creative_kb_runs: list[dict[str, object]] = []
     iteration = 0
     segmentation_resume = run_mode == "resume"
     progress_snapshot = _load_progress_snapshot(db_path=db_path, book_id=book_id)
@@ -1393,6 +1456,9 @@ def _run_pipeline(
                 api_key=api_key,
                 max_total_chars=seg_round_chars,
                 resume_from_checkpoint=segmentation_resume,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                include_reasoning_content=include_reasoning_content,
             )
             seg_result = SegmentationRunner(
                 repo_root=repo_root,
@@ -1426,6 +1492,9 @@ def _run_pipeline(
                 api_key=api_key,
                 debug_path=debug_path,
                 max_chapters=close_round_batches,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                include_reasoning_content=include_reasoning_content,
             )
             close_result = CloseReadRunner(
                 repo_root=repo_root,
@@ -1438,6 +1507,31 @@ def _run_pipeline(
             if remaining_close_batches is not None:
                 remaining_close_batches = max(0, remaining_close_batches - close_result.processed_batches)
             iteration_made_progress = iteration_made_progress or close_result.processed_batches > 0
+
+            if build_creative_kb and close_result.processed_batches > 0 and not should_stop():
+                close_progress = _load_progress_snapshot(db_path=db_path, book_id=book_id)
+                max_doc_id = close_progress.get("last_completed_doc_id")
+                if isinstance(max_doc_id, int) and max_doc_id > 0:
+                    result = _build_creative_kb(
+                        db_path=db_path,
+                        book_id=book_id,
+                        api_key=api_key,
+                        max_doc_id=max_doc_id,
+                        thinking=thinking,
+                        reasoning_effort=reasoning_effort,
+                        include_reasoning_content=include_reasoning_content,
+                    )
+                    creative_kb_payload = result.to_dict()
+                    creative_kb_payload["max_doc_id"] = max_doc_id
+                    creative_kb_runs.append(creative_kb_payload)
+                    print(
+                        json.dumps(
+                            {
+                                "creative_kb": creative_kb_payload,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
 
         progress_snapshot = _load_progress_snapshot(db_path=db_path, book_id=book_id)
         close_read_lag_chars = max(
@@ -1498,14 +1592,22 @@ def _run_pipeline(
         )
     )
 
-    creative_kb_result: dict[str, object] | None = None
-    if build_creative_kb and not should_stop():
+    creative_kb_result: dict[str, object] | None = creative_kb_runs[-1] if creative_kb_runs else None
+    if build_creative_kb and not creative_kb_runs and not should_stop():
+        max_doc_id = progress_snapshot.get("last_completed_doc_id")
         result = _build_creative_kb(
             db_path=db_path,
             book_id=book_id,
             api_key=api_key,
+            max_doc_id=max_doc_id if isinstance(max_doc_id, int) else None,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            include_reasoning_content=include_reasoning_content,
         )
         creative_kb_result = result.to_dict()
+        if isinstance(max_doc_id, int):
+            creative_kb_result["max_doc_id"] = max_doc_id
+        creative_kb_runs.append(creative_kb_result)
         print(
             json.dumps(
                 {
@@ -1521,6 +1623,7 @@ def _run_pipeline(
         "close_read_batches": total_close_read_batches,
         "source_arc_map": source_arc_map_result,
         "creative_kb": creative_kb_result,
+        "creative_kb_runs": creative_kb_runs,
         "segmentation_progress_kb": progress_snapshot["segmentation_kb"],
         "close_read_progress_kb": progress_snapshot["close_read_kb"],
         "segmentation_progress_chars": progress_snapshot["segmentation_chars"],

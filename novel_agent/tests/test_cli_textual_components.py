@@ -15,6 +15,7 @@ from novel_agent.app.cli import (
     DecisionPanelWidget,
     MessageFlow,
     PromptInput,
+    ScopedRevisionFeedbackWidget,
     StatusOverlay,
     TextualNovelAgentApp,
     TuiApp,
@@ -29,6 +30,9 @@ class _TextualFakeFacade:
         self.repo_root = repo_root
         self.calls: list[str] = []
         self.last_read_kwargs: dict[str, object] = {}
+        self.scoped_revision_requests: list[dict[str, object]] = []
+        self.scoped_revision_applies: list[dict[str, object]] = []
+        self.next_scoped_revision_result: dict[str, object] | None = None
 
     def db_path_for_book(self, book_id: str) -> Path:
         return self.repo_root / ".indexes" / f"{book_id}.db"
@@ -113,6 +117,38 @@ class _TextualFakeFacade:
     def writer_action(self, **_kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("writer_action")
         return {"status": "chapter_review", "checkpoint": {"stage": "chapter_review"}}
+
+    def request_scoped_artifact_revision(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append("request_scoped_artifact_revision")
+        self.scoped_revision_requests.append(dict(kwargs))
+        if self.next_scoped_revision_result is not None:
+            return dict(self.next_scoped_revision_result)
+        return {
+            "status": "candidate",
+            "request_id": "req-1",
+            "revision_id": "rev-1",
+            "change_summary": "把反派登场提前，并保留当前主线。",
+            "diff": "- 反派第三章登场\n+ 反派第二章登场",
+            "validation": {"ok": True, "checks": ["schema", "scope"]},
+        }
+
+    def apply_scoped_artifact_revision(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append("apply_scoped_artifact_revision")
+        self.scoped_revision_applies.append(dict(kwargs))
+        artifact_path = self.scoped_revision_requests[-1]["target_artifact_path"]
+        return {
+            "status": "applied",
+            "request_id": kwargs["request_id"],
+            "revision_id": "rev-1",
+            "artifact_path": str(artifact_path),
+            "change_summary": "把反派登场提前，并保留当前主线。",
+            "diff": "- 反派第三章登场\n+ 反派第二章登场",
+            "validation": {"ok": True, "applied": True},
+            "workflow_state": {
+                "current_stage": "batch_review",
+                "pending_checkpoint": {"stage": "batch_review", "artifact_path": str(artifact_path)},
+            },
+        }
 
 
 def _run(coro) -> None:  # type: ignore[no-untyped-def]
@@ -304,6 +340,7 @@ def test_close_read_batches_option_controls_work_amount_and_announces_default_bu
             assert "约 20000 字文档预算" in rendered
             assert app.session.facade.last_read_kwargs["max_close_batches"] == 3  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["close_step_batches"] == 1  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["build_creative_kb"] is True  # type: ignore[attr-defined]
 
     _run(scenario())
 
@@ -466,3 +503,148 @@ def test_decision_panel_widget_chapter_acceptance_options() -> None:
     assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
     assert "action=accept_chapter" in rendered
+
+
+def test_planning_decision_panel_exposes_scoped_revision_and_manual_edit() -> None:
+    panel = DecisionPanel.planning_review(
+        artifact_path="/tmp/batch_plan.json",
+        stage_label="请审阅本批剧情大纲",
+        next_status="章节梗概已确认",
+    )
+    widget = DecisionPanelWidget(panel)
+    rendered = widget.render_panel()
+
+    assert "接受并继续 -> 章节梗概已确认 · action=confirm_current_step" in rendered
+    assert "按我的反馈修改 -> 请审阅本批剧情大纲 · action=request_scoped_artifact_revision" in rendered
+    assert "手动编辑 -> 请审阅本批剧情大纲 · action=manual_edit" in rendered
+    assert panel.choose("2").workflow_action == "request_scoped_artifact_revision"
+    assert panel.choose("3").workflow_action == "manual_edit"
+
+
+def test_textual_scoped_revision_feedback_params_diff_apply_and_no_auto_confirm(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        artifact_path = tmp_path / "batch_plan.json"
+        artifact_path.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.session.set_status("batch_review", technical_details={"run_id": "run-1"})
+            screen.show_artifact(artifact_path, stage="batch_review")
+            await pilot.pause()
+
+            panel = screen.session.decision_panel
+            assert panel is not None
+            screen.on_decision_panel_widget_selected(DecisionPanelWidget.Selected(panel.choose("2")))
+            await pilot.pause()
+            feedback = screen.query_one("#scoped-revision-feedback", ScopedRevisionFeedbackWidget)
+            feedback.value = "保留主线，但把反派登场提前到第二章。"
+            feedback.submit()
+            for _ in range(5):
+                await pilot.pause()
+
+            facade = app.session.facade
+            assert facade.scoped_revision_requests[-1]["current_review_state"] == "batch_review"  # type: ignore[attr-defined]
+            assert facade.scoped_revision_requests[-1]["target_artifact_path"] == str(artifact_path)  # type: ignore[attr-defined]
+            assert facade.scoped_revision_requests[-1]["user_feedback"] == "保留主线，但把反派登场提前到第二章。"  # type: ignore[attr-defined]
+            rendered = app.session.messages.render(limit=30)
+            assert "修改摘要：把反派登场提前" in rendered
+            assert "- 反派第三章登场" in rendered
+            assert "校验结果：\n通过" in rendered
+            assert "writer_action" not in facade.calls  # type: ignore[attr-defined]
+
+            candidate_panel = screen.session.decision_panel
+            assert candidate_panel is not None
+            screen.on_decision_panel_widget_selected(DecisionPanelWidget.Selected(candidate_panel.choose("a")))
+            for _ in range(5):
+                await pilot.pause()
+
+            assert facade.scoped_revision_applies[-1]["request_id"] == "req-1"  # type: ignore[attr-defined]
+            assert "apply_scoped_artifact_revision" in facade.calls  # type: ignore[attr-defined]
+            assert "writer_action" not in facade.calls  # type: ignore[attr-defined]
+            assert app.session.current_status.step == "请审阅本批剧情大纲"
+            assert "保存 · 已保存你的修改" in app.session.messages.render(limit=40)
+
+    _run(scenario())
+
+
+def test_textual_scoped_revision_validation_failure_shows_recovery_without_accepting(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        app.session.facade.next_scoped_revision_result = {  # type: ignore[attr-defined]
+            "status": "validation_failed",
+            "request_id": "req-bad",
+            "revision_id": "rev-bad",
+            "change_summary": "候选越过了当前产物边界。",
+            "diff": "- 当前章节\n+ 其他章节",
+            "validation": {"ok": False, "errors": ["target artifact is outside current review scope"]},
+        }
+        artifact_path = tmp_path / "batch_plan.json"
+        artifact_path.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.session.set_status("batch_review", technical_details={"run_id": "run-1"})
+            screen.show_artifact(artifact_path, stage="batch_review")
+            await pilot.pause()
+
+            panel = screen.session.decision_panel
+            assert panel is not None
+            screen.on_decision_panel_widget_selected(DecisionPanelWidget.Selected(panel.choose("2")))
+            await pilot.pause()
+            feedback = screen.query_one("#scoped-revision-feedback", ScopedRevisionFeedbackWidget)
+            feedback.value = "顺便修改其他章节和 Memory。"
+            feedback.submit()
+            for _ in range(5):
+                await pilot.pause()
+
+            rendered = app.session.messages.render(limit=30)
+            assert "校验结果：\n未通过" in rendered
+            assert "target artifact is outside current review scope" in rendered
+            assert "修改反馈后重试，或选择手动编辑当前产物。" in rendered
+            assert app.session.facade.scoped_revision_applies == []  # type: ignore[attr-defined]
+            assert screen.pending_scoped_revision is None
+            assert app.session.current_status.step == "请审阅本批剧情大纲"
+
+    _run(scenario())
+
+
+def test_textual_scoped_revision_reject_returns_to_review_without_apply(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        artifact_path = tmp_path / "batch_plan.json"
+        artifact_path.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.session.set_status("batch_review", technical_details={"run_id": "run-1"})
+            screen.show_artifact(artifact_path, stage="batch_review")
+            await pilot.pause()
+
+            panel = screen.session.decision_panel
+            assert panel is not None
+            screen.on_decision_panel_widget_selected(DecisionPanelWidget.Selected(panel.choose("2")))
+            await pilot.pause()
+            feedback = screen.query_one("#scoped-revision-feedback", ScopedRevisionFeedbackWidget)
+            feedback.value = "把第二章结尾改成悬疑钩子。"
+            feedback.submit()
+            for _ in range(5):
+                await pilot.pause()
+
+            candidate_panel = screen.session.decision_panel
+            assert candidate_panel is not None
+            screen.on_decision_panel_widget_selected(DecisionPanelWidget.Selected(candidate_panel.choose("r")))
+            await pilot.pause()
+
+            assert app.session.facade.scoped_revision_applies == []  # type: ignore[attr-defined]
+            assert screen.pending_scoped_revision is None
+            assert app.session.current_status.step == "请审阅本批剧情大纲"
+            assert "当前产物未写入" in app.session.messages.render(limit=40)
+
+    _run(scenario())

@@ -53,10 +53,28 @@ class DecisionPanel:
             artifact_path=artifact_path,
             summary=f"文件：{artifact_path}",
             options=(
-                DecisionOption("s", "保存修改", stage_label, "save_artifact"),
-                DecisionOption("c", "确认并继续", next_status, "confirm_current_step"),
-                DecisionOption("b", "返回上一层", "返回上一层可修改节点", "go_back"),
-                DecisionOption("w", "稍后继续", stage_label, "defer_decision"),
+                DecisionOption("1", "接受并继续", next_status, "confirm_current_step"),
+                DecisionOption("2", "按我的反馈修改", stage_label, "request_scoped_artifact_revision"),
+                DecisionOption("3", "手动编辑", stage_label, "manual_edit"),
+                DecisionOption("4", "返回上一层", "返回上一层可修改节点", "go_back"),
+                DecisionOption("5", "稍后继续", stage_label, "defer_decision"),
+            ),
+        )
+
+    @classmethod
+    def scoped_revision_candidate(cls, *, request_id: str, stage_label: str) -> "DecisionPanel":
+        return cls(
+            title="候选修改已生成",
+            summary="请先检查上方的修改摘要、diff 和校验结果，再决定是否应用。",
+            options=(
+                DecisionOption(
+                    "a",
+                    "接受候选修改",
+                    stage_label,
+                    "apply_scoped_artifact_revision",
+                    {"request_id": request_id},
+                ),
+                DecisionOption("r", "拒绝候选修改", stage_label, "reject_scoped_artifact_revision", {"request_id": request_id}),
             ),
         )
 

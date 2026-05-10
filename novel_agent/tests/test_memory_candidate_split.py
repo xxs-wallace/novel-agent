@@ -4,11 +4,12 @@ from pathlib import Path
 
 from novel_agent.app.constants import DEFAULT_CLOSE_READING_STAGE
 from novel_agent.app.repos.db import NovelAgentDB
+from novel_agent.app.repos.documents_repo import DocumentRow
 from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.repos.reading_progress_repo import ReadingProgressRepo
 from novel_agent.app.runner.close_read_runner import CloseReadRunner
 from novel_agent.app.schemas.config_schema import CloseReadAgentConfig, CloseReadRuntimeConfig
-from novel_agent.app.services.chapter_assembler_service import ChapterAssemblerService
+from novel_agent.app.services.chapter_assembler_service import ChapterAssemblerService, ChapterBatch
 from novel_agent.app.services.memory_candidate_service import MemoryCandidateService
 
 def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
@@ -134,6 +135,55 @@ def test_world_evidence_trigger_uses_hybrid_threshold(tmp_path: Path) -> None:
             "world_evidence_candidates": [{"section": "能力体系", "summary": "疑似规则", "confidence": 0.4}],
         },
     ) is True
+
+
+def test_close_read_normalizes_model_low_signal_front_matter_summary(tmp_path: Path) -> None:
+    runner = CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+    content = "目录 第一幕 第二幕 献词 题记 在你最孤单最无望的时候，有一扇门会打开。"
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第二幕 黄金瞳 Golden Eyes",
+        documents=[
+            DocumentRow(
+                doc_id=1,
+                book_id="book",
+                path="source.txt",
+                scope="chapter",
+                title="第二幕 黄金瞳 Golden Eyes",
+                document_title="第二幕 黄金瞳 Golden Eyes",
+                document_title_index=1,
+                inferred_chapter_no=1,
+                content=content,
+                content_chars=len(content),
+                character_keywords=[],
+                content_tags=[],
+                source_path="source.txt",
+                source_file_name="source.txt",
+                source_start_offset=0,
+                source_end_offset=len(content),
+            )
+        ],
+        chapter_doc_count=1,
+        chapter_total_chars=len(content),
+    )
+
+    summary = runner._normalize_chapter_summary(  # noqa: SLF001
+        summary_md="本章节内容为全书目录和献词题记。无具体剧情事件、人物行动或情节推进。",
+        batch=batch,
+        source_total_chars=len(content),
+    )
+
+    assert "## 剧情事件链" in summary
+    assert "无具体剧情事件" in summary
+    assert "## 结构功能/节奏" in summary
+    assert "低信号前置文本" in summary
 
 
 def test_chapter_assembler_can_prefetch_multiple_close_read_batches(tmp_path: Path) -> None:

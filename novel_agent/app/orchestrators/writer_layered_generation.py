@@ -357,11 +357,12 @@ class WriterLayeredGenerationOrchestrator:
             character_seeds=seeds,
             roster_hints=roster_hints,
         )
+        allow_character_cast = bool(intent_payload.get("allow_character_cast", True))
 
         planned_character_profiles: list[PlannedCharacterProfile] = []
         character_cast_plan: CharacterCastPlan | None = None
         character_introduction_plan: CharacterIntroductionPlan | None = None
-        if cast_request is not None and cast_request.requirements:
+        if allow_character_cast and cast_request is not None and cast_request.requirements:
             planned_character_profiles, character_cast_plan, character_introduction_plan = self.plan_character_cast(
                 book_id=book_id,
                 intent=intent,

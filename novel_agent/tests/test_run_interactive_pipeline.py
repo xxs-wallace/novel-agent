@@ -52,6 +52,30 @@ class _RecordingCreativeKBFacade:
         )
 
 
+def test_creative_kb_facade_enables_thinking_fallback_for_kb_agents(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured_settings = []
+
+    class FakeJsonModelClient:
+        def __init__(self, settings) -> None:  # type: ignore[no-untyped-def]
+            captured_settings.append(settings)
+
+    monkeypatch.setattr(run_interactive, "JsonModelClient", FakeJsonModelClient)
+    facade = run_interactive._build_creative_kb_facade(  # noqa: SLF001
+        api_key="test-key",
+        thinking="enabled",
+        reasoning_effort="high",
+        include_reasoning_content=True,
+    )
+
+    assert len(captured_settings) == 1
+    settings = captured_settings[0]
+    assert settings.retry_without_thinking_on_failure is True
+    assert settings.thinking == "enabled"
+    assert settings.reasoning_effort == "high"
+    assert settings.include_reasoning_content is True
+    assert facade.semantic_alias_extractor_service.model_client is facade.fragment_card_builder_service.model_client
+
+
 def test_interactive_pipeline_builds_creative_kb_from_current_book_documents(tmp_path: Path) -> None:
     db_path = tmp_path / "pipeline.db"
     db = NovelAgentDB(db_path)
@@ -104,6 +128,142 @@ def test_interactive_pipeline_builds_creative_kb_from_current_book_documents(tmp
     assert facade.document_ids == [1]
     assert result.built_fragment_count == 1
     assert result.fragment_ids == ["fragment-1"]
+
+
+def test_interactive_pipeline_can_limit_creative_kb_to_close_read_documents(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    db = NovelAgentDB(db_path)
+    documents_repo = DocumentsRepo()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        for index in range(1, 4):
+            documents_repo.insert_document(
+                conn,
+                {
+                    "content": f"第{index}段内容。",
+                    "book_id": "couple",
+                    "path": "/tmp/couple.txt",
+                    "scope": "chapter",
+                    "document_title": f"第{index}章",
+                    "document_title_index": index,
+                    "content_tags": [],
+                    "source_path": "/tmp/couple.txt",
+                    "source_file_name": "couple.txt",
+                    "source_start_offset": index * 10,
+                    "source_end_offset": index * 10 + 5,
+                },
+            )
+        conn.commit()
+
+    facade = _RecordingCreativeKBFacade()
+    result = _build_creative_kb(
+        db_path=db_path,
+        book_id="couple",
+        api_key="unused",
+        creative_kb_facade=facade,  # type: ignore[arg-type]
+        max_doc_id=2,
+    )
+
+    assert facade.document_ids == [1, 2]
+    assert result.built_fragment_count == 2
+
+
+def test_pipeline_builds_creative_kb_after_each_close_read_round(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    db_path = tmp_path / "pipeline.db"
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("雨夜之后，调查继续。", encoding="utf-8")
+    debug_path = repo_root / ".memory" / "debug" / "couple.sqlite.md"
+
+    db = NovelAgentDB(db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        documents_repo = DocumentsRepo()
+        for index in range(1, 4):
+            documents_repo.insert_document(
+                conn,
+                {
+                    "content": f"第{index}段内容。",
+                    "book_id": "couple",
+                    "path": source_path.as_posix(),
+                    "scope": "chapter",
+                    "document_title": f"第{index}章",
+                    "document_title_index": index,
+                    "content_tags": [],
+                    "source_path": source_path.as_posix(),
+                    "source_file_name": source_path.name,
+                    "source_start_offset": index * 10,
+                    "source_end_offset": index * 10 + 5,
+                },
+            )
+        conn.commit()
+
+    class FakeSegmentationRunner:
+        def __init__(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def run(self):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(inserted_documents=0, batch_count=0)
+
+    class FakeCloseReadRunner:
+        calls = 0
+
+        def __init__(self, *, db_path: Path, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.db_path = db_path
+
+        def run(self):  # type: ignore[no-untyped-def]
+            FakeCloseReadRunner.calls += 1
+            completed_doc_id = FakeCloseReadRunner.calls
+            db = NovelAgentDB(self.db_path)
+            with db.connect() as conn:
+                db.init_schema(conn)
+                ReadingProgressRepo().upsert(
+                    conn,
+                    {
+                        "book_id": "couple",
+                        "agent_stage": DEFAULT_CLOSE_READING_STAGE,
+                        "last_completed_doc_id": completed_doc_id,
+                        "updated_at": "now",
+                    },
+                )
+                conn.commit()
+            return SimpleNamespace(processed_batches=1, batch_metrics=[{"batch_index": completed_doc_id}])
+
+    kb_max_doc_ids: list[int | None] = []
+
+    def fake_build_creative_kb(**kwargs):  # type: ignore[no-untyped-def]
+        kb_max_doc_ids.append(kwargs.get("max_doc_id"))
+        return CreativeKBBuildResult(
+            built_fragment_count=1,
+            built_cluster_count=1,
+            representative_count=1,
+            fragment_ids=[f"fragment-{kwargs.get('max_doc_id')}"],
+            cluster_ids=["cluster-1"],
+        )
+
+    monkeypatch.setattr(run_interactive, "SegmentationRunner", FakeSegmentationRunner)
+    monkeypatch.setattr(run_interactive, "CloseReadRunner", FakeCloseReadRunner)
+    monkeypatch.setattr(run_interactive, "_build_source_arc_map", lambda **_kwargs: {"status": "skipped"})
+    monkeypatch.setattr(run_interactive, "_build_creative_kb", fake_build_creative_kb)
+
+    result = run_interactive._run_pipeline(  # noqa: SLF001
+        repo_root=repo_root,
+        book_id="couple",
+        source_path=source_path,
+        db_path=db_path,
+        debug_path=debug_path,
+        api_key="unused",
+        run_mode="resume",
+        max_read_kb=0,
+        max_close_batches=2,
+        segment_step_kb=1,
+        close_step_batches=1,
+        build_creative_kb=True,
+    )
+
+    assert kb_max_doc_ids == [1, 2]
+    assert [item["max_doc_id"] for item in result["creative_kb_runs"]] == [1, 2]  # type: ignore[index]
 
 
 def test_interactive_pipeline_builds_source_arc_map_from_chapter_summaries(tmp_path: Path) -> None:
@@ -320,7 +480,7 @@ def test_interactive_pipeline_resume_smoke_with_couple_txt(
         conn.commit()
 
     class FakeSegmentationRunner:
-        def __init__(self, *, repo_root: Path, db_path: Path, config, progress_callback=None) -> None:
+        def __init__(self, *, repo_root: Path, db_path: Path, config, progress_callback=None, **_kwargs) -> None:
             self.repo_root = repo_root
             self.db_path = db_path
             self.config = config
@@ -345,7 +505,7 @@ def test_interactive_pipeline_resume_smoke_with_couple_txt(
             return SimpleNamespace(inserted_documents=0, batch_count=0)
 
     class FakeCloseReadRunner:
-        def __init__(self, *, repo_root: Path, db_path: Path, config, progress_callback=None) -> None:
+        def __init__(self, *, repo_root: Path, db_path: Path, config, progress_callback=None, **_kwargs) -> None:
             self.repo_root = repo_root
             self.db_path = db_path
             self.config = config
@@ -643,6 +803,7 @@ def test_writer_guided_flow_confirms_freeze_points_to_execution_input(tmp_path: 
             user_world_notes="不要突破既有能力体系。",
             target_chapter_count=2,
             chapter_count=2,
+            default_target_chars=1800,
             confirm_review=lambda _stage, _artifact_path: True,
         )
         conn.commit()
@@ -660,6 +821,8 @@ def test_writer_guided_flow_confirms_freeze_points_to_execution_input(tmp_path: 
     assert workflow.run_writer.get_freeze_record("run-guided", "freeze_d") is not None
     assert (run_dir / "chapter_length_plan.json").exists()
     assert (run_dir / "chapter_execution_input.json").exists()
+    length_budget = json.loads((run_dir / "chapter_length_budget.json").read_text(encoding="utf-8"))["data"]
+    assert length_budget["target_chars"] == 1800
 
 
 def test_writer_terminal_redaction_omits_large_draft_text() -> None:

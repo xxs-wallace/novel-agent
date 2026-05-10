@@ -392,6 +392,57 @@ class WorkflowFacade:
         self.event_stream.emit("系统", "Writer 状态已更新", payload={"run_id": run_id, "action": action})
         return result
 
+    def request_scoped_artifact_revision(
+        self,
+        *,
+        book_id: str,
+        run_id: str,
+        user_feedback: str,
+        current_review_state: str = "",
+        target_artifact_path: str = "",
+        product_mode: str = "assist",
+        dry_run: bool = True,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, object] = {"user_feedback": user_feedback}
+        if current_review_state:
+            payload["target_stage"] = current_review_state
+        if target_artifact_path:
+            payload["target_artifact_path"] = target_artifact_path
+        result = self.writer_action(
+            book_id=book_id,
+            run_id=run_id,
+            action="request_scoped_artifact_revision",
+            product_mode=product_mode,
+            payload=payload,
+            dry_run=dry_run,
+            api_key=api_key,
+        )
+        self.event_stream.emit("系统", "已生成受控修订候选", payload={"run_id": run_id, "status": result.get("status")})
+        return result
+
+    def apply_scoped_artifact_revision(
+        self,
+        *,
+        book_id: str,
+        run_id: str,
+        request_id: str,
+        product_mode: str = "assist",
+        dry_run: bool = True,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.writer_action(
+            book_id=book_id,
+            run_id=run_id,
+            action="apply_scoped_artifact_revision",
+            product_mode=product_mode,
+            payload={"request_id": request_id},
+            dry_run=dry_run,
+            api_key=api_key,
+        )
+        self.event_stream.emit("系统", "已应用受控修订候选", payload={"run_id": run_id, "request_id": request_id})
+        return result
+
     def run_paragraph_benchmark(
         self,
         *,
@@ -494,9 +545,13 @@ class WorkflowFacade:
             raise ValueError(f"未知 benchmark 目标：{target}")
         payload = result.to_dict()
         payload["summary_text"] = (
-            f"Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+            f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
+            f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
+            f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
             f"run_id：{result.run_id}\n"
             f"产物目录：{result.run_dir}\n"
+            f"生成梗概：{result.generated_synopsis_path}\n"
+            f"原文梗概：{result.reference_synopsis_path}\n"
             f"Writer 草稿：{result.draft_path}\n"
             f"Reference truth：{result.reference_truth_path}\n"
             f"生成字数：{result.generated_chars}\n"

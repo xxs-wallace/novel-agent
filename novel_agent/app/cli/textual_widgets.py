@@ -107,6 +107,25 @@ class PromptTextArea(TextArea):
         await super()._on_key(event)
 
 
+class ScopedRevisionFeedbackTextArea(TextArea):
+    """TextArea variant for scoped artifact revision feedback."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "shift+enter":
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        if event.key in {"enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            parent = self.parent
+            if isinstance(parent, ScopedRevisionFeedbackWidget):
+                parent.submit()
+            return
+        await super()._on_key(event)
+
+
 class PromptInput(Vertical, can_focus=True):
     """Textual prompt wrapper with metadata, history, slash and artifact suggestions."""
 
@@ -249,6 +268,82 @@ class PromptInput(Vertical, can_focus=True):
         ]
         widget.update("\n".join(f"{candidate.token}  {candidate.path.name}" for candidate in candidates[:6]))
         widget.display = bool(candidates)
+
+
+class ScopedRevisionFeedbackWidget(Vertical, can_focus=True):
+    DEFAULT_CSS = """
+    ScopedRevisionFeedbackWidget {
+        height: 14;
+        min-height: 12;
+        max-height: 16;
+        border-top: solid $warning;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    ScopedRevisionFeedbackWidget TextArea {
+        height: 8;
+        min-height: 6;
+        max-height: 10;
+        border: none;
+        background: $panel;
+    }
+
+    #scoped-revision-title {
+        height: auto;
+        color: $warning;
+    }
+
+    #scoped-revision-help {
+        height: auto;
+        color: $text-muted;
+    }
+    """
+
+    class Submitted(Message):
+        def __init__(self, feedback: str) -> None:
+            self.feedback = feedback
+            super().__init__()
+
+    class Cancelled(Message):
+        pass
+
+    def __init__(self, *, title: str = "你希望怎么修改这份产物？", id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.title = title
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.title, id="scoped-revision-title")
+        yield Static(
+            "例如：保留当前主线，但把反派登场提前；降低关系升温速度；结尾增加悬疑钩子。",
+            id="scoped-revision-help",
+        )
+        yield ScopedRevisionFeedbackTextArea("", language="markdown", show_line_numbers=False, soft_wrap=True, id="scoped-revision-text")
+        yield Static("Enter 提交 · Shift+Enter 换行 · Esc 返回审阅", id="scoped-revision-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#scoped-revision-text", TextArea).focus()
+
+    @property
+    def value(self) -> str:
+        return self.query_one("#scoped-revision-text", TextArea).text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        editor = self.query_one("#scoped-revision-text", TextArea)
+        editor.load_text(text)
+        editor.move_cursor(editor.document.end)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.post_message(self.Cancelled())
+
+    def submit(self) -> None:
+        feedback = self.value.strip()
+        if feedback:
+            self.value = ""
+        self.post_message(self.Submitted(feedback))
 
 
 class ArtifactReviewPane(Vertical):

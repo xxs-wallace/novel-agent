@@ -299,6 +299,57 @@ def test_tui_app_benchmark_command_renders_reviewer_summary(tmp_path: Path) -> N
     assert "产物目录" in rendered
 
 
+def test_workflow_facade_scoped_revision_boundary_payload_is_thin(tmp_path: Path) -> None:
+    class _CaptureFacade(WorkflowFacade):
+        def __init__(self, *, repo_root: Path) -> None:
+            super().__init__(repo_root=repo_root)
+            self.calls: list[dict[str, object]] = []
+
+        def writer_action(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(dict(kwargs))
+            if kwargs["action"] == "request_scoped_artifact_revision":
+                return {
+                    "status": "candidate",
+                    "request_id": "req-1",
+                    "revision_id": "rev-1",
+                    "change_summary": "已按反馈调整当前产物。",
+                    "diff": "- old\n+ new",
+                    "validation": {"ok": True},
+                }
+            return {
+                "status": "applied",
+                "request_id": kwargs["payload"]["request_id"],
+                "revision_id": "rev-1",
+                "change_summary": "已按反馈调整当前产物。",
+                "diff": "- old\n+ new",
+                "validation": {"ok": True, "applied": True},
+            }
+
+    facade = _CaptureFacade(repo_root=tmp_path)
+
+    candidate = facade.request_scoped_artifact_revision(
+        book_id="couple",
+        run_id="run-1",
+        current_review_state="batch_review",
+        target_artifact_path="/tmp/batch_plan.json",
+        user_feedback="把反派登场提前。",
+    )
+    applied = facade.apply_scoped_artifact_revision(book_id="couple", run_id="run-1", request_id="req-1")
+
+    request_payload = facade.calls[0]["payload"]
+    assert request_payload == {
+        "user_feedback": "把反派登场提前。",
+        "target_stage": "batch_review",
+        "target_artifact_path": "/tmp/batch_plan.json",
+    }
+    assert "prompt" not in request_payload
+    assert "allowed_context" not in request_payload
+    assert "revised_artifact" not in request_payload
+    assert facade.calls[1]["payload"] == {"request_id": "req-1"}
+    assert candidate["diff"] == "- old\n+ new"
+    assert applied["status"] == "applied"
+
+
 def _fake_agentic_smoke_result(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         run_id="run-1",
@@ -310,10 +361,21 @@ def _fake_agentic_smoke_result(tmp_path: Path) -> SimpleNamespace:
         writer_run_dir=str(tmp_path / "writer_runs" / "run-1"),
         draft_path=str(tmp_path / "writer_runs" / "run-1" / "draft.md"),
         reference_truth_path=str(tmp_path / "reference_truth.txt"),
+        generated_synopsis_path=str(tmp_path / "generated_story_synopsis.json"),
+        reference_synopsis_path=str(tmp_path / "reference_story_synopsis.json"),
+        synopsis_reviewer_report_path=str(tmp_path / "synopsis_reviewer_report.json"),
+        expansion_prompt_path=str(tmp_path / "expansion" / "prompt.json"),
+        expansion_reviewer_report_path=str(tmp_path / "expansion_reviewer_report.json"),
         reviewer_report_path=str(tmp_path / "reviewer_report.json"),
         summary_path=str(tmp_path / "summary.json"),
         generated_chars=12,
         reference_truth_chars=8,
+        synopsis_decision="pass",
+        synopsis_score=0.7,
+        synopsis_summary="梗概层中文结论",
+        expansion_decision="pass",
+        expansion_score=0.62,
+        expansion_summary="扩写层中文结论",
         reviewer_decision="pass",
         reviewer_score=0.66,
         reviewer_summary="中文 Reviewer 结论",
@@ -323,6 +385,14 @@ def _fake_agentic_smoke_result(tmp_path: Path) -> SimpleNamespace:
             "reviewer_summary": "中文 Reviewer 结论",
             "reviewer_decision": "pass",
             "reviewer_score": 0.66,
+            "synopsis_summary": "梗概层中文结论",
+            "synopsis_decision": "pass",
+            "synopsis_score": 0.7,
+            "expansion_summary": "扩写层中文结论",
+            "expansion_decision": "pass",
+            "expansion_score": 0.62,
+            "generated_synopsis_path": str(tmp_path / "generated_story_synopsis.json"),
+            "reference_synopsis_path": str(tmp_path / "reference_story_synopsis.json"),
             "draft_path": str(tmp_path / "writer_runs" / "run-1" / "draft.md"),
             "reference_truth_path": str(tmp_path / "reference_truth.txt"),
             "generated_chars": 12,

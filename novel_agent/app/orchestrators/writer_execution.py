@@ -520,6 +520,14 @@ class RestrictedWriterExecutor:
             "writeback_committed": writeback_committed,
         }
 
+    def build_draft_prompt(self, execution_input: Mapping[str, Any]) -> dict[str, str]:
+        """Return the exact prompt used by the restricted draft generator."""
+        return self._build_execution_prompt(execution_input)
+
+    def generate_draft_from_execution_input(self, execution_input: Mapping[str, Any]) -> str:
+        """Generate a draft from a prepared execution input without requiring freeze records."""
+        return self._generate_draft(execution_input)
+
     def apply_memory_writeback(
         self,
         conn: sqlite3.Connection,
@@ -658,11 +666,29 @@ class RestrictedWriterExecutor:
     def _build_execution_prompt(self, execution_input: Mapping[str, Any]) -> dict[str, str]:
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
         length_budget = dict(execution_input.get("length_budget") or {})
+        reference_document_synopses = chapter_brief.get("reference_document_synopses")
+        if not isinstance(reference_document_synopses, list):
+            structure_hint = chapter_brief.get("structure_hint")
+            reference_document_synopses = (
+                structure_hint.get("document_synopses")
+                if isinstance(structure_hint, dict) and isinstance(structure_hint.get("document_synopses"), list)
+                else []
+            )
+        expansion_guidance = {
+            "target_chars": int(length_budget.get("target_chars") or self._chapter_target_chars(chapter_brief)),
+            "combined_synopsis": chapter_brief.get("combined_synopsis"),
+            "reference_document_synopses": reference_document_synopses,
+            "rule": (
+                "如果 reference_document_synopses 非空，必须按 order 顺序把这些连续 document 梗概合并成"
+                "一个连贯长段/章节来扩写；目标是覆盖整组梗概，而不是只写第一条或摘要式带过。"
+            ),
+        }
         return {
             "system_prompt": (
                 "你是受限正文执行器。你只能消费冻结的 ChapterBrief 与已冻结事实输入。"
                 "事实优先于风格输入。不得自由创建关键新角色，不得新增大型设定，不得跳过关系桥接，"
                 "不得越过当前批次边界。必须遵守原作叙事契约，不得擅自更换叙述者或视角机制。"
+                "若输入包含连续多个 document 梗概，必须按顺序合并为同一段连续正文并写到长度预算附近。"
                 "只输出正文，不要解释。"
             ),
             "user_prompt": json.dumps(
@@ -670,6 +696,7 @@ class RestrictedWriterExecutor:
                     "chapter_title": execution_input.get("chapter_title"),
                     "chapter_brief": chapter_brief,
                     "length_budget": length_budget,
+                    "expansion_guidance": expansion_guidance,
                     "narration_consistency_rules": list(NARRATION_CONSISTENCY_RULES),
                     "fact_inputs": execution_input.get("fact_inputs"),
                     "style_reference_bundle": execution_input.get("style_reference_bundle"),

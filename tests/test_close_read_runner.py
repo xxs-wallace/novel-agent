@@ -210,7 +210,7 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
             book_id="multi_chapter_book",
             title_index=1,
             title="第一章",
-            content="第一章标记。" + "路明非进入校园。" * 6,
+            content="第一章标记。" + "路明非说自己进入校园。" * 6,
         )
         _insert_document(
             conn,
@@ -218,11 +218,16 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
             book_id="multi_chapter_book",
             title_index=2,
             title="第二章",
-            content="第二章标记。" + "楚子航提到龙族。" * 6,
+            content="第二章标记。" + "楚子航说出龙族线索。" * 6,
         )
         conn.commit()
 
-    long_summary = "剧情推进充分，人物关系和设定变化被清晰保留。" * 20
+    long_summary = _plot_synopsis(
+        "路明非进入校园之后，第二章继续以楚子航提到龙族为线索推进设定，两章合在一起形成从入场到设定揭示的连续事件链。",
+        characters="路明非完成入场，楚子航承担设定提示，人物信息分别落在各自章节。",
+        info="校园场景与龙族线索被压缩为后续记忆需要保留的关键信息。",
+        structure="多章批次承担连续推进与设定揭示功能。",
+    )
 
     def fake_generate_json(
         self,
@@ -232,9 +237,60 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
         fallback_factory,
         use_fallback_on_error: bool = False,
     ):
-        _ = self, system_prompt, user_prompt, fallback_factory, use_fallback_on_error
+        _ = self, use_fallback_on_error
+        if "Character Evidence Agent" in system_prompt:
+            if "路明非" in user_prompt:
+                return (
+                    {
+                        "doc_id": 1,
+                        "document_title_index": 1,
+                        "characters": [
+                            {
+                                "canonical_name": "路明非",
+                                "aliases": [],
+                                "is_speaking_character": True,
+                                "speaking_evidence": "文本中有路明非相关行动与回应线索。",
+                                "personhood_evidence": "路明非被姓名称呼并执行进入校园的行动。",
+                                "activity_or_state_evidence": "路明非进入校园。",
+                                "relationship_evidence": "",
+                                "source_doc_ids": [1],
+                                "source_title_indexes": [1],
+                                "candidate_type": "character",
+                                "confidence": 0.9,
+                                "uncertainty_reason": "",
+                            }
+                        ],
+                    },
+                    "",
+                )
+            return (
+                {
+                    "doc_id": 2,
+                    "document_title_index": 2,
+                    "characters": [
+                        {
+                            "canonical_name": "楚子航",
+                            "aliases": [],
+                            "is_speaking_character": True,
+                            "speaking_evidence": "文本中有楚子航提到龙族的说明线索。",
+                            "personhood_evidence": "楚子航被姓名称呼并执行说明行为。",
+                            "activity_or_state_evidence": "楚子航提到龙族。",
+                            "relationship_evidence": "",
+                            "source_doc_ids": [2],
+                            "source_title_indexes": [2],
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Reading Agent" not in system_prompt:
+            return fallback_factory(), ""
         return (
             {
+                "summary_quality": "plot_synopsis",
                 "chapter_summary_md": long_summary,
                 "chapter_summary_short": "两章连续推进。",
                 "importance_score": 70,
@@ -263,7 +319,13 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
                     {
                         "document_title_index": 1,
                         "chapter_title": "第一章",
-                        "chapter_summary_md": "路明非进入校园，第一章建立场景。" * 12,
+                        "summary_quality": "plot_synopsis",
+                        "chapter_summary_md": _plot_synopsis(
+                            "路明非进入校园，第一章把人物入场、校园背景和后续事件的起点压缩为清晰的开场事件链。",
+                            characters="路明非从外部进入校园场景，成为本章记忆主体。",
+                            info="校园场景作为后续剧情发生地点被建立。",
+                            structure="第一章承担人物入场和场景铺垫功能。",
+                        ),
                         "chapter_summary_short": "路明非进入校园。",
                         "importance_score": 60,
                         "importance_reason": "建立场景。",
@@ -274,7 +336,13 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
                     {
                         "document_title_index": 2,
                         "chapter_title": "第二章",
-                        "chapter_summary_md": "楚子航提到龙族，第二章推进设定。" * 12,
+                        "summary_quality": "plot_synopsis",
+                        "chapter_summary_md": _plot_synopsis(
+                            "楚子航提到龙族，第二章把新设定线索从背景中推到台前，使本批次从校园入场转向主线规则提示。",
+                            characters="楚子航以说明者身份出现，推动路明非后续理解世界规则。",
+                            info="龙族线索成为本章需要保存的设定信息。",
+                            structure="第二章承担设定揭示与主线推进功能。",
+                        ),
                         "chapter_summary_short": "楚子航提到龙族。",
                         "importance_score": 65,
                         "importance_reason": "推进设定。",
@@ -371,11 +439,67 @@ def test_close_read_runner_resumes_split_chapter_and_merges_intermediate_summari
         fallback_factory,
         use_fallback_on_error: bool = False,
     ):
-        _ = self, system_prompt, fallback_factory, use_fallback_on_error
+        _ = self, use_fallback_on_error
+        if "Character Evidence Agent" in system_prompt:
+            if "路明非" in user_prompt:
+                return (
+                    {
+                        "doc_id": 1,
+                        "document_title_index": 1,
+                        "characters": [
+                            {
+                                "canonical_name": "路明非",
+                                "aliases": [],
+                                "is_speaking_character": False,
+                                "speaking_evidence": "",
+                                "personhood_evidence": "路明非被姓名称呼并执行进入校门的行动。",
+                                "activity_or_state_evidence": "路明非在雨夜里踏入校门。",
+                                "relationship_evidence": "",
+                                "source_doc_ids": [1],
+                                "source_title_indexes": [1],
+                                "candidate_type": "character",
+                                "confidence": 0.9,
+                                "uncertainty_reason": "",
+                            }
+                        ],
+                    },
+                    "",
+                )
+            return (
+                {
+                    "doc_id": 2,
+                    "document_title_index": 1,
+                    "characters": [
+                        {
+                            "canonical_name": "楚子航",
+                            "aliases": [],
+                            "is_speaking_character": False,
+                            "speaking_evidence": "",
+                            "personhood_evidence": "楚子航被姓名称呼并执行说明行为。",
+                            "activity_or_state_evidence": "楚子航说明龙族相关真相。",
+                            "relationship_evidence": "",
+                            "source_doc_ids": [2],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Reading Agent" not in system_prompt:
+            return fallback_factory(), ""
         if "第一批标记" in user_prompt:
             return (
                 {
-                    "chapter_summary_md": "路明非在雨夜进入校园，异常氛围持续堆积。",
+                    "summary_quality": "plot_synopsis",
+                    "chapter_summary_md": _plot_synopsis(
+                        "路明非在雨夜进入校园，第一批次把人物入场、环境压力和后续悬念整理为章节开端。",
+                        characters="路明非从外部进入校门，行动状态被推进到主场景内。",
+                        info="雨夜校园提供本章前半段的地点与氛围信息。",
+                        structure="拆批前半段承担开场铺垫与悬念累积功能。",
+                    ),
                     "chapter_summary_short": "路明非进入校园。",
                     "importance_score": 55,
                     "importance_reason": "开场建立悬念。",
@@ -395,7 +519,13 @@ def test_close_read_runner_resumes_split_chapter_and_merges_intermediate_summari
             )
         return (
             {
-                "chapter_summary_md": "楚子航补充说明龙族真相，章节核心冲突被正式点明。",
+                "summary_quality": "plot_synopsis",
+                "chapter_summary_md": _plot_synopsis(
+                    "楚子航补充说明龙族真相，第二批次把前半段悬念转化为明确设定揭示，章节核心冲突被正式点明。",
+                    characters="楚子航成为说明关键信息的人物，路明非此前的入场获得新的意义。",
+                    info="龙族真相被纳入长期记忆中的关键设定候选。",
+                    structure="拆批后半段承担设定揭示和冲突点明功能。",
+                ),
                 "chapter_summary_short": "楚子航揭示真相。",
                 "importance_score": 88,
                 "importance_reason": "关键设定曝光。",
@@ -472,7 +602,7 @@ def test_close_read_runner_resumes_split_chapter_and_merges_intermediate_summari
     assert final_row is not None
     assert final_row[0] == "[]"
     assert "## 摘要元信息" in final_row[1]
-    assert "## 剧情推进" in final_row[1]
+    assert "## 剧情事件链" in final_row[1]
     assert "## 人物状态/关系变化" in final_row[1]
     assert "## 关键信息/设定" in final_row[1]
     assert "汇总批次数：2" in final_row[1]
@@ -480,15 +610,14 @@ def test_close_read_runner_resumes_split_chapter_and_merges_intermediate_summari
     assert final_row[3] == 2
     assert final_row[4] > 200
     assert final_row[5] == 88
-    assert "路明非" in final_row[7]
-    assert "楚子航" in final_row[7]
+    assert isinstance(json.loads(final_row[7]), list)
     assert "document_title_index" in final_row[6]
     assert final_progress is not None
     assert final_progress[0] == 2
     assert final_progress[1] == "1:2"
 
 
-def test_close_read_runner_fills_missing_multi_chapter_summary_item_in_non_dry_run(
+def test_close_read_runner_persists_complete_multi_chapter_synopses_in_non_dry_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -514,7 +643,12 @@ def test_close_read_runner_fills_missing_multi_chapter_summary_item_in_non_dry_r
         )
         conn.commit()
 
-    long_summary = "路明非进入学院，章节保留了行动、关系和设定变化。" * 20
+    long_summary = _plot_synopsis(
+        "路明非进入学院并作出回应，随后楚子航说明龙族相关真相，多章批次形成从人物入场到设定揭示的压缩剧情链。",
+        characters="路明非完成入场回应，楚子航承担设定说明，两人的行动分别服务于连续推进。",
+        info="学院场景和龙族真相是本批次需要保留的关键信息。",
+        structure="多章批次承担人物入场、主线设定揭示和后续铺垫功能。",
+    )
 
     def fake_generate_json(
         self,
@@ -528,6 +662,7 @@ def test_close_read_runner_fills_missing_multi_chapter_summary_item_in_non_dry_r
         if "Reading Agent" in system_prompt:
             return (
                 {
+                    "summary_quality": "plot_synopsis",
                     "chapter_summary_md": long_summary,
                     "chapter_summary_short": "两章连续推进。",
                     "importance_score": 70,
@@ -537,10 +672,31 @@ def test_close_read_runner_fills_missing_multi_chapter_summary_item_in_non_dry_r
                         {
                             "document_title_index": 1,
                             "chapter_title": "第一章",
-                            "chapter_summary_md": "路明非进入学院并作出回应，第一章完成入场。" * 12,
+                            "summary_quality": "plot_synopsis",
+                            "chapter_summary_md": _plot_synopsis(
+                                "路明非进入学院并作出回应，第一章完成人物入场、处境确认和后续事件的起点搭建。",
+                                characters="路明非从进入学院转向作出回应，行动状态更明确。",
+                                info="学院作为当前剧情场景被建立。",
+                                structure="第一章承担人物入场和场景铺垫功能。",
+                            ),
                             "chapter_summary_short": "路明非进入学院。",
                             "importance_score": 60,
                             "importance_reason": "人物入场。",
+                            "related_chapters": [],
+                        },
+                        {
+                            "document_title_index": 2,
+                            "chapter_title": "第二章",
+                            "summary_quality": "plot_synopsis",
+                            "chapter_summary_md": _plot_synopsis(
+                                "楚子航说明龙族相关真相，第二章将前序场景推进到关键设定揭示，使后续主线拥有明确方向。",
+                                characters="楚子航以说明者身份推动信息显露，路明非面对的世界规则被重新定义。",
+                                info="龙族真相是本章需要进入长期记忆的核心设定。",
+                                structure="第二章承担设定揭示和主线推进功能。",
+                            ),
+                            "chapter_summary_short": "楚子航说明龙族真相。",
+                            "importance_score": 75,
+                            "importance_reason": "设定揭示。",
                             "related_chapters": [],
                         }
                     ],
@@ -578,7 +734,7 @@ def test_close_read_runner_fills_missing_multi_chapter_summary_item_in_non_dry_r
     assert "楚子航" in chapter_rows[1][1]
 
 
-def test_payload_for_title_index_uses_summary_fallback_when_chapter_summaries_item_is_missing(
+def test_payload_for_title_index_rejects_missing_chapter_synopsis_item(
     tmp_path: Path,
 ) -> None:
     config = CloseReadAgentConfig(book_id="helper_book", sqlite_path=str(tmp_path / "helper.db"))
@@ -606,10 +762,63 @@ def test_payload_for_title_index_uses_summary_fallback_when_chapter_summaries_it
     )
     sub_batch = batch.as_single_title_batch(2)
 
+    with pytest.raises(InvalidChapterSynopsisError, match="Missing chapter summary payload"):
+        runner._payload_for_title_index(
+            sub_batch=sub_batch,
+            payload={
+                "chapter_summaries": [{"document_title_index": 1, "chapter_summary_short": "第一章摘要。"}],
+                "document_character_mentions": [],
+                "character_updates": [],
+                "world_update": {"should_update": False, "changes": []},
+                "outline_update": {"chapter_line": "", "timeline_events": []},
+            },
+            chapter_payload=None,
+        )
+
+
+def test_payload_for_title_index_accepts_single_chapter_top_level_summary_with_extra_chapter_summaries(
+    tmp_path: Path,
+) -> None:
+    config = CloseReadAgentConfig(book_id="helper_book", sqlite_path=str(tmp_path / "helper.db"))
+    config.runtime.dry_run = False
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "helper.db", config=config)
+    sub_batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[
+            _make_document_row(
+                doc_id=1,
+                book_id="helper_book",
+                title_index=1,
+                title="第一章",
+                content="路明非进入学院。" * 80,
+            )
+        ],
+    )
+    summary_md = _plot_synopsis(
+        "路明非进入学院，第一章把人物入场、学院场景和后续事件的起点压缩为清晰的开场事件链。",
+        characters="路明非从日常环境进入学院场景，成为本章记忆主体。",
+        info="学院场景作为后续剧情发生地点被建立。",
+        structure="第一章承担人物入场和场景铺垫功能。",
+    )
+
     payload = runner._payload_for_title_index(
         sub_batch=sub_batch,
         payload={
-            "chapter_summaries": [{"document_title_index": 1, "chapter_summary_short": "第一章摘要。"}],
+            "summary_quality": "plot_synopsis",
+            "chapter_summary_md": summary_md,
+            "chapter_summary_short": "路明非进入学院。",
+            "importance_score": 70,
+            "importance_reason": "建立场景。",
+            "related_chapters": [],
+            "chapter_summaries": [
+                {
+                    "document_title_index": 1,
+                    "chapter_title": "第一章",
+                    "chapter_summary_md": summary_md,
+                    "chapter_summary_short": "路明非进入学院。",
+                }
+            ],
             "document_character_mentions": [],
             "character_updates": [],
             "world_update": {"should_update": False, "changes": []},
@@ -618,6 +827,98 @@ def test_payload_for_title_index_uses_summary_fallback_when_chapter_summaries_it
         chapter_payload=None,
     )
 
-    assert "楚子航" in payload["chapter_summary_short"]
-    assert payload["document_character_mentions"] == []
-    assert payload["character_updates"] == []
+    assert payload["chapter_summary_md"] == summary_md
+    assert "chapter_summaries" not in payload
+
+
+def test_chapter_summary_prompt_requires_plot_synopsis_not_document_prefix() -> None:
+    system_prompt, user_prompt = build_chapter_summary_prompt(
+        {
+            "book_id": "prompt_book",
+            "current_title_index": 1,
+            "chapter_title": "扉页",
+            "source_total_chars": 120,
+            "summary_target_chars_min": 160,
+            "documents": [
+                {
+                    "doc_id": 1,
+                    "document_title_index": 1,
+                    "content": "作者信息：某某。版权所有。",
+                }
+            ],
+        }
+    )
+
+    combined_prompt = system_prompt + user_prompt
+    assert "剧情梗概" in combined_prompt
+    assert "document 开头/结尾" in combined_prompt
+    assert "即使是关键信息/设定" in combined_prompt
+    assert "作者信息" in combined_prompt
+    assert "扉页" in combined_prompt
+    assert "low_signal_needs_review" in combined_prompt
+
+
+def test_close_read_runner_accepts_low_signal_noise_summary(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="noise_book", sqlite_path=str(tmp_path / "noise.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "noise.db", config=config)
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="扉页",
+        documents=[
+            _make_document_row(
+                doc_id=1,
+                book_id="noise_book",
+                title_index=1,
+                title="扉页",
+                content="作者信息、目录和献词，没有具体剧情事件。" * 6,
+            )
+        ],
+    )
+
+    runner._validate_single_plot_synopsis(
+        batch=batch,
+        payload={
+            "summary_quality": "low_signal_needs_review",
+            "chapter_summary_md": "本段主要是目录、献词和结构信息，没有可概括的人物行动或剧情推进。",
+            "chapter_summary_short": "目录和献词，无实质剧情。",
+            "importance_score": 5,
+            "importance_reason": "仅提供结构背景。",
+            "related_chapters": [],
+            "noise_documents": [{"doc_id": 1, "document_title_index": 1, "reason": "无具体剧情"}],
+        },
+    )
+
+
+def test_close_read_runner_rejects_source_prefix_as_chapter_synopsis(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="prefix_book", sqlite_path=str(tmp_path / "prefix.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "prefix.db", config=config)
+    source_prefix = "路明非推开学院大门后沿着湿漉漉的石阶向前走去，雨水顺着他的额发落下。"
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[
+            _make_document_row(
+                doc_id=1,
+                book_id="prefix_book",
+                title_index=1,
+                title="第一章",
+                content=source_prefix + "他意识到真正的考验才刚刚开始。" * 8,
+            )
+        ],
+    )
+    copied_prefix_payload = {
+        "summary_quality": "plot_synopsis",
+        "chapter_summary_md": _plot_synopsis(
+            f"{source_prefix} 这一段被错误地直接当作剧情梗概使用。",
+            characters="路明非进入学院后状态发生变化。",
+            info="学院场景被建立。",
+            structure="本章承担开场铺垫功能。",
+        ),
+        "chapter_summary_short": "路明非进入学院。",
+        "importance_score": 60,
+        "importance_reason": "开场建立场景。",
+        "related_chapters": [],
+    }
+
+    with pytest.raises(InvalidChapterSynopsisError, match="copy source text"):
+        runner._validate_single_plot_synopsis(batch=batch, payload=copied_prefix_payload)

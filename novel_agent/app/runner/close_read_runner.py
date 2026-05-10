@@ -78,6 +78,21 @@ CHAPTER_SUMMARY_SECTION_ALIASES = {
     "节奏": "结构功能/节奏",
     "剧情节奏": "结构功能/节奏",
 }
+LOW_SIGNAL_SUMMARY_HINTS = (
+    "无具体剧情",
+    "无人物行动",
+    "无情节推进",
+    "基本没有可概括剧情",
+    "目录",
+    "扉页",
+    "献词",
+    "题记",
+    "版权",
+    "出版信息",
+    "作者信息",
+    "广告",
+    "乱码",
+)
 WORLD_EVIDENCE_KEYWORDS = (
     "世界",
     "时代",
@@ -172,6 +187,7 @@ class CloseReadRunner:
                 temperature=self.config.model.temperature,
                 max_output_tokens=self.config.model.max_output_tokens,
                 timeout_seconds=self.config.model.timeout_seconds,
+                retry_without_thinking_on_failure=True,
                 thinking=self.config.model.thinking,
                 reasoning_effort=self.config.model.reasoning_effort,
                 include_reasoning_content=self.config.model.include_reasoning_content,
@@ -1412,7 +1428,7 @@ class CloseReadRunner:
         chapter_payload: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if chapter_payload is None:
-            if "chapter_summaries" not in payload:
+            if str(payload.get("chapter_summary_md") or "").strip():
                 chapter_payload = {
                     key: payload.get(key)
                     for key in ("chapter_summary_md", "chapter_summary_short", "importance_score", "importance_reason", "related_chapters")
@@ -1486,13 +1502,13 @@ class CloseReadRunner:
 
     def _validate_summary_payload(self, *, batch: ChapterBatch, payload: dict[str, Any]) -> None:
         summary_quality = str(payload.get("summary_quality") or "").strip()
-        if summary_quality == "low_signal_needs_review":
+        if summary_quality in {"fallback_excerpt_disallowed", "fallback_excerpt"}:
             review_path = self._write_summary_review_markdown(
                 batch=batch,
-                reason="model marked chapter summary as low_signal_needs_review",
+                reason=f"invalid summary_quality={summary_quality}",
                 payload=payload,
             )
-            raise InvalidChapterSynopsisError("chapter_summary marked input as low signal", review_path=review_path)
+            raise InvalidChapterSynopsisError(f"invalid chapter summary quality: {summary_quality}", review_path=review_path)
         if batch.is_multi_chapter:
             raw_summaries = payload.get("chapter_summaries")
             if not isinstance(raw_summaries, list):
@@ -1526,7 +1542,10 @@ class CloseReadRunner:
 
     def _validate_single_plot_synopsis(self, *, batch: ChapterBatch, payload: dict[str, Any]) -> None:
         summary_quality = str(payload.get("summary_quality") or "").strip()
-        if summary_quality in {"low_signal_needs_review", "fallback_excerpt_disallowed", "fallback_excerpt"}:
+        if summary_quality == "low_signal_needs_review":
+            self._validate_low_signal_summary(batch=batch, payload=payload)
+            return
+        if summary_quality in {"fallback_excerpt_disallowed", "fallback_excerpt"}:
             review_path = self._write_summary_review_markdown(
                 batch=batch,
                 reason=f"invalid summary_quality={summary_quality or '<empty>'}",
@@ -1543,6 +1562,8 @@ class CloseReadRunner:
             raise InvalidChapterSynopsisError("missing chapter_summary_md plot synopsis", review_path=review_path)
         sections = self._parse_summary_sections(summary_md)
         if not sections["剧情事件链"]:
+            if self._looks_like_low_signal_summary(batch=batch, summary_md=summary_md):
+                return
             review_path = self._write_summary_review_markdown(
                 batch=batch,
                 reason="chapter_summary_md missing ## 剧情事件链 section",
@@ -1550,6 +1571,8 @@ class CloseReadRunner:
             )
             raise InvalidChapterSynopsisError("chapter_summary_md missing plot event chain", review_path=review_path)
         if not sections["结构功能/节奏"]:
+            if self._looks_like_low_signal_summary(batch=batch, summary_md=summary_md):
+                return
             review_path = self._write_summary_review_markdown(
                 batch=batch,
                 reason="chapter_summary_md missing ## 结构功能/节奏 section",
@@ -1572,6 +1595,41 @@ class CloseReadRunner:
                 payload=payload,
             )
             raise InvalidChapterSynopsisError("chapter_summary_md appears to copy source text", review_path=review_path)
+
+    def _looks_like_low_signal_summary(self, *, batch: ChapterBatch, summary_md: str) -> bool:
+        text = str(summary_md or "").strip()
+        if not text or batch.total_chars > 1_000:
+            return False
+        source_text = "\n".join(doc.content for doc in batch.documents)
+        combined = f"{text}\n{batch.chapter_title}\n{source_text[:400]}"
+        return any(hint in combined for hint in LOW_SIGNAL_SUMMARY_HINTS)
+
+    def _validate_low_signal_summary(self, *, batch: ChapterBatch, payload: dict[str, Any]) -> None:
+        summary_md = str(payload.get("chapter_summary_md") or "").strip()
+        summary_short = str(payload.get("chapter_summary_short") or "").strip()
+        noise_documents = payload.get("noise_documents")
+        if not summary_md and not summary_short:
+            review_path = self._write_summary_review_markdown(
+                batch=batch,
+                reason="low_signal_needs_review missing explanatory summary",
+                payload=payload,
+            )
+            raise InvalidChapterSynopsisError("low_signal summary missing explanatory text", review_path=review_path)
+        if not isinstance(noise_documents, list) or not noise_documents:
+            review_path = self._write_summary_review_markdown(
+                batch=batch,
+                reason="low_signal_needs_review missing noise_documents",
+                payload=payload,
+            )
+            raise InvalidChapterSynopsisError("low_signal summary missing noise_documents", review_path=review_path)
+        copied = self._first_copied_source_span(batch=batch, summary_md=summary_md)
+        if copied:
+            review_path = self._write_summary_review_markdown(
+                batch=batch,
+                reason=f"low_signal summary appears to copy source text: {copied}",
+                payload=payload,
+            )
+            raise InvalidChapterSynopsisError("low_signal summary appears to copy source text", review_path=review_path)
 
     def _first_copied_source_span(self, *, batch: ChapterBatch, summary_md: str) -> str:
         normalized_summary = self._compact_for_overlap(summary_md)
@@ -1835,6 +1893,8 @@ class CloseReadRunner:
 
     def _normalize_chapter_summary(self, *, summary_md: str, batch: ChapterBatch, source_total_chars: int) -> str:
         sections = self._parse_summary_sections(summary_md)
+        if self._looks_like_low_signal_summary(batch=batch, summary_md=summary_md):
+            sections = self._normalize_low_signal_summary_sections(summary_md)
         if not sections["剧情事件链"]:
             review_path = self._write_summary_review_markdown(
                 batch=batch,
@@ -1856,6 +1916,16 @@ class CloseReadRunner:
         sections["摘要元信息"] = self._build_summary_meta_lines(batch=batch, source_total_chars=source_total_chars)
         rendered = self._render_summary_sections(sections)
         return clamp_text(rendered, 6000)
+
+    def _normalize_low_signal_summary_sections(self, summary_md: str) -> dict[str, list[str]]:
+        text = str(summary_md or "").strip() or "模型判断该批次为低信号文本，缺少可概括剧情。"
+        return {
+            "摘要元信息": [],
+            "剧情事件链": [f"- {text}"],
+            "人物状态/关系变化": ["- 该批次未形成可确认的人物行动或关系变化。"],
+            "关键信息/设定": ["- 仅保留目录、题记、献词或基调信息；不写入新增剧情事实。"],
+            "结构功能/节奏": ["- 低信号前置文本，主要提供书籍结构、题名、献词或基调，不承担完整剧情推进。"],
+        }
 
     def _merge_intermediate_summaries(
         self,

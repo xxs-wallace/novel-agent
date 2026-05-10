@@ -23,6 +23,15 @@ from novel_agent.schemas import (
     GenerationReviewDecision,
     LengthPlanUpdate,
 )
+from novel_agent.app.schemas.orchestration_schema import (
+    BookContinuationPlan,
+    ModelingStatus,
+    WorldExpansionPack,
+)
+from novel_agent.app.orchestrators.writer_planning_types import (
+    CharacterRequirementReport,
+    NamedNewCharacter,
+)
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
     _build_orchestrator,
     _seed_assets,
@@ -200,6 +209,102 @@ def test_requirement_coverage_accepts_runtime_writer_aliases(tmp_path: Path) -> 
     assert "固定第一人称或固定限知视角" in prompt["user_prompt"]
     assert "男主角" not in prompt["user_prompt"]
     assert "女主角" not in prompt["user_prompt"]
+
+
+def test_restricted_writer_executor_exposes_draft_generation_interface(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    execution_input = {
+        "chapter_title": "测试扩写",
+        "chapter_brief": {
+            "title": "测试扩写",
+            "goal": "主角收到录取信。",
+            "must_include": ["录取信", "手机"],
+        },
+        "length_budget": {"target_chars": 240, "min_chars": 200, "max_chars": 280},
+        "writer_rules": ["只能根据梗概扩写。"],
+    }
+
+    prompt = executor.build_draft_prompt(execution_input)
+    draft = executor.generate_draft_from_execution_input(execution_input)
+
+    assert "主角收到录取信" in prompt["user_prompt"]
+    assert "测试扩写" in draft
+    assert "录取信" in draft
+
+
+def test_restricted_writer_executor_prompts_for_merged_reference_document_synopses(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    prompt = executor.build_draft_prompt(
+        {
+            "chapter_title": "长段扩写",
+            "chapter_brief": {
+                "title": "长段扩写",
+                "goal": "按连续梗概扩写目标窗口。",
+                "combined_synopsis": "第一段承接邀请，第二段推进试衣和赴约。",
+                "reference_document_synopses": [
+                    {"order": 1, "summary": "主角收到邀请。"},
+                    {"order": 2, "summary": "主角换上西装准备赴约。"},
+                ],
+            },
+            "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+            "writer_rules": [],
+        }
+    )
+
+    assert "连续多个 document 梗概" in prompt["system_prompt"]
+    assert "reference_document_synopses" in prompt["user_prompt"]
+    assert "必须按 order 顺序" in prompt["user_prompt"]
+
+
+def test_prepare_freeze_a_can_disable_character_cast_planning(tmp_path: Path) -> None:
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    orchestrator = WriterLayeredGenerationOrchestrator(repo_root=tmp_path, run_writer=run_writer)
+
+    orchestrator.check_modeling_status = lambda _conn, *, book_id: ModelingStatus(  # type: ignore[method-assign]
+        book_id=book_id,
+        ready_for_continuation=True,
+    )
+    orchestrator.plan_book_continuation = lambda _conn, *, book_id, intent: BookContinuationPlan(  # type: ignore[method-assign]
+        plan_id="plan-1",
+        book_id=book_id,
+        continuation_goal="承接目标剧情。",
+    )
+    orchestrator.plan_world_expansion = lambda _conn, *, book_id, intent, book_plan, user_world_notes: WorldExpansionPack(  # type: ignore[method-assign]
+        pack_id="world-1",
+        book_id=book_id,
+    )
+    orchestrator.analyze_character_requirements = lambda _conn, *, book_id, intent, book_plan: CharacterRequirementReport(  # type: ignore[method-assign]
+        named_new_characters=[NamedNewCharacter(name="误识别角色", reason="测试")],
+        named_existing_characters=[],
+        unfilled_role_slots=[],
+    )
+    orchestrator.plan_character_cast = lambda **_kwargs: pytest.fail(  # type: ignore[method-assign]
+        "character cast planning should be skipped"
+    )
+
+    conn = NovelAgentDB(tmp_path / "memory.db").connect()
+    try:
+        result = orchestrator.prepare_freeze_a(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            intent_payload={
+                "allow_character_cast": False,
+                "desired_actions": ["承接目标剧情。"],
+            },
+        )
+    finally:
+        conn.close()
+
+    assert result["character_cast_plan"] is None
+    assert result["character_introduction_plan"] is None
+    assert not (run_writer.layout.run_dir("run-1") / "character_introduction_plan.json").exists()
 
 
 def test_run_writer_generation_review_decision_persists_traceable_defaults(tmp_path: Path) -> None:

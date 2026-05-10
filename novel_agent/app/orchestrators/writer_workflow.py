@@ -2,11 +2,30 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 from ...runs.writer import RunWriter
 from ..schemas.orchestration_schema import FreezeRecord
+from .scoped_artifact_revision import (
+    ModelScopedArtifactRevisionAdapter,
+    RevisionResultError,
+    ScopedArtifactReviewContext,
+    ScopedArtifactRevisionAdapter,
+    ScopedArtifactRevisionLLMInput,
+    ScopedArtifactRevisionRequest,
+    ScopedArtifactRevisionResult,
+    ScopedArtifactRevisionStore,
+    ScopeGuardError,
+    build_readable_artifact_diff,
+    get_revision_stage_policy,
+    validate_scoped_revision_references,
+    validate_scoped_revision_request,
+    validate_scoped_revision_result,
+    validate_upstream_freeze_constraints,
+)
 from .writer_execution import RestrictedWriterExecutor, WriterRollbackManager
 from .writer_layered_generation import WriterLayeredGenerationOrchestrator
 
@@ -59,11 +78,14 @@ class WriterInteractiveWorkflow:
         executor: RestrictedWriterExecutor,
         rollback_manager: WriterRollbackManager,
         run_writer: RunWriter,
+        revision_adapter: ScopedArtifactRevisionAdapter | None = None,
     ) -> None:
         self.planner = planner
         self.executor = executor
         self.rollback_manager = rollback_manager
         self.run_writer = run_writer
+        self.revision_adapter = revision_adapter or ModelScopedArtifactRevisionAdapter(model_client=planner.model_client)
+        self.revision_store = ScopedArtifactRevisionStore(run_writer=run_writer)
 
     def initialize_workflow(
         self,
@@ -157,6 +179,11 @@ class WriterInteractiveWorkflow:
     def continue_after_batch_review(self, *, run_id: str, artifact_path: str | None = None) -> dict[str, str]:
         paths = self.planner.confirm_batch_plan(run_id=run_id, artifact_path=artifact_path)
         self._confirm_checkpoint(run_id=run_id, stage="batch_review", source="continue_after_batch_review")
+        state = self.load_workflow_state(run_id=run_id) or {}
+        state["current_stage"] = "freeze_b"
+        state["pending_checkpoint"] = None
+        state["terminal_stage"] = None
+        self._save_workflow_state(run_id, state)
         return paths
 
     def prepare_chapter_package(
@@ -531,6 +558,173 @@ class WriterInteractiveWorkflow:
         self._save_workflow_state(run_id, state)
         return event.to_dict()
 
+    def request_scoped_artifact_revision(
+        self,
+        *,
+        run_id: str,
+        user_feedback: str,
+        request_id: str | None = None,
+        target_stage: str | None = None,
+        target_artifact_type: str | None = None,
+        target_artifact_path: str | None = None,
+    ) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id)
+        if state is None:
+            raise FileNotFoundError(f"workflow state not found for run_id={run_id}")
+        request, context, current_artifact, allowed_context = self._build_scoped_revision_request(
+            run_id=run_id,
+            state=state,
+            user_feedback=user_feedback,
+            request_id=request_id,
+            target_stage=target_stage,
+            target_artifact_type=target_artifact_type,
+            target_artifact_path=target_artifact_path,
+        )
+        policy = validate_scoped_revision_request(request, context)
+        self.revision_store.write_request(request)
+        llm_input = ScopedArtifactRevisionLLMInput(
+            request=request.to_dict(),
+            policy={
+                "review_stage": policy.review_stage,
+                "target_artifact_type": request.target_artifact_type,
+                "allowed_fields": list(policy.allowed_fields_for(request.target_artifact_type)),
+                "required_fields": list(policy.required_fields_for(request.target_artifact_type)),
+                "forbidden_targets": list(policy.forbidden_targets),
+            },
+            target_artifact=current_artifact,
+            allowed_context=allowed_context,
+            user_feedback=request.user_feedback,
+        )
+        try:
+            raw_candidate = self.revision_adapter.generate_candidate(llm_input)
+            candidate = (
+                raw_candidate
+                if isinstance(raw_candidate, ScopedArtifactRevisionResult)
+                else ScopedArtifactRevisionResult.from_dict(raw_candidate)
+            )
+        except (RevisionResultError, ScopeGuardError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            result = self._persist_scoped_revision_result(
+                request=request,
+                current_artifact=current_artifact,
+                candidate=self._failed_scoped_revision_candidate(
+                    request=request,
+                    current_artifact=current_artifact,
+                    error=exc,
+                ),
+                status="validation_failed",
+                validation={"ok": False, "errors": [str(exc)]},
+            )
+            self._remember_pending_scoped_revision(state=state, result=result)
+            self._save_workflow_state(run_id, state)
+            return {
+                **result.to_dict(),
+                "diff": self._read_diff_text(result.diff_path),
+                "recovery_suggestions": self._scoped_revision_recovery_suggestions(),
+            }
+        try:
+            self._validate_scoped_revision_candidate(
+                request=request,
+                result=candidate,
+                context=context,
+                allowed_context=allowed_context,
+            )
+        except (RevisionResultError, ScopeGuardError) as exc:
+            result = self._persist_scoped_revision_result(
+                request=request,
+                current_artifact=current_artifact,
+                candidate=candidate,
+                status="validation_failed",
+                validation={"ok": False, "errors": [str(exc)]},
+            )
+            self._remember_pending_scoped_revision(state=state, result=result)
+            self._save_workflow_state(run_id, state)
+            return {
+                **result.to_dict(),
+                "diff": self._read_diff_text(result.diff_path),
+                "recovery_suggestions": self._scoped_revision_recovery_suggestions(),
+            }
+        result = self._persist_scoped_revision_result(
+            request=request,
+            current_artifact=current_artifact,
+            candidate=candidate,
+            status="candidate",
+            validation={
+                "ok": True,
+                "checks": ["schema", "scope", "references", "upstream_freeze_constraints"],
+            },
+        )
+        self._remember_pending_scoped_revision(state=state, result=result)
+        self._save_workflow_state(run_id, state)
+        return {**result.to_dict(), "diff": self._read_diff_text(result.diff_path)}
+
+    def apply_scoped_artifact_revision(self, *, run_id: str, request_id: str) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id)
+        if state is None:
+            raise FileNotFoundError(f"workflow state not found for run_id={run_id}")
+        request = self.revision_store.read_request(run_id, request_id)
+        result = self.revision_store.read_result(run_id, request_id)
+        if result.status != "candidate":
+            raise RevisionResultError("only validated candidate revisions can be applied")
+        if result.revised_artifact is None:
+            raise RevisionResultError("applying JSON Patch candidates is not supported in this workflow phase")
+        current_artifact = self._load_artifact_payload(Path(request.target_artifact_path))
+        context = self._build_scoped_review_context(
+            run_id=run_id,
+            state=state,
+            target_stage=request.target_stage,
+            target_artifact_type=request.target_artifact_type,
+            target_artifact_path=request.target_artifact_path,
+            target_artifact=current_artifact,
+        )
+        allowed_context = self._build_scoped_revision_allowed_context(
+            run_id=run_id,
+            target_stage=request.target_stage,
+            target_artifact_type=request.target_artifact_type,
+            target_artifact=current_artifact,
+        )
+        self._validate_scoped_revision_candidate(
+            request=request,
+            result=result,
+            context=context,
+            allowed_context=allowed_context,
+        )
+        artifact_path = self._write_current_target_artifact(
+            run_id=run_id,
+            target_artifact_path=request.target_artifact_path,
+            payload=result.revised_artifact,
+        )
+        rollback_event = self._propagate_revision_rollback(run_id=run_id, stage=request.target_stage)
+        applied = self._persist_scoped_revision_result(
+            request=request,
+            current_artifact=current_artifact,
+            candidate=result,
+            status="applied",
+            validation={**result.validation, "ok": True, "applied": True},
+        )
+        state["current_stage"] = request.target_stage
+        pending_checkpoint = dict(state.get("pending_checkpoint") or {})
+        if pending_checkpoint:
+            pending_checkpoint["stage"] = request.target_stage
+            pending_checkpoint["artifact_path"] = str(artifact_path)
+            state["pending_checkpoint"] = pending_checkpoint
+        state["pending_scoped_revision"] = None
+        state["last_scoped_revision"] = {
+            "request_id": request.request_id,
+            "revision_id": applied.revision_id,
+            "status": "applied",
+            "target_stage": request.target_stage,
+            "target_artifact_path": str(artifact_path),
+            "rollback": rollback_event.to_dict(),
+        }
+        self._save_workflow_state(run_id, state)
+        return {
+            **applied.to_dict(),
+            "artifact_path": str(artifact_path),
+            "rollback": rollback_event.to_dict(),
+            "workflow_state": self.load_workflow_state(run_id=run_id) or {},
+            "diff": self._read_diff_text(applied.diff_path),
+        }
+
     def load_workflow_state(self, *, run_id: str) -> dict[str, Any] | None:
         path = self.run_writer.layout.run_dir(run_id) / "workflow_state.json"
         if not path.exists():
@@ -561,6 +755,398 @@ class WriterInteractiveWorkflow:
         payload = dict(state)
         payload["updated_at"] = _utc_now()
         self.run_writer.write_json(run_id, "workflow_state.json", payload)
+
+    def _build_scoped_revision_request(
+        self,
+        *,
+        run_id: str,
+        state: Mapping[str, Any],
+        user_feedback: str,
+        request_id: str | None,
+        target_stage: str | None,
+        target_artifact_type: str | None,
+        target_artifact_path: str | None,
+    ) -> tuple[ScopedArtifactRevisionRequest, ScopedArtifactReviewContext, dict[str, Any], dict[str, Any]]:
+        checkpoint = dict(state.get("pending_checkpoint") or {})
+        stage = str(target_stage or checkpoint.get("stage") or state.get("current_stage") or "").strip()
+        artifact_path = str(target_artifact_path or checkpoint.get("artifact_path") or "").strip()
+        if not artifact_path:
+            raise ScopeGuardError("current review artifact path is required for scoped revision")
+        artifact_type = str(target_artifact_type or self._infer_revision_artifact_type(stage, artifact_path)).strip()
+        current_artifact = self._load_artifact_payload(Path(artifact_path))
+        context = self._build_scoped_review_context(
+            run_id=run_id,
+            state=state,
+            target_stage=stage,
+            target_artifact_type=artifact_type,
+            target_artifact_path=artifact_path,
+            target_artifact=current_artifact,
+        )
+        allowed_context = self._build_scoped_revision_allowed_context(
+            run_id=run_id,
+            target_stage=stage,
+            target_artifact_type=artifact_type,
+            target_artifact=current_artifact,
+        )
+        scope = {
+            "target_artifact_path": artifact_path,
+            "target_artifact_type": artifact_type,
+            "current_stage": stage,
+            "current_batch_id": context.current_batch_id,
+            "current_chapter_id": context.current_chapter_id,
+            "allowed_chapter_ids": list(context.allowed_chapter_ids),
+        }
+        request = ScopedArtifactRevisionRequest(
+            request_id=request_id or f"sar-{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            target_stage=stage,
+            target_artifact_type=artifact_type,
+            target_artifact_path=artifact_path,
+            user_feedback=user_feedback,
+            scope=scope,
+            created_at=_utc_now(),
+        )
+        return request, context, current_artifact, allowed_context
+
+    def _build_scoped_review_context(
+        self,
+        *,
+        run_id: str,
+        state: Mapping[str, Any],
+        target_stage: str,
+        target_artifact_type: str,
+        target_artifact_path: str,
+        target_artifact: Mapping[str, Any],
+    ) -> ScopedArtifactReviewContext:
+        chapter_ids = self._artifact_chapter_ids(target_artifact)
+        current_chapter_id = str(state.get("current_chapter_id") or target_artifact.get("chapter_id") or "").strip()
+        if not current_chapter_id and len(chapter_ids) == 1:
+            current_chapter_id = chapter_ids[0]
+        return ScopedArtifactReviewContext(
+            run_id=run_id,
+            current_stage=target_stage,
+            current_artifact_type=target_artifact_type,
+            current_artifact_path=target_artifact_path,
+            run_dir=str(self.run_writer.layout.run_dir(run_id)),
+            current_batch_id=str(target_artifact.get("batch_id") or "").strip(),
+            current_chapter_id=current_chapter_id,
+            allowed_chapter_ids=tuple(chapter_ids),
+        )
+
+    def _build_scoped_revision_allowed_context(
+        self,
+        *,
+        run_id: str,
+        target_stage: str,
+        target_artifact_type: str,
+        target_artifact: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        context: dict[str, Any] = {
+            "stage": target_stage,
+            "target_artifact_type": target_artifact_type,
+            "source_paths": [
+                str(run_dir / self._artifact_filename_for_type(target_artifact_type)),
+                self._artifact_filename_for_type(target_artifact_type),
+                *self._artifact_source_paths(target_artifact),
+            ],
+            "upstream_freezes": {},
+        }
+        if target_stage == "batch_review":
+            context["current_batch"] = {
+                "batch_id": target_artifact.get("batch_id", ""),
+                "scope_start": target_artifact.get("scope_start", ""),
+                "scope_end": target_artifact.get("scope_end", ""),
+            }
+            context["upstream_freezes"]["freeze_a"] = self._summarize_frozen_artifact(
+                run_id,
+                "freeze_a",
+                "book_continuation_plan.json",
+                fields=("book_id", "continuation_goal", "ending_direction", "stage_highlights"),
+            )
+        elif target_stage in {"chapter_review", "wait_chapter_review"}:
+            context["current_chapter_ids"] = self._artifact_chapter_ids(target_artifact)
+            context["upstream_freezes"]["freeze_b"] = self._summarize_frozen_artifact(
+                run_id,
+                "freeze_b",
+                "batch_plan.json",
+                fields=("batch_id", "book_id", "scope_start", "scope_end", "batch_goal", "planned_character_beats"),
+            )
+            context["allowed_character_summary"] = self._summarize_frozen_artifact(
+                run_id,
+                "freeze_a",
+                "character_cast_plan.json",
+                fields=("planned_characters", "must_not_consume"),
+                optional=True,
+            )
+        elif target_stage == "wait_length_review":
+            context["upstream_freezes"]["freeze_c"] = self._summarize_frozen_artifact(
+                run_id,
+                "freeze_c",
+                "chapter_package.json",
+                fields=("package_id", "batch_id", "chapters"),
+            )
+            context["length_strategy"] = {
+                "default_target_chars": target_artifact.get("default_target_chars", ""),
+                "default_min_chars": target_artifact.get("default_min_chars", ""),
+                "default_max_chars": target_artifact.get("default_max_chars", ""),
+            }
+        elif target_stage == "freeze_d_review":
+            context["upstream_freezes"]["freeze_c"] = self._summarize_frozen_artifact(
+                run_id,
+                "freeze_c",
+                "chapter_package.json",
+                fields=("package_id", "batch_id", "chapters"),
+            )
+            context["frozen_brief_and_budget"] = {
+                "chapter_id": target_artifact.get("chapter_id", ""),
+                "chapter_brief": target_artifact.get("chapter_brief", {}),
+                "length_budget": target_artifact.get("length_budget", {}),
+            }
+            context["writer_input_summary"] = {
+                "fact_input_keys": sorted((target_artifact.get("fact_inputs") or {}).keys())
+                if isinstance(target_artifact.get("fact_inputs"), Mapping)
+                else [],
+                "style_reference_count": len((target_artifact.get("style_reference_bundle") or {}).get("references") or [])
+                if isinstance(target_artifact.get("style_reference_bundle"), Mapping)
+                else 0,
+            }
+        return context
+
+    def _validate_scoped_revision_candidate(
+        self,
+        *,
+        request: ScopedArtifactRevisionRequest,
+        result: ScopedArtifactRevisionResult,
+        context: ScopedArtifactReviewContext,
+        allowed_context: Mapping[str, Any],
+    ) -> None:
+        validate_scoped_revision_result(request, result, context)
+        if result.revised_artifact is None:
+            raise RevisionResultError("revision candidates must include a complete revised_artifact")
+        validate_scoped_revision_references(
+            revised_artifact=result.revised_artifact,
+            allowed_context=allowed_context,
+        )
+        validate_upstream_freeze_constraints(
+            request=request,
+            revised_artifact=result.revised_artifact,
+            allowed_context=allowed_context,
+        )
+
+    def _persist_scoped_revision_result(
+        self,
+        *,
+        request: ScopedArtifactRevisionRequest,
+        current_artifact: Mapping[str, Any],
+        candidate: ScopedArtifactRevisionResult,
+        status: str,
+        validation: Mapping[str, Any],
+    ) -> ScopedArtifactRevisionResult:
+        diff_path = ""
+        diff_text = ""
+        if candidate.revised_artifact is not None:
+            diff_text = build_readable_artifact_diff(
+                original_artifact=current_artifact,
+                revised_artifact=candidate.revised_artifact,
+                from_label="current artifact",
+                to_label=f"candidate {candidate.revision_id}",
+            )
+            diff_path = str(self.revision_store.write_diff(request, diff_text))
+        result = ScopedArtifactRevisionResult(
+            revision_id=candidate.revision_id,
+            request_id=request.request_id,
+            status=status,
+            target_artifact_type=request.target_artifact_type,
+            target_artifact_path=request.target_artifact_path,
+            change_summary=candidate.change_summary or self._summarize_diff_text(diff_text),
+            validation=dict(validation),
+            created_at=candidate.created_at or _utc_now(),
+            revised_artifact=candidate.revised_artifact,
+            patch=candidate.patch,
+            diff_path=diff_path,
+        )
+        self.revision_store.write_result(result, request=request)
+        return result
+
+    def _failed_scoped_revision_candidate(
+        self,
+        *,
+        request: ScopedArtifactRevisionRequest,
+        current_artifact: Mapping[str, Any],
+        error: Exception,
+    ) -> ScopedArtifactRevisionResult:
+        return ScopedArtifactRevisionResult(
+            revision_id=f"rev-failed-{request.request_id}",
+            request_id=request.request_id,
+            status="validation_failed",
+            target_artifact_type=request.target_artifact_type,
+            target_artifact_path=request.target_artifact_path,
+            change_summary=f"候选修订未通过结构化校验：{error}",
+            validation={"ok": False, "errors": [str(error)]},
+            created_at=_utc_now(),
+            revised_artifact=dict(current_artifact),
+        )
+
+    def _scoped_revision_recovery_suggestions(self) -> list[str]:
+        return [
+            "修改反馈后重试，且只描述当前审阅产物需要怎样调整。",
+            "如果需要精确改 JSON 字段，可选择手动编辑当前产物。",
+            "不要要求修改 Memory、KB、系统 prompt、workflow state、其他批次或其他章节。",
+        ]
+
+    def _remember_pending_scoped_revision(
+        self,
+        *,
+        state: dict[str, Any],
+        result: ScopedArtifactRevisionResult,
+    ) -> None:
+        state["current_stage"] = result.validation.get("target_stage") or state.get("current_stage")
+        state["pending_scoped_revision"] = {
+            "request_id": result.request_id,
+            "revision_id": result.revision_id,
+            "status": result.status,
+            "target_artifact_type": result.target_artifact_type,
+            "target_artifact_path": result.target_artifact_path,
+            "change_summary": result.change_summary,
+            "diff_path": result.diff_path,
+        }
+
+    def _infer_revision_artifact_type(self, stage: str, artifact_path: str) -> str:
+        path_name = Path(artifact_path).name
+        policy = get_revision_stage_policy(stage)
+        for artifact_type in policy.artifact_types:
+            if path_name in policy.allowed_filenames_for(artifact_type):
+                if artifact_type == "ChapterBrief" and path_name == "chapter_package.json":
+                    continue
+                return artifact_type
+        if len(policy.artifact_types) == 1:
+            return policy.artifact_types[0]
+        raise ScopeGuardError(f"cannot infer scoped revision artifact type for {stage}: {artifact_path}")
+
+    def _artifact_filename_for_type(self, artifact_type: str) -> str:
+        filenames = {
+            "BatchPlan": "batch_plan.json",
+            "ChapterPackage": "chapter_package.json",
+            "ChapterBrief": "chapter_brief.json",
+            "ChapterLengthPlan": "chapter_length_plan.json",
+            "ChapterExecutionInput": "chapter_execution_input.json",
+        }
+        return filenames.get(artifact_type, "")
+
+    def _load_artifact_payload(self, path: Path) -> dict[str, Any]:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        payload = raw.get("data") if isinstance(raw, Mapping) else raw
+        if not isinstance(payload, Mapping):
+            raise ScopeGuardError(f"target artifact is not a JSON object: {path}")
+        return dict(payload)
+
+    def _summarize_frozen_artifact(
+        self,
+        run_id: str,
+        freeze_stage: str,
+        artifact_name: str,
+        *,
+        fields: tuple[str, ...],
+        optional: bool = False,
+    ) -> dict[str, Any]:
+        record = self.run_writer.get_freeze_record(run_id, freeze_stage)
+        if record is None:
+            if optional:
+                return {}
+            raise RevisionResultError(f"required upstream freeze is missing: {freeze_stage}")
+        for artifact in record.artifacts:
+            if artifact.name == artifact_name:
+                payload = self._load_artifact_payload(Path(artifact.path))
+                summary = {field: payload.get(field) for field in fields if field in payload}
+                summary["path"] = f"{freeze_stage}/{artifact_name}"
+                summary["source_path"] = f"freezes/{freeze_stage}/{artifact_name}"
+                return summary
+        if optional:
+            return {}
+        raise RevisionResultError(f"required upstream artifact is missing: {freeze_stage}/{artifact_name}")
+
+    def _artifact_chapter_ids(self, artifact: Mapping[str, Any]) -> list[str]:
+        ids: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                chapter_id = str(value.get("chapter_id") or "").strip()
+                if chapter_id and chapter_id not in ids:
+                    ids.append(chapter_id)
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(artifact)
+        return ids
+
+    def _artifact_source_paths(self, artifact: Mapping[str, Any]) -> list[str]:
+        paths: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                for key, child in value.items():
+                    if str(key) in {"path", "source_path", "artifact_path"}:
+                        text = str(child or "").strip()
+                        if text and text not in paths:
+                            paths.append(text)
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(artifact)
+        return paths
+
+    def _write_current_target_artifact(
+        self,
+        *,
+        run_id: str,
+        target_artifact_path: str,
+        payload: Mapping[str, Any],
+    ) -> Path:
+        run_dir = self.run_writer.layout.run_dir(run_id).resolve(strict=False)
+        target_path = Path(target_artifact_path).expanduser().resolve(strict=False)
+        relative = target_path.relative_to(run_dir)
+        return self.run_writer.write_json(run_id, relative.as_posix(), dict(payload))
+
+    def _propagate_revision_rollback(self, *, run_id: str, stage: str):
+        rollback_targets = {
+            "freeze_a_review": "freeze_a",
+            "batch_review": "freeze_b",
+            "chapter_review": "freeze_c",
+            "wait_chapter_review": "freeze_c",
+            "wait_length_review": "freeze_c",
+            "freeze_d_review": "freeze_d",
+        }
+        target_freeze = rollback_targets.get(stage)
+        if target_freeze is None:
+            raise ScopeGuardError(f"unsupported scoped revision rollback stage: {stage}")
+        event = self.rollback_manager.rollback_to_stage(
+            run_id=run_id,
+            target_freeze_stage=target_freeze,
+            reason=f"Scoped Artifact Revision applied at {stage}.",
+            trigger="scoped_artifact_revision",
+        )
+        if stage in {"chapter_review", "wait_chapter_review", "wait_length_review", "freeze_d_review"}:
+            self.run_writer.mark_active_drafts_invalidated(
+                run_id,
+                reason=f"Scoped Artifact Revision applied at {stage}.",
+            )
+        return event
+
+    def _summarize_diff_text(self, diff_text: str) -> str:
+        changed = [line for line in diff_text.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))]
+        return f"候选修订包含 {len(changed)} 行结构化变更。"
+
+    def _read_diff_text(self, diff_path: str) -> str:
+        if not diff_path:
+            return ""
+        path = Path(diff_path)
+        return path.read_text(encoding="utf-8") if path.exists() else ""
 
     def _normalize_mode(self, product_mode: str) -> str:
         normalized = str(product_mode or "").strip().lower()

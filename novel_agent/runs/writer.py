@@ -300,6 +300,29 @@ class RunWriter:
         self._write_draft_retention_index(run_id, index)
         return record
 
+    def mark_active_drafts_invalidated(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
+        index = self._load_draft_retention_index(run_id)
+        updated_records: list[dict[str, Any]] = []
+        for draft_id, item in list(index.items()):
+            record = dict(item)
+            if not bool(record.get("active_for_consumption")):
+                continue
+            record.update(
+                {
+                    "retention_status": "invalidated",
+                    "active_for_consumption": False,
+                    "eligible_for_writeback": False,
+                    "eligible_for_canon": False,
+                    "invalidated_reason": reason,
+                    "updated_at": self._now_iso(),
+                }
+            )
+            index[draft_id] = record
+            updated_records.append(record)
+        if updated_records:
+            self._write_draft_retention_index(run_id, index)
+        return updated_records
+
     def _merge_serialized_defaults(
         self,
         *,
