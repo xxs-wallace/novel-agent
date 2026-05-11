@@ -5,6 +5,7 @@ from .artifacts import ArtifactPresenter, ArtifactSaveResult, ArtifactSummary
 from .decisions import DecisionAction, DecisionOption, DecisionPanel
 from .events import MessageStream, RunEvent, RunEventStream
 from .facade import TuiTaskSnapshot, WorkflowFacade
+from .forms import ChapterAcceptanceForm, WriterIntentForm
 from .input import ChineseInputBuffer
 from .router import CommandContext, CommandInvocation, CommandRouter
 from .status import StatusPresenter, StatusView, WriterStageAction, WriterStatusPresenter
@@ -14,6 +15,7 @@ from .textual_widgets import (
     ArtifactEditorPane,
     ArtifactReferenceCandidate,
     ArtifactReviewPane,
+    ChapterAcceptanceFormWidget,
     CommandPalette,
     DecisionPanelWidget,
     MessageFlow,
@@ -23,6 +25,7 @@ from .textual_widgets import (
     StatusSidebar,
     TechnicalDetailsOverlay,
     ToastLayer,
+    WriterIntentWizardWidget,
 )
 
 
@@ -30,6 +33,7 @@ __all__ = [
     "ArtifactPresenter",
     "ArtifactSaveResult",
     "ArtifactSummary",
+    "ChapterAcceptanceForm",
     "ChineseInputBuffer",
     "CommandContext",
     "CommandInvocation",
@@ -48,9 +52,11 @@ __all__ = [
     "TuiSessionConfig",
     "TuiTaskSnapshot",
     "WorkflowFacade",
+    "WriterIntentForm",
     "ArtifactEditorPane",
     "ArtifactReferenceCandidate",
     "ArtifactReviewPane",
+    "ChapterAcceptanceFormWidget",
     "CommandPalette",
     "DecisionPanelWidget",
     "HomeScreen",
@@ -63,4 +69,5 @@ __all__ = [
     "TextualNovelAgentApp",
     "ToastLayer",
     "WorkbenchScreen",
+    "WriterIntentWizardWidget",
 ]

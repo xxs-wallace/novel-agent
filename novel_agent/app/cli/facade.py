@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -156,9 +157,53 @@ class WorkflowFacade:
         if not tasks:
             return "当前还没有任务。使用 /new-task <task_id> <source_path> 创建任务。"
         lines = ["当前任务："]
-        lines.extend(task.render_status_line(active=task.book_id == active_book_id) for task in tasks)
-        lines.append("使用 /task <task_id> 进入任务；使用 /new-task <task_id> <source_path> 创建任务。")
+        lines.extend(
+            f"{index:>2}. {task.render_status_line(active=task.book_id == active_book_id)}"
+            for index, task in enumerate(tasks, start=1)
+        )
+        lines.append(
+            "使用 /task <编号|task_id> 进入任务；使用 /new-task <task_id> <source_path> 创建任务；"
+            "使用 /delete-task <编号|task_id> 预览清理。"
+        )
         return "\n".join(lines)
+
+    def delete_task(self, *, book_id: str, confirm: bool = False, include_runs: bool = False) -> dict[str, object]:
+        normalized = self._normalize_task_id(book_id)
+        tasks = self._load_task_registry()
+        candidate_paths = self._task_artifact_paths(normalized, include_runs=include_runs)
+        existing_paths = [path for path in candidate_paths if path.exists() or path.is_symlink()]
+        if not confirm:
+            return {
+                "book_id": normalized,
+                "confirmed": False,
+                "registry_entry": normalized in tasks,
+                "candidate_paths": [str(path) for path in existing_paths],
+            }
+
+        tasks.pop(normalized, None)
+        self._save_task_registry(tasks)
+        deleted_paths: list[str] = []
+        errors: list[str] = []
+        for path in existing_paths:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                deleted_paths.append(str(path))
+            except OSError as exc:
+                errors.append(f"{path}: {exc}")
+        self.event_stream.emit(
+            "系统",
+            f"已删除任务 {normalized} 的本地建模产物",
+            payload={"deleted_paths": deleted_paths, "errors": errors},
+        )
+        return {
+            "book_id": normalized,
+            "confirmed": True,
+            "deleted_paths": deleted_paths,
+            "errors": errors,
+        }
 
     def reset_close_read_task(self, *, book_id: str) -> dict[str, object]:
         normalized = self._normalize_task_id(book_id)
@@ -268,6 +313,7 @@ class WorkflowFacade:
         segment_step_kb: int,
         close_step_batches: int,
         build_creative_kb: bool,
+        close_document_chars_budget: int = 20000,
         should_stop: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
         from .. import run_interactive
@@ -287,6 +333,7 @@ class WorkflowFacade:
                 segment_step_kb=segment_step_kb,
                 close_step_batches=close_step_batches,
                 build_creative_kb=build_creative_kb,
+                close_document_chars_budget=close_document_chars_budget,
                 should_stop=should_stop,
                 progress_callback=self.event_stream.progress_callback,
             )
@@ -657,6 +704,48 @@ class WorkflowFacade:
             self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.json",
             self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.md",
         ]
+
+    def _task_artifact_paths(self, book_id: str, *, include_runs: bool = False) -> list[Path]:
+        paths: list[Path] = []
+        index_paths = [
+            self.repo_root / ".indexes" / f"{book_id}.db",
+            self.repo_root / ".indexes" / f"{book_id}-writer.db",
+            self.repo_root / ".indexes" / "writer" / f"{book_id}.db",
+        ]
+        for base_path in index_paths:
+            paths.extend([base_path, Path(f"{base_path}-wal"), Path(f"{base_path}-shm")])
+
+        paths.extend(self._close_read_artifact_paths(book_id))
+        memory_dirs = [
+            self.repo_root / ".memory" / "world",
+            self.repo_root / ".memory" / "worlds",
+            self.repo_root / ".memory" / "outlines",
+            self.repo_root / ".memory" / "arcs",
+            self.repo_root / ".memory" / "debug",
+            self.repo_root / ".memory" / "review",
+            self.repo_root / ".memory" / "structure_patterns",
+        ]
+        for directory in memory_dirs:
+            if directory.exists():
+                paths.extend(path for path in directory.glob(f"{book_id}.*") if path.is_file() or path.is_symlink())
+        paths.append(self.repo_root / ".memory" / "writer" / book_id)
+        if include_runs:
+            paths.extend(
+                [
+                    self.repo_root / "runs" / "writer" / book_id,
+                    self.repo_root / "runs" / "benchmarks" / book_id,
+                    self.repo_root / "runs" / "creative_kb_benchmarks" / book_id,
+                    self.repo_root / "runs" / "paragraph_benchmark" / book_id,
+                ]
+            )
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            resolved = str(path)
+            if resolved not in seen:
+                seen.add(resolved)
+                deduped.append(path)
+        return deduped
 
     def _load_task_registry(self) -> dict[str, dict[str, str]]:
         path = self.repo_root / ".indexes" / "tasks.json"

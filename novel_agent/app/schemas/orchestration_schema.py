@@ -201,6 +201,8 @@ class ContinuationIntent:
     avoidances: list[str] = field(default_factory=list)
     preferred_outcome: str = ""
     notes: str = ""
+    story_scale: dict[str, Any] = field(default_factory=dict)
+    climax_plan: dict[str, Any] = field(default_factory=dict)
     sources: list[TraceableSource] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -217,6 +219,8 @@ class ContinuationIntent:
             "avoidances": list(self.avoidances),
             "preferred_outcome": self.preferred_outcome,
             "notes": self.notes,
+            "story_scale": dict(self.story_scale),
+            "climax_plan": dict(self.climax_plan),
             "sources": [item.to_dict() for item in self.sources],
         }
 
@@ -227,6 +231,13 @@ class BookContinuationPlan:
     book_id: str
     continuation_goal: str
     ending_direction: str = ""
+    target_chapter_count: int = 0
+    target_total_chars: int = 0
+    default_chapter_target_chars: int = 0
+    pacing_profile: str = ""
+    length_distribution_notes: str = ""
+    climax_plan: dict[str, Any] = field(default_factory=dict)
+    chapter_outline_slots: list[dict[str, Any]] = field(default_factory=list)
     stage_highlights: list[str] = field(default_factory=list)
     character_arcs: list[str] = field(default_factory=list)
     relationship_guardrails: list[str] = field(default_factory=list)
@@ -240,6 +251,13 @@ class BookContinuationPlan:
         self.book_id = _normalize_text(self.book_id)
         self.continuation_goal = _normalize_text(self.continuation_goal)
         self.ending_direction = _normalize_text(self.ending_direction)
+        self.target_chapter_count = max(0, int(self.target_chapter_count or 0))
+        self.target_total_chars = max(0, int(self.target_total_chars or 0))
+        self.default_chapter_target_chars = max(0, int(self.default_chapter_target_chars or 0))
+        self.pacing_profile = _normalize_text(self.pacing_profile)
+        self.length_distribution_notes = _normalize_text(self.length_distribution_notes)
+        self.climax_plan = dict(self.climax_plan)
+        self.chapter_outline_slots = [dict(item) for item in self.chapter_outline_slots if isinstance(item, dict)]
         self.stage_highlights = _normalize_string_list(self.stage_highlights)
         self.character_arcs = _normalize_string_list(self.character_arcs)
         self.relationship_guardrails = _normalize_string_list(self.relationship_guardrails)
@@ -252,6 +270,13 @@ class BookContinuationPlan:
             "book_id": self.book_id,
             "continuation_goal": self.continuation_goal,
             "ending_direction": self.ending_direction,
+            "target_chapter_count": self.target_chapter_count,
+            "target_total_chars": self.target_total_chars,
+            "default_chapter_target_chars": self.default_chapter_target_chars,
+            "pacing_profile": self.pacing_profile,
+            "length_distribution_notes": self.length_distribution_notes,
+            "climax_plan": dict(self.climax_plan),
+            "chapter_outline_slots": [dict(item) for item in self.chapter_outline_slots],
             "stage_highlights": list(self.stage_highlights),
             "character_arcs": list(self.character_arcs),
             "relationship_guardrails": list(self.relationship_guardrails),

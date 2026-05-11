@@ -13,7 +13,7 @@ from ..runs.layout import RunLayout
 from ..runs.writer import RunWriter
 from .bootstrap import resolve_db_path, resolve_repo_root
 from .cli import ArtifactPresenter, DecisionPanel, TuiApp, TuiSessionConfig, WriterStatusPresenter
-from .constants import DEFAULT_CLOSE_READING_STAGE, DEFAULT_SEGMENTATION_STAGE
+from .constants import DEFAULT_CLOSE_READ_DOC_BUDGET, DEFAULT_CLOSE_READING_STAGE, DEFAULT_SEGMENTATION_STAGE
 from .llm import JsonModelClient, ModelSettings
 from .orchestrators import (
     RestrictedWriterExecutor,
@@ -355,6 +355,29 @@ def run_writer_workflow_action(
             book_id=book_id,
             product_mode=product_mode,
         )
+    if action in {
+        "continue_after_chapter_acceptance",
+        "accept_chapter",
+        "revise_length",
+        "replan_chapter",
+        "discard_chapter",
+    }:
+        status_by_action = {
+            "accept_chapter": "accepted",
+            "revise_length": "revise_length",
+            "replan_chapter": "replan_chapter",
+            "discard_chapter": "discarded",
+        }
+        normalized_payload = dict(payload)
+        if action in status_by_action:
+            normalized_payload["status"] = status_by_action[action]
+        if normalized_payload.get("status"):
+            _write_writer_review_decision_payload(
+                workflow=workflow,
+                run_id=run_id,
+                payload=normalized_payload,
+            )
+        return workflow.continue_after_chapter_acceptance(run_id=run_id)
     if action == "approve_writeback":
         return workflow.approve_writeback(conn, run_id=run_id, book_id=book_id)
     if action == "request_scoped_artifact_revision":
@@ -725,8 +748,22 @@ def _write_writer_review_decision_status(
     run_id: str,
     status: str,
 ) -> None:
+    _write_writer_review_decision_payload(
+        workflow=workflow,
+        run_id=run_id,
+        payload={"status": status},
+    )
+
+
+def _write_writer_review_decision_payload(
+    *,
+    workflow: WriterInteractiveWorkflow,
+    run_id: str,
+    payload: Mapping[str, Any],
+) -> None:
     state = workflow.load_workflow_state(run_id=run_id) or {}
     existing = _load_run_data_if_exists(workflow, run_id, "generation_review_decision.json")
+    status = str(payload.get("status") or existing.get("status") or "").strip().lower()
     chapter_id = str(existing.get("chapter_id") or state.get("current_chapter_id") or "").strip()
     draft_id = str(existing.get("draft_id") or state.get("current_draft_id") or "draft-001").strip()
     decision_id = str(existing.get("decision_id") or f"review-{chapter_id or 'chapter'}-{draft_id}").strip()
@@ -742,7 +779,9 @@ def _write_writer_review_decision_status(
         "replan_chapter": "chapter_plan_revision_requested",
         "discarded": "discarded_by_user",
     }
-    length_plan_update = existing.get("length_plan_update")
+    reason_code = str(payload.get("reason_code") or reason_by_status.get(status, status))
+    feedback_text = str(payload.get("feedback_text") or existing.get("feedback_text") or "")
+    length_plan_update = payload.get("length_plan_update") or existing.get("length_plan_update")
     if status == "revise_length" and not isinstance(length_plan_update, Mapping):
         length_plan_update = {
             "schema_version": "1.0",
@@ -752,21 +791,49 @@ def _write_writer_review_decision_status(
             "target_chars": 1,
             "min_chars": 1,
             "max_chars": 1,
-            "reason_code": "length_or_pacing_revision_requested",
-            "feedback_text": "用户要求调整字数或节奏后重写。",
+            "reason_code": reason_code,
+            "feedback_text": feedback_text or "用户要求调整字数或节奏后重写。",
         }
-    chapter_replan_request = existing.get("chapter_replan_request")
+    if status == "revise_length" and isinstance(length_plan_update, Mapping):
+        length_plan_update = {
+            "schema_version": "1.0",
+            "update_id": f"length-update-{decision_id}",
+            "decision_id": decision_id,
+            "chapter_id": chapter_id,
+            "reason_code": reason_code,
+            "feedback_text": feedback_text,
+            "preserve_story_direction": True,
+            **dict(length_plan_update),
+        }
+    chapter_replan_request = payload.get("chapter_replan_request") or existing.get("chapter_replan_request")
     if status == "replan_chapter" and not isinstance(chapter_replan_request, Mapping):
         chapter_replan_request = {
             "schema_version": "1.0",
             "request_id": f"chapter-replan-{decision_id}",
             "decision_id": decision_id,
             "chapter_id": chapter_id,
-            "reason_code": "chapter_plan_revision_requested",
-            "feedback_text": "用户要求修改章节梗概后重写。",
+            "reason_code": reason_code,
+            "feedback_text": feedback_text or "用户要求修改章节梗概后重写。",
             "must_preserve": [],
-            "must_change": [],
+            "must_change": [feedback_text or "调整章节目标、事件安排或展开方式"],
             "forbidden_carryover": [],
+        }
+    if status == "replan_chapter" and isinstance(chapter_replan_request, Mapping):
+        must_change = chapter_replan_request.get("must_change")
+        chapter_replan_request = {
+            "schema_version": "1.0",
+            "request_id": f"chapter-replan-{decision_id}",
+            "decision_id": decision_id,
+            "chapter_id": chapter_id,
+            "reason_code": reason_code,
+            "feedback_text": feedback_text,
+            "replan_scope": "current_chapter",
+            "must_preserve": [],
+            "must_change": [feedback_text or "调整章节目标、事件安排或展开方式"]
+            if not isinstance(must_change, list) or not must_change
+            else must_change,
+            "forbidden_carryover": [],
+            **dict(chapter_replan_request),
         }
     workflow.run_writer.write_generation_review_decision(
         run_id,
@@ -778,8 +845,8 @@ def _write_writer_review_decision_status(
             "chapter_id": chapter_id,
             "draft_id": draft_id,
             "status": status,
-            "reason_code": reason_by_status.get(status, status),
-            "feedback_text": str(existing.get("feedback_text") or ""),
+            "reason_code": reason_code,
+            "feedback_text": feedback_text,
             "next_action_checkpoint": next_checkpoint_by_status.get(status, ""),
             "length_plan_update": length_plan_update if status == "revise_length" else None,
             "chapter_replan_request": chapter_replan_request if status == "replan_chapter" else None,
@@ -1253,6 +1320,7 @@ def _build_close_read_config(
     api_key: str,
     debug_path: Path,
     max_chapters: int | None,
+    document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET,
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
     include_reasoning_content: bool = True,
@@ -1269,6 +1337,7 @@ def _build_close_read_config(
     close_config.model.include_reasoning_content = include_reasoning_content
     close_config.runtime.debug_markdown_path = debug_path.as_posix()
     close_config.runtime.max_chapters = max_chapters
+    close_config.runtime.document_chars_budget = int(document_chars_budget)
     return close_config
 
 
@@ -1411,6 +1480,7 @@ def _run_pipeline(
     segment_step_kb: int,
     close_step_batches: int,
     build_creative_kb: bool,
+    close_document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET,
     should_stop: Callable[[], bool] | None = None,
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
@@ -1495,6 +1565,7 @@ def _run_pipeline(
                 api_key=api_key,
                 debug_path=debug_path,
                 max_chapters=close_round_batches,
+                document_chars_budget=close_document_chars_budget,
                 thinking=thinking,
                 reasoning_effort=reasoning_effort,
                 include_reasoning_content=include_reasoning_content,

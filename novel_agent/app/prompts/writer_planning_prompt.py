@@ -22,6 +22,8 @@ def build_book_continuation_plan_prompt(
         "4. 证据不足时，将内容写入 open_questions，不要硬编。\n"
         "5. continuation_intent.desired_actions 与 preferred_outcome 是本次规划边界；"
         "stage_highlights 只能拆解或复述该边界，不得新增未授权高潮、地点跳转、势力或替代主线。\n"
+        "6. continuation_intent.story_scale 与 climax_plan 是正式规划输入；"
+        "必须归并进 BookContinuationPlan，不得只作为备注。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n\n"
@@ -224,6 +226,29 @@ def _book_plan_example() -> dict[str, Any]:
         "plan_id": "bcp-001",
         "continuation_goal": "承接原作主线，推进下一阶段核心冲突。",
         "ending_direction": "阶段性胜利但留下更大未决项。",
+        "target_chapter_count": 12,
+        "target_total_chars": 48000,
+        "default_chapter_target_chars": 4000,
+        "pacing_profile": "慢热铺垫后段爆发",
+        "length_distribution_notes": "前两章偏短，中后段冲突章展开。",
+        "climax_plan": {
+            "conflict_climax": "主角在公开对抗中迫使幕后势力暴露关键代价",
+            "emotional_climax": "主角必须在保全关系与追求真相之间作出选择",
+            "target_chapter_index": 10,
+            "must_foreshadow": ["旧案证据的来源"],
+            "must_not_resolve_before": ["幕后主使身份"],
+            "payoff_expectation": "回收旧案线索并让读者看到关系选择的代价",
+        },
+        "chapter_outline_slots": [
+            {
+                "chapter_index": 1,
+                "target_chars": 3800,
+                "plot_function": "承接上文并建立新目标",
+                "setup_targets": ["旧案新线索"],
+                "payoff_targets": [],
+                "must_not_consume": ["幕后主使身份"],
+            }
+        ],
         "stage_highlights": ["阶段高潮一", "阶段高潮二"],
         "character_arcs": ["主角从犹疑转向承担"],
         "relationship_guardrails": ["关系只允许推进到有限合作"],

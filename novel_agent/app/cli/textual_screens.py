@@ -13,17 +13,20 @@ from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 from ..constants import DEFAULT_CLOSE_READ_DOC_BUDGET
 from .app import TuiApp
 from .decisions import DecisionPanel
+from .forms import ChapterAcceptanceForm, WriterIntentForm
 from .router import CommandContext, CommandInvocation
 from .textual_widgets import (
     ArtifactEditorPane,
     ArtifactReferenceCandidate,
     ArtifactReviewPane,
+    ChapterAcceptanceFormWidget,
     DecisionPanelWidget,
     MessageFlow,
     PromptInput,
     ScopedRevisionFeedbackWidget,
     StatusSidebar,
     ToastLayer,
+    WriterIntentWizardWidget,
 )
 
 
@@ -166,6 +169,10 @@ class WorkbenchScreen(Screen[None]):
         self.show_logs = False
         self.scoped_revision_feedback_active = False
         self.pending_scoped_revision: dict[str, Any] | None = None
+        self.writer_intent_wizard_active = False
+        self.pending_writer_goal_text = intent_text
+        self.chapter_acceptance_form_active = False
+        self.pending_chapter_acceptance_form: ChapterAcceptanceForm | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -203,6 +210,7 @@ class WorkbenchScreen(Screen[None]):
         if value.startswith("/"):
             self.handle_command(value)
             return
+        self.pending_writer_goal_text = value
         self._append_message("系统", "已记录输入。可以继续输入 /writer 开始或恢复 Writer。")
 
     def on_decision_panel_widget_selected(self, event: DecisionPanelWidget.Selected) -> None:
@@ -212,6 +220,9 @@ class WorkbenchScreen(Screen[None]):
             return
         if event.action.workflow_action == "request_scoped_artifact_revision":
             self.show_scoped_revision_feedback()
+            return
+        if event.action.workflow_action == "show_chapter_acceptance_form":
+            self.show_chapter_acceptance_form(str(event.action.payload.get("status") or ""))
             return
         if event.action.workflow_action == "manual_edit":
             self.open_current_artifact()
@@ -238,6 +249,36 @@ class WorkbenchScreen(Screen[None]):
         self._append_message("系统", "已返回当前审阅状态，未提交修改反馈。")
         self.refresh_all()
 
+    def on_writer_intent_wizard_widget_submitted(self, event: WriterIntentWizardWidget.Submitted) -> None:
+        self.writer_intent_wizard_active = False
+        self._append_message("系统", "已收集 Writer 启动意图，准备生成全书续写规划。")
+        self.start_writer_worker(form=event.form)
+
+    def on_writer_intent_wizard_widget_cancelled(self, _event: WriterIntentWizardWidget.Cancelled) -> None:
+        self.writer_intent_wizard_active = False
+        self._append_message("系统", "已取消 Writer 启动向导。")
+        self.refresh_all()
+
+    def on_chapter_acceptance_form_widget_submitted(self, event: ChapterAcceptanceFormWidget.Submitted) -> None:
+        self.chapter_acceptance_form_active = False
+        self.pending_chapter_acceptance_form = None
+        try:
+            payload = event.form.to_workflow_payload()
+        except ValueError as exc:
+            self._append_message("错误", str(exc))
+            self.chapter_acceptance_form_active = True
+            self.pending_chapter_acceptance_form = event.form
+            self.refresh_all()
+            return
+        self._append_message("确认", f"已生成章节验收决策：{payload['status']}")
+        self.confirm_current_step(action_override="continue_after_chapter_acceptance", payload=payload)
+
+    def on_chapter_acceptance_form_widget_cancelled(self, _event: ChapterAcceptanceFormWidget.Cancelled) -> None:
+        self.chapter_acceptance_form_active = False
+        self.pending_chapter_acceptance_form = None
+        self._append_message("系统", "已返回章节验收面板，未提交决策。")
+        self.refresh_all()
+
     def handle_invocation(self, invocation: CommandInvocation) -> None:
         if invocation.handler_name in {"show_status", "show_help", "show_command_palette", "show_debug_details"}:
             self._append_message("系统", self.session.dispatch_command(f"/{invocation.command_id}"))
@@ -253,12 +294,30 @@ class WorkbenchScreen(Screen[None]):
             self._append_message("错误", str(exc))
             self._append_message("建议", "输入 /help 查看当前可用命令，或按 Ctrl+P 打开命令面板。")
             return
-        if invocation.handler_name in {"list_tasks", "select_task", "create_task", "reset_close_read", "query_close_read"}:
+        if invocation.handler_name in {
+            "list_tasks",
+            "select_task",
+            "create_task",
+            "delete_task",
+            "reset_close_read",
+            "query_close_read",
+        }:
             self._append_message("系统", self.session.dispatch_command(raw))
             self.refresh_all()
             return
         if invocation.handler_name == "start_read":
-            self.start_read_worker(source_path=Path(invocation.args[0]).expanduser() if invocation.args else None)
+            options = self._parse_read_options(invocation.args)
+            if "error" in options:
+                self._append_message("错误", str(options["error"]))
+                self._append_message("恢复建议", self._read_usage())
+                return
+            self.start_read_worker(
+                source_path=options["source_path"],  # type: ignore[arg-type]
+                max_read_kb=options["max_read_kb"],  # type: ignore[arg-type]
+                max_close_batches=options["max_close_batches"],  # type: ignore[arg-type]
+                close_step_batches=int(options["close_step_batches"]),
+                close_document_chars_budget=int(options["close_document_chars_budget"]),
+            )
             return
         if invocation.handler_name == "start_close_read":
             options = self._parse_close_read_options(invocation.args)
@@ -269,8 +328,11 @@ class WorkbenchScreen(Screen[None]):
             self.start_read_worker(
                 source_path=options["source_path"],  # type: ignore[arg-type]
                 close_only=True,
-                max_close_batches=int(options["max_close_batches"]),
+                max_close_batches=(
+                    None if options["max_close_batches"] is None else int(options["max_close_batches"])
+                ),
                 close_step_batches=int(options["close_step_batches"]),
+                close_document_chars_budget=int(options["close_document_chars_budget"]),
             )
             return
         if invocation.handler_name == "build_creative_kb":
@@ -307,7 +369,10 @@ class WorkbenchScreen(Screen[None]):
                 dry_run_model=bool(options["dry_run_model"]),
             )
             return
-        if invocation.handler_name in {"start_writer", "resume"}:
+        if invocation.handler_name == "start_writer":
+            self.show_writer_intent_wizard()
+            return
+        if invocation.handler_name == "resume":
             self.start_writer_worker()
             return
         if invocation.handler_name == "open_artifact":
@@ -327,8 +392,10 @@ class WorkbenchScreen(Screen[None]):
         *,
         source_path: Path | None,
         close_only: bool = False,
-        max_close_batches: int = 1,
+        max_read_kb: int | None = 64,
+        max_close_batches: int | None = 1,
         close_step_batches: int = 1,
+        close_document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET,
     ) -> None:
         resolved_source_path = source_path or (
             Path(self.session.config.source_path).expanduser() if self.session.config.source_path else None
@@ -348,9 +415,21 @@ class WorkbenchScreen(Screen[None]):
                 self._append_message("恢复建议", "输入 /tasks 查看任务，或 /new-task <task_id> <source_path> 创建任务。")
             return
         if close_only:
+            batch_scope = (
+                "全部剩余精读 batch"
+                if max_close_batches is None
+                else f"最多 {max_close_batches} 个精读 batch"
+            )
             self._append_message(
                 "系统",
-                f"本轮 /close-read 将处理最多 {max_close_batches} 个精读 batch；每个 batch 按约 {DEFAULT_CLOSE_READ_DOC_BUDGET} 字文档预算组装。",
+                f"本轮 /close-read 将处理{batch_scope}；"
+                f"每个 batch 按约 {close_document_chars_budget} 字文档预算组装。",
+            )
+        elif max_read_kb is None and max_close_batches is None:
+            self._append_message(
+                "系统",
+                f"本轮 /read --all 将完整粗读原文、精读全部已粗读 documents，并创建/更新 Creative KB；"
+                f"每个精读 batch 按约 {close_document_chars_budget} 字文档预算组装。",
             )
         if source_path is not None:
             self.session.config.source_path = str(source_path)
@@ -364,27 +443,119 @@ class WorkbenchScreen(Screen[None]):
                 debug_path=self.session.repo_root / "runs" / "close_read_debug.md",
                 api_key=os.getenv("DEEPSEEK_API_KEY", "unused"),
                 run_mode="resume" if close_only else "new",
-                max_read_kb=0 if close_only else 64,
+                max_read_kb=0 if close_only else max_read_kb,
                 max_close_batches=max_close_batches,
                 segment_step_kb=64,
                 close_step_batches=close_step_batches,
                 build_creative_kb=True,
+                close_document_chars_budget=close_document_chars_budget,
                 should_stop=self._worker_stop_requested,
             ),
         )
 
     @staticmethod
+    def _read_usage() -> str:
+        return (
+            "/read [source_path] [--all] [--read-kb KB] [--batches N] "
+            "[--document-budget CHARS|--document-kb KB]；"
+            "默认粗读约 64KB 并精读 1 个 batch；--all 会完整粗读、精读并更新 Creative KB。"
+        )
+
+    @staticmethod
     def _close_read_usage() -> str:
         return (
-            "/close-read [source_path] [--batches N]；"
-            f"默认 N=1，单 batch 约 {DEFAULT_CLOSE_READ_DOC_BUDGET} 字文档预算，从最近 checkpoint 继续。"
+            "/close-read [source_path] [--batches N] [--document-budget CHARS|--document-kb KB]；"
+            f"默认跑完全部剩余已粗读 documents，单 batch 约 {DEFAULT_CLOSE_READ_DOC_BUDGET} 字文档预算，从最近 checkpoint 继续。"
         )
+
+    def _parse_read_options(self, args: tuple[str, ...]) -> dict[str, object]:
+        options: dict[str, object] = {
+            "source_path": None,
+            "max_read_kb": 64,
+            "max_close_batches": 1,
+            "close_step_batches": 1,
+            "close_document_chars_budget": DEFAULT_CLOSE_READ_DOC_BUDGET,
+        }
+        index = 0
+        while index < len(args):
+            token = args[index]
+            if token == "--all":
+                options["max_read_kb"] = None
+                options["max_close_batches"] = None
+                index += 1
+                continue
+            if token in {"--read-kb", "--max-read-kb"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["max_read_kb"] = value
+                continue
+            if token in {"--batches", "--max-close-batches", "--max-chapters"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["max_close_batches"] = value
+                continue
+            if token in {"--step", "--step-batches", "--close-step-batches"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["close_step_batches"] = value
+                continue
+            if token in {"--document-budget", "--doc-budget", "--batch-chars"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value
+                continue
+            if token in {"--document-kb", "--doc-kb", "--batch-kb"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value * 1024
+                continue
+            if token.startswith("--read-kb=") or token.startswith("--max-read-kb="):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": f"{token.split('=', 1)[0]} 需要一个正整数。"}
+                options["max_read_kb"] = value
+                index += 1
+                continue
+            if token.startswith("--batches="):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": "--batches 需要一个正整数。"}
+                options["max_close_batches"] = value
+                index += 1
+                continue
+            if token.startswith(("--document-budget=", "--doc-budget=", "--batch-chars=")):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": f"{token.split('=', 1)[0]} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value
+                index += 1
+                continue
+            if token.startswith(("--document-kb=", "--doc-kb=", "--batch-kb=")):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": f"{token.split('=', 1)[0]} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value * 1024
+                index += 1
+                continue
+            if token.startswith("--"):
+                return {"error": f"未知 /read 参数：{token}"}
+            if options["source_path"] is not None:
+                return {"error": "只能提供一个 source_path。"}
+            options["source_path"] = Path(token).expanduser()
+            index += 1
+        return options
 
     def _parse_close_read_options(self, args: tuple[str, ...]) -> dict[str, object]:
         options: dict[str, object] = {
             "source_path": None,
-            "max_close_batches": 1,
+            "max_close_batches": None,
             "close_step_batches": 1,
+            "close_document_chars_budget": DEFAULT_CLOSE_READ_DOC_BUDGET,
         }
         index = 0
         while index < len(args):
@@ -401,11 +572,37 @@ class WorkbenchScreen(Screen[None]):
                     return {"error": f"{token} 需要一个正整数。"}
                 options["close_step_batches"] = value
                 continue
+            if token in {"--document-budget", "--doc-budget", "--batch-chars"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value
+                continue
+            if token in {"--document-kb", "--doc-kb", "--batch-kb"}:
+                value, index = self._read_int_option(args, index, token)
+                if value is None:
+                    return {"error": f"{token} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value * 1024
+                continue
             if token.startswith("--batches="):
                 value = self._parse_positive_int(token.split("=", 1)[1])
                 if value is None:
                     return {"error": "--batches 需要一个正整数。"}
                 options["max_close_batches"] = value
+                index += 1
+                continue
+            if token.startswith(("--document-budget=", "--doc-budget=", "--batch-chars=")):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": f"{token.split('=', 1)[0]} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value
+                index += 1
+                continue
+            if token.startswith(("--document-kb=", "--doc-kb=", "--batch-kb=")):
+                value = self._parse_positive_int(token.split("=", 1)[1])
+                if value is None:
+                    return {"error": f"{token.split('=', 1)[0]} 需要一个正整数。"}
+                options["close_document_chars_budget"] = value * 1024
                 index += 1
                 continue
             if token.startswith("--"):
@@ -645,13 +842,42 @@ class WorkbenchScreen(Screen[None]):
             ),
         )
 
-    def start_writer_worker(self) -> None:
+    def show_writer_intent_wizard(self) -> None:
         book_id = self._require_task_id()
         if not book_id:
             return
+        self.writer_intent_wizard_active = True
+        self.scoped_revision_feedback_active = False
+        self.chapter_acceptance_form_active = False
+        self._ensure_writer_intent_wizard_widget(form=WriterIntentForm.from_goal_text(self.pending_writer_goal_text))
+        self._append_message("系统", "请先确认本轮续写意图；这些字段会映射为 Writer 的 JSON contract。")
+        self.refresh_all()
+
+    def show_chapter_acceptance_form(self, status: str) -> None:
+        normalized = status.strip().lower()
+        if normalized not in {"accepted", "revise_length", "replan_chapter", "discarded"}:
+            self._append_message("错误", "未知章节验收动作。")
+            return
+        self.chapter_acceptance_form_active = True
+        self.scoped_revision_feedback_active = False
+        self.writer_intent_wizard_active = False
+        self.pending_chapter_acceptance_form = ChapterAcceptanceForm.for_status(normalized)
+        self._ensure_chapter_acceptance_form_widget(form=self.pending_chapter_acceptance_form)
+        self.refresh_all()
+
+    def start_writer_worker(self, *, form: WriterIntentForm | None = None) -> None:
+        book_id = self._require_task_id()
+        if not book_id:
+            return
+        writer_kwargs = form.to_start_writer_kwargs() if form is not None else {}
         self._start_worker(
             "Writer",
-            lambda: self.session.facade.start_writer(book_id=book_id, dry_run=True, allow_incomplete_modeling=True),
+            lambda: self.session.facade.start_writer(
+                book_id=book_id,
+                dry_run=True,
+                allow_incomplete_modeling=True,
+                **writer_kwargs,
+            ),
         )
 
     def confirm_current_step(
@@ -835,10 +1061,22 @@ class WorkbenchScreen(Screen[None]):
             return
         self.session.ingest_facade_events()
         self._refresh_events_from_stream()
-        self._append_message("系统", f"{name}本轮已完成。")
+        self._append_message("系统", self._worker_completion_message(name, result))
         if isinstance(result, dict):
             self._apply_workflow_result(result)
         self.refresh_all()
+
+    def _worker_completion_message(self, name: str, result: Any) -> str:
+        if isinstance(result, dict) and isinstance(result.get("checkpoint"), dict):
+            view = self.session.status_presenter.present_checkpoint(result["checkpoint"])
+            return f"{name}已到达审阅节点：{view.step}。"
+        if isinstance(result, dict) and self._is_scoped_revision_result(result):
+            status = str(result.get("status") or "")
+            if status == "candidate":
+                return f"{name}已生成候选修改。"
+            if status == "applied":
+                return f"{name}已保存候选修改。"
+        return f"{name}本轮已完成。"
 
     def request_stop_worker(self, *, announce: bool = True) -> None:
         if not self.running_worker_name:
@@ -942,13 +1180,31 @@ class WorkbenchScreen(Screen[None]):
     def _refresh_decision_panel(self) -> None:
         stage = str(self.session.current_status.technical_details.get("internal_stage") or "")
         panel = None
+        self._hide_writer_intent_wizard_widget(not self.writer_intent_wizard_active)
         self._hide_scoped_revision_feedback_widget(not self.scoped_revision_feedback_active)
+        self._hide_chapter_acceptance_form_widget(not self.chapter_acceptance_form_active)
         prompt = self.query_one("#workbench-prompt", PromptInput)
+        if self.writer_intent_wizard_active:
+            prompt.display = False
+            for widget in self.query("#decision-panel"):
+                widget.display = False
+            self._hide_scoped_revision_feedback_widget(True)
+            self._hide_chapter_acceptance_form_widget(True)
+            self._ensure_writer_intent_wizard_widget()
+            return
         if self.scoped_revision_feedback_active:
             prompt.display = False
             for widget in self.query("#decision-panel"):
                 widget.display = False
             self._ensure_scoped_revision_feedback_widget()
+            return
+        if self.chapter_acceptance_form_active:
+            prompt.display = False
+            for widget in self.query("#decision-panel"):
+                widget.display = False
+            self._ensure_chapter_acceptance_form_widget(
+                form=self.pending_chapter_acceptance_form or ChapterAcceptanceForm.for_status("accepted")
+            )
             return
         if self.pending_scoped_revision and str(self.pending_scoped_revision.get("status") or "") == "candidate":
             panel = DecisionPanel.scoped_revision_candidate(
@@ -1004,6 +1260,55 @@ class WorkbenchScreen(Screen[None]):
         if not should_hide:
             return
         for widget in self.query("#scoped-revision-feedback"):
+            widget.display = False
+
+    def _ensure_writer_intent_wizard_widget(
+        self,
+        *,
+        form: WriterIntentForm | None = None,
+    ) -> WriterIntentWizardWidget:
+        existing = self.query("#writer-intent-wizard")
+        for widget in existing:
+            if isinstance(widget, WriterIntentWizardWidget):
+                if form is not None:
+                    widget.value = form.render_template()
+                widget.display = True
+                widget.focus()
+                return widget
+        widget = WriterIntentWizardWidget(form=form, id="writer-intent-wizard")
+        self.query_one("#bottom-region", Vertical).mount(widget)
+        return widget
+
+    def _hide_writer_intent_wizard_widget(self, should_hide: bool) -> None:
+        if not should_hide:
+            return
+        for widget in self.query("#writer-intent-wizard"):
+            widget.display = False
+
+    def _ensure_chapter_acceptance_form_widget(
+        self,
+        *,
+        form: ChapterAcceptanceForm,
+    ) -> ChapterAcceptanceFormWidget:
+        existing = self.query("#chapter-acceptance-form")
+        for widget in existing:
+            if isinstance(widget, ChapterAcceptanceFormWidget):
+                widget.form = form
+                try:
+                    widget.value = form.render_template()
+                except Exception:  # noqa: BLE001 - widget may be mounted before child TextArea is composed.
+                    pass
+                widget.display = True
+                widget.focus()
+                return widget
+        widget = ChapterAcceptanceFormWidget(form=form, id="chapter-acceptance-form")
+        self.query_one("#bottom-region", Vertical).mount(widget)
+        return widget
+
+    def _hide_chapter_acceptance_form_widget(self, should_hide: bool) -> None:
+        if not should_hide:
+            return
+        for widget in self.query("#chapter-acceptance-form"):
             widget.display = False
 
     def _current_review_stage(self) -> str:

@@ -124,10 +124,11 @@ class WriterInteractiveWorkflow:
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
         if mode == ASSIST_MODE:
+            run_dir = self.run_writer.layout.run_dir(run_id)
             checkpoint = self._write_checkpoint(
                 run_id=run_id,
                 stage="freeze_a_review",
-                artifact_path=str(self.run_writer.layout.run_dir(run_id)),
+                artifact_path=str(run_dir / "book_continuation_plan.json"),
                 source="prepare_planning",
             )
             state["pending_checkpoint"] = checkpoint

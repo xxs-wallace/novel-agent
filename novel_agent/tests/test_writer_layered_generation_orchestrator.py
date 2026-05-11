@@ -223,6 +223,56 @@ def test_check_modeling_status_reports_optional_structure_artifacts_without_bloc
     assert "narrative_structure_pattern" in source_types
 
 
+def test_prepare_freeze_a_preserves_story_scale_and_climax_inputs(tmp_path: Path) -> None:
+    db, orchestrator = _build_orchestrator(tmp_path)
+    book_id = "book-scale"
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_assets(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_document(conn, book_id=book_id)
+        _seed_profile(conn, book_id=book_id, canonical_name="沈青")
+        _seed_fragment_card(conn)
+        conn.commit()
+
+        bundle = orchestrator.prepare_freeze_a(
+            conn,
+            run_id="run-scale",
+            book_id=book_id,
+            intent_payload={
+                "major_characters": ["沈青"],
+                "desired_actions": ["追查旧案线索"],
+                "story_scale": {
+                    "target_chapter_count": 4,
+                    "target_total_chars": 20000,
+                    "default_chapter_target_chars": 5000,
+                    "pacing_profile": "后段爆发",
+                    "length_distribution_notes": "第四章展开",
+                },
+                "climax_plan": {
+                    "conflict_climax": "公开暴露新证据",
+                    "emotional_climax": "沈青必须决定是否信任顾迟",
+                    "target_chapter_index": 4,
+                    "must_foreshadow": ["新证据来源"],
+                    "must_not_resolve_before": ["反派身份"],
+                    "payoff_expectation": "证明旧案仍有隐情",
+                },
+            },
+        )
+
+    intent = bundle["continuation_intent"]
+    plan = bundle["book_continuation_plan"]
+    assert intent["story_scale"]["target_total_chars"] == 20000
+    assert intent["climax_plan"]["conflict_climax"] == "公开暴露新证据"
+    assert plan["target_chapter_count"] == 4
+    assert plan["target_total_chars"] == 20000
+    assert plan["default_chapter_target_chars"] == 5000
+    assert plan["climax_plan"]["must_not_resolve_before"] == ["反派身份"]
+    assert len(plan["chapter_outline_slots"]) == 4
+    assert plan["chapter_outline_slots"][3]["payoff_targets"] == ["证明旧案仍有隐情"]
+
+
 def test_writer_layered_generation_pipeline_supports_review_and_freeze_chain(tmp_path: Path) -> None:
     db, orchestrator = _build_orchestrator(tmp_path)
     book_id = "book-1"

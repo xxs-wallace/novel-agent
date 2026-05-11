@@ -49,6 +49,7 @@ class TuiApp:
         self.current_artifact: ArtifactSummary | None = None
         self.decision_panel: DecisionPanel | None = None
         self.last_debug_details: dict[str, Any] = {}
+        self.last_task_ids: list[str] = []
 
     def set_status(self, internal_status: str, *, technical_details: dict[str, Any] | None = None) -> StatusView:
         self.current_status = self.status_presenter.present(internal_status, technical_details=technical_details)
@@ -75,11 +76,14 @@ class TuiApp:
         if invocation.handler_name == "show_status":
             return self.render_status_sidebar()
         if invocation.handler_name == "list_tasks":
-            return self.facade.render_task_list(active_book_id=self.config.book_id)
+            return self._render_task_list()
         if invocation.handler_name == "select_task":
             if not invocation.args:
-                return "请输入 task id，例如 /task couple。也可以输入 /tasks 查看所有任务。"
-            task = self.facade.ensure_task(book_id=invocation.args[0])
+                return "请输入 task id 或编号，例如 /task couple 或 /task 3。也可以输入 /tasks 查看所有任务。"
+            book_id = self._resolve_task_selector(invocation.args[0])
+            if not book_id:
+                return "没有找到这个任务编号。先输入 /tasks 查看编号，再输入 /task <编号>。"
+            task = self.facade.ensure_task(book_id=book_id)
             self.config.book_id = task.book_id
             self.config.source_path = task.source_path
             return f"已进入任务 {task.book_id}。\n{task.render_status_line(active=True)}"
@@ -91,6 +95,8 @@ class TuiApp:
             self.config.book_id = task.book_id
             self.config.source_path = task.source_path
             return f"已创建并进入任务 {task.book_id}。\n{task.render_status_line(active=True)}"
+        if invocation.handler_name == "delete_task":
+            return self._dispatch_delete_task(invocation.args)
         if invocation.handler_name == "reset_close_read":
             if not self.config.book_id:
                 return "请先选择 task id。使用 /tasks 查看任务，或 /task <task_id> 进入任务。"
@@ -130,6 +136,83 @@ class TuiApp:
         if invocation.handler_name == "show_debug_details":
             return str(self.last_debug_details)
         return f"已收到命令：/{invocation.command_id}"
+
+    def _render_task_list(self) -> str:
+        if not hasattr(self.facade, "list_tasks"):
+            return self.facade.render_task_list(active_book_id=self.config.book_id)
+        tasks = list(self.facade.list_tasks())
+        self.last_task_ids = [str(task.book_id) for task in tasks]
+        if not tasks:
+            return "当前还没有任务。使用 /new-task <task_id> <source_path> 创建任务。"
+        lines = ["当前任务："]
+        lines.extend(
+            f"{index:>2}. {task.render_status_line(active=task.book_id == self.config.book_id)}"
+            for index, task in enumerate(tasks, start=1)
+        )
+        lines.append(
+            "使用 /task <编号|task_id> 进入任务；使用 /new-task <task_id> <source_path> 创建任务；"
+            "使用 /delete-task <编号|task_id> 预览清理。"
+        )
+        return "\n".join(lines)
+
+    def _resolve_task_selector(self, selector: str) -> str:
+        normalized = selector.strip()
+        if normalized.isdigit():
+            index = int(normalized)
+            task_ids = self.last_task_ids
+            if not task_ids and hasattr(self.facade, "list_tasks"):
+                task_ids = [str(task.book_id) for task in self.facade.list_tasks()]
+                self.last_task_ids = task_ids
+            if 1 <= index <= len(task_ids):
+                return task_ids[index - 1]
+            return ""
+        return normalized
+
+    def _dispatch_delete_task(self, args: tuple[str, ...]) -> str:
+        if not args:
+            return "用法：/delete-task <编号|task_id> [--yes] [--with-runs]。不带 --yes 时只预览。"
+        selector = ""
+        confirm = False
+        include_runs = False
+        for token in args:
+            if token == "--yes":
+                confirm = True
+                continue
+            if token == "--with-runs":
+                include_runs = True
+                continue
+            if token.startswith("--"):
+                return f"未知 /delete-task 参数：{token}"
+            if selector:
+                return "只能提供一个 task id 或编号。"
+            selector = token
+        if not selector:
+            return "请输入 task id 或编号，例如 /delete-task couple --yes 或 /delete-task 3 --yes。"
+        book_id = self._resolve_task_selector(selector)
+        if not book_id:
+            return "没有找到这个任务编号。先输入 /tasks 查看编号，再输入 /delete-task <编号>。"
+        result = self.facade.delete_task(book_id=book_id, confirm=confirm, include_runs=include_runs)
+        deleted_paths = result.get("deleted_paths") if isinstance(result.get("deleted_paths"), list) else []
+        candidate_paths = result.get("candidate_paths") if isinstance(result.get("candidate_paths"), list) else []
+        if confirm:
+            if self.config.book_id == result.get("book_id"):
+                self.config.book_id = ""
+                self.config.source_path = ""
+            self.last_task_ids = [task_id for task_id in self.last_task_ids if task_id != result.get("book_id")]
+            return (
+                f"已删除任务 {result.get('book_id')}。\n"
+                f"清理文件/目录：{len(deleted_paths)}\n"
+                "原文 source_path 不会被删除。"
+            )
+        if not candidate_paths:
+            return f"未找到任务 {result.get('book_id')} 的本地建模产物。带 --yes 可从任务注册表中移除记录。"
+        preview = "\n".join(f"- {path}" for path in candidate_paths[:12])
+        suffix = "\n..." if len(candidate_paths) > 12 else ""
+        return (
+            f"将删除任务 {result.get('book_id')} 的这些本地建模产物：\n"
+            f"{preview}{suffix}\n"
+            "确认执行请输入 /delete-task <task_id> --yes；如要清理 runs 同名目录，加 --with-runs。"
+        )
 
     def _dispatch_close_read_query(self, args: tuple[str, ...]) -> str:
         if not self.config.book_id:

@@ -1531,6 +1531,7 @@ def test_workflow_modes_and_resume_checkpoint_are_recorded(tmp_path: Path) -> No
     assert auto_state["confirmation_points"] == []
     assert resume_checkpoint is not None
     assert resume_checkpoint["stage"] == "freeze_a_review"
+    assert Path(str(resume_checkpoint["artifact_path"])).name == "book_continuation_plan.json"
     assert batch_resume_checkpoint is None
     assert batch_after_planning is not None
     assert batch_after_planning["current_stage"] == "freeze_a"

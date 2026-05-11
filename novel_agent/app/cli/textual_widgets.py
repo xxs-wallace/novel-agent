@@ -16,6 +16,7 @@ from textual.widgets import Input, RichLog, Static, TextArea
 from .artifacts import ArtifactPresenter, ArtifactSaveResult, ArtifactSummary
 from .decisions import DecisionAction, DecisionPanel
 from .events import RunEvent
+from .forms import ChapterAcceptanceForm, WriterIntentForm
 from .router import CommandContext, CommandInvocation, CommandRouter, CommandSpec
 
 
@@ -121,6 +122,34 @@ class ScopedRevisionFeedbackTextArea(TextArea):
             event.prevent_default()
             parent = self.parent
             if isinstance(parent, ScopedRevisionFeedbackWidget):
+                parent.submit()
+            return
+        await super()._on_key(event)
+
+
+class WriterIntentTextArea(TextArea):
+    """TextArea variant for the Writer setup wizard."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key in {"ctrl+enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            parent = self.parent
+            if isinstance(parent, WriterIntentWizardWidget):
+                parent.submit()
+            return
+        await super()._on_key(event)
+
+
+class ChapterAcceptanceTextArea(TextArea):
+    """TextArea variant for chapter acceptance forms."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key in {"ctrl+enter", "ctrl+j"}:
+            event.stop()
+            event.prevent_default()
+            parent = self.parent
+            if isinstance(parent, ChapterAcceptanceFormWidget):
                 parent.submit()
             return
         await super()._on_key(event)
@@ -346,6 +375,161 @@ class ScopedRevisionFeedbackWidget(Vertical, can_focus=True):
         self.post_message(self.Submitted(feedback))
 
 
+class WriterIntentWizardWidget(Vertical, can_focus=True):
+    DEFAULT_CSS = """
+    WriterIntentWizardWidget {
+        height: 18;
+        min-height: 16;
+        max-height: 22;
+        border-top: solid $accent;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    WriterIntentWizardWidget TextArea {
+        height: 12;
+        min-height: 10;
+        max-height: 16;
+        border: none;
+        background: $panel;
+    }
+
+    #writer-intent-title {
+        height: auto;
+        color: $accent;
+    }
+
+    #writer-intent-help, #writer-intent-footer {
+        height: auto;
+        color: $text-muted;
+    }
+    """
+
+    class Submitted(Message):
+        def __init__(self, form: WriterIntentForm) -> None:
+            self.form = form
+            super().__init__()
+
+    class Cancelled(Message):
+        pass
+
+    def __init__(self, *, form: WriterIntentForm | None = None, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.form = form or WriterIntentForm()
+
+    def compose(self) -> ComposeResult:
+        yield Static("开始 Writer 前，请先确认本轮续写意图", id="writer-intent-title")
+        yield Static(
+            "这些字段会映射为 intent_payload / user_world_notes；JSON 仍保留给 smoke 和恢复运行。",
+            id="writer-intent-help",
+        )
+        yield WriterIntentTextArea(
+            self.form.render_template(),
+            language="markdown",
+            show_line_numbers=False,
+            soft_wrap=True,
+            id="writer-intent-text",
+        )
+        yield Static("Ctrl+Enter 开始 Writer · Esc 取消 · 可用逗号/分号拆分列表字段", id="writer-intent-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#writer-intent-text", TextArea).focus()
+
+    @property
+    def value(self) -> str:
+        return self.query_one("#writer-intent-text", TextArea).text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        editor = self.query_one("#writer-intent-text", TextArea)
+        editor.load_text(text)
+        editor.move_cursor(editor.document.end)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.post_message(self.Cancelled())
+
+    def submit(self) -> None:
+        self.post_message(self.Submitted(WriterIntentForm.from_template_text(self.value)))
+
+
+class ChapterAcceptanceFormWidget(Vertical, can_focus=True):
+    DEFAULT_CSS = """
+    ChapterAcceptanceFormWidget {
+        height: 16;
+        min-height: 14;
+        max-height: 20;
+        border-top: solid $warning;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    ChapterAcceptanceFormWidget TextArea {
+        height: 10;
+        min-height: 8;
+        max-height: 14;
+        border: none;
+        background: $panel;
+    }
+
+    #chapter-acceptance-title {
+        height: auto;
+        color: $warning;
+    }
+
+    #chapter-acceptance-help, #chapter-acceptance-footer {
+        height: auto;
+        color: $text-muted;
+    }
+    """
+
+    class Submitted(Message):
+        def __init__(self, form: ChapterAcceptanceForm) -> None:
+            self.form = form
+            super().__init__()
+
+    class Cancelled(Message):
+        pass
+
+    def __init__(self, *, form: ChapterAcceptanceForm, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.form = form
+
+    def compose(self) -> ComposeResult:
+        yield Static("章节验收", id="chapter-acceptance-title")
+        yield Static("这些字段会生成 GenerationReviewDecision 及必要的返工 contract。", id="chapter-acceptance-help")
+        yield ChapterAcceptanceTextArea(
+            self.form.render_template(),
+            language="markdown",
+            show_line_numbers=False,
+            soft_wrap=True,
+            id="chapter-acceptance-text",
+        )
+        yield Static("Ctrl+Enter 提交 · Esc 取消", id="chapter-acceptance-footer")
+
+    def on_mount(self) -> None:
+        self.query_one("#chapter-acceptance-text", TextArea).focus()
+
+    @property
+    def value(self) -> str:
+        return self.query_one("#chapter-acceptance-text", TextArea).text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        editor = self.query_one("#chapter-acceptance-text", TextArea)
+        editor.load_text(text)
+        editor.move_cursor(editor.document.end)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.post_message(self.Cancelled())
+
+    def submit(self) -> None:
+        self.post_message(self.Submitted(ChapterAcceptanceForm.from_template_text(self.value, default_status=self.form.status)))
+
+
 class ArtifactReviewPane(Vertical):
     DEFAULT_CSS = """
     ArtifactReviewPane {
@@ -401,16 +585,19 @@ class ArtifactEditorPane(Vertical):
         super().__init__(id=id)
         self.presenter = presenter
         self.path: Path | None = None
+        self.field_edit = False
 
     def compose(self) -> ComposeResult:
         yield Static("编辑视图", id="artifact-editor-title")
         yield TextArea.code_editor("", language="json", id="artifact-editor-text")
         yield Static("", id="artifact-editor-status")
 
-    def load_path(self, path: Path | str) -> None:
-        model = self.presenter.edit_model(path)
+    def load_path(self, path: Path | str, *, advanced_json: bool = False) -> None:
+        model = self.presenter.edit_model(path) if advanced_json else self.presenter.field_edit_model(path)
         self.path = Path(model["path"])
-        self.query_one("#artifact-editor-title", Static).update(f"编辑：{self.path.name}")
+        self.field_edit = bool(model.get("field_edit"))
+        prefix = "字段编辑" if self.field_edit else "高级 JSON 编辑" if self.path.suffix.lower() == ".json" else "编辑"
+        self.query_one("#artifact-editor-title", Static).update(f"{prefix}：{self.path.name}")
         self.query_one("#artifact-editor-text", TextArea).load_text(str(model["text"]))
         self.query_one("#artifact-editor-status", Static).update(str(model["validation_error"] or ""))
         self.display = True
@@ -418,7 +605,8 @@ class ArtifactEditorPane(Vertical):
     def save_current(self) -> ArtifactSaveResult:
         if self.path is None:
             return ArtifactSaveResult(path=Path(""), saved=False, message="当前没有正在编辑的产物", validation_error="当前没有正在编辑的产物")
-        result = self.presenter.save_text(self.path, self.query_one("#artifact-editor-text", TextArea).text)
+        text = self.query_one("#artifact-editor-text", TextArea).text
+        result = self.presenter.save_field_text(self.path, text) if self.field_edit else self.presenter.save_text(self.path, text)
         self.query_one("#artifact-editor-status", Static).update(result.message if result.saved else result.validation_error)
         return result
 

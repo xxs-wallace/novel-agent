@@ -308,6 +308,8 @@ class WriterLayeredGenerationOrchestrator:
             avoidances=[str(item) for item in (payload.get("avoidances") or [])],
             preferred_outcome=str(payload.get("preferred_outcome") or ""),
             notes=str(payload.get("notes") or ""),
+            story_scale=self._normalize_story_scale(payload.get("story_scale")),
+            climax_plan=self._normalize_climax_plan(payload.get("climax_plan")),
             sources=[
                 TraceableSource(
                     type="user_input",
@@ -317,6 +319,69 @@ class WriterLayeredGenerationOrchestrator:
                 )
             ],
         )
+
+    @staticmethod
+    def _normalize_story_scale(value: object) -> dict[str, Any]:
+        source = value if isinstance(value, Mapping) else {}
+        target_chapter_count = int(source.get("target_chapter_count") or 0)
+        target_total_chars = int(source.get("target_total_chars") or 0)
+        default_chapter_target_chars = int(source.get("default_chapter_target_chars") or 0)
+        if target_chapter_count > 0 and target_total_chars > 0 and default_chapter_target_chars <= 0:
+            default_chapter_target_chars = max(1, target_total_chars // target_chapter_count)
+        if target_chapter_count > 0 and default_chapter_target_chars > 0 and target_total_chars <= 0:
+            target_total_chars = target_chapter_count * default_chapter_target_chars
+        return {
+            "target_chapter_count": max(0, target_chapter_count),
+            "target_total_chars": max(0, target_total_chars),
+            "default_chapter_target_chars": max(0, default_chapter_target_chars),
+            "pacing_profile": str(source.get("pacing_profile") or ""),
+            "length_distribution_notes": str(source.get("length_distribution_notes") or ""),
+        }
+
+    @staticmethod
+    def _normalize_climax_plan(value: object) -> dict[str, Any]:
+        source = value if isinstance(value, Mapping) else {}
+        return {
+            "conflict_climax": str(source.get("conflict_climax") or ""),
+            "emotional_climax": str(source.get("emotional_climax") or ""),
+            "target_chapter_index": int(source.get("target_chapter_index") or 0),
+            "must_foreshadow": [str(item) for item in (source.get("must_foreshadow") or [])],
+            "must_not_resolve_before": [str(item) for item in (source.get("must_not_resolve_before") or [])],
+            "payoff_expectation": str(source.get("payoff_expectation") or ""),
+        }
+
+    @staticmethod
+    def _fallback_chapter_outline_slots(
+        *,
+        count: int,
+        default_chars: int,
+        highlights: list[str],
+        climax_plan: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        target_index = int(climax_plan.get("target_chapter_index") or 0)
+        slots: list[dict[str, Any]] = []
+        for index in range(1, max(1, count) + 1):
+            if target_index and index == target_index:
+                plot_function = "承接前文铺垫并推进到阶段高潮"
+            elif index == 1:
+                plot_function = "承接上文并建立本轮续写目标"
+            elif index == count:
+                plot_function = "阶段收束并保留下一轮钩子"
+            else:
+                plot_function = highlights[min(index - 1, len(highlights) - 1)] if highlights else "推进阶段目标"
+            slots.append(
+                {
+                    "chapter_index": index,
+                    "target_chars": max(1, default_chars),
+                    "plot_function": plot_function,
+                    "setup_targets": list(climax_plan.get("must_foreshadow") or []) if index < (target_index or count) else [],
+                    "payoff_targets": [str(climax_plan.get("payoff_expectation") or "")]
+                    if target_index and index == target_index and climax_plan.get("payoff_expectation")
+                    else [],
+                    "must_not_consume": list(climax_plan.get("must_not_resolve_before") or []),
+                }
+            )
+        return slots
 
     def prepare_freeze_a(
         self,
@@ -397,7 +462,7 @@ class WriterLayeredGenerationOrchestrator:
             review_stage="freeze_a_review",
             status="needs_review",
             artifact_name=REVIEW_BUNDLE_NAME,
-            artifact_path=str(run_dir),
+            artifact_path=str(run_dir / "book_continuation_plan.json"),
             message="请审阅全书规划、世界观补全与人物补充文件，确认后进入 Freeze A。",
             next_freeze_stage="freeze_a",
         )
@@ -1071,11 +1136,28 @@ class WriterLayeredGenerationOrchestrator:
         world_summary_path: Path,
     ) -> dict[str, Any]:
         highlights = intent.desired_actions[:3] or ["承接现有主线并推进一个阶段冲突"]
+        story_scale = dict(intent.story_scale)
+        climax_plan = dict(intent.climax_plan)
+        target_chapter_count = int(story_scale.get("target_chapter_count") or 3)
+        default_chars = int(story_scale.get("default_chapter_target_chars") or 4000)
+        target_total = int(story_scale.get("target_total_chars") or target_chapter_count * default_chars)
         return {
             "plan_id": f"{book_id}-book-plan",
             "book_id": book_id,
             "continuation_goal": intent.desired_actions[0] if intent.desired_actions else "承接原作大纲推进后续主线。",
             "ending_direction": intent.preferred_outcome or "阶段性收束并保留后续张力。",
+            "target_chapter_count": target_chapter_count,
+            "target_total_chars": target_total,
+            "default_chapter_target_chars": default_chars,
+            "pacing_profile": str(story_scale.get("pacing_profile") or "均衡推进"),
+            "length_distribution_notes": str(story_scale.get("length_distribution_notes") or ""),
+            "climax_plan": climax_plan,
+            "chapter_outline_slots": self._fallback_chapter_outline_slots(
+                count=target_chapter_count,
+                default_chars=default_chars,
+                highlights=highlights,
+                climax_plan=climax_plan,
+            ),
             "stage_highlights": highlights,
             "character_arcs": [f"{name}在后续阶段需要出现可验证的选择变化" for name in intent.major_characters[:3]],
             "relationship_guardrails": ["关键关系只允许小步推进，不得跳过桥接事件。"],
@@ -1522,11 +1604,21 @@ class WriterLayeredGenerationOrchestrator:
         return self._batch_plan_from_dict(payload)
 
     def _book_plan_from_dict(self, data: Mapping[str, Any]) -> BookContinuationPlan:
+        story_scale = self._normalize_story_scale(data)
         return BookContinuationPlan(
             plan_id=str(data.get("plan_id") or ""),
             book_id=str(data.get("book_id") or ""),
             continuation_goal=str(data.get("continuation_goal") or ""),
             ending_direction=str(data.get("ending_direction") or ""),
+            target_chapter_count=int(story_scale.get("target_chapter_count") or 0),
+            target_total_chars=int(story_scale.get("target_total_chars") or 0),
+            default_chapter_target_chars=int(story_scale.get("default_chapter_target_chars") or 0),
+            pacing_profile=str(story_scale.get("pacing_profile") or ""),
+            length_distribution_notes=str(story_scale.get("length_distribution_notes") or ""),
+            climax_plan=self._normalize_climax_plan(data.get("climax_plan")),
+            chapter_outline_slots=[
+                dict(item) for item in (data.get("chapter_outline_slots") or []) if isinstance(item, Mapping)
+            ],
             stage_highlights=[str(item) for item in (data.get("stage_highlights") or [])],
             character_arcs=[str(item) for item in (data.get("character_arcs") or [])],
             relationship_guardrails=[str(item) for item in (data.get("relationship_guardrails") or [])],

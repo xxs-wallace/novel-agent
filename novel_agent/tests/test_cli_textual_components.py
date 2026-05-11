@@ -13,6 +13,8 @@ from textual.widgets import Static, TextArea
 
 from novel_agent.app.cli import (
     ArtifactEditorPane,
+    ChapterAcceptanceForm,
+    ChapterAcceptanceFormWidget,
     CommandPalette,
     DecisionPanel,
     DecisionPanelWidget,
@@ -24,6 +26,8 @@ from novel_agent.app.cli import (
     TuiApp,
     TuiSessionConfig,
     WorkbenchScreen,
+    WriterIntentForm,
+    WriterIntentWizardWidget,
 )
 from novel_agent.app.cli.events import RunEvent
 
@@ -38,9 +42,22 @@ class _TextualFakeFacade:
         self.creative_kb_benchmark_runs: list[dict[str, object]] = []
         self.failures: dict[str, Exception] = {}
         self.last_read_kwargs: dict[str, object] = {}
+        self.writer_runs: list[dict[str, object]] = []
+        self.writer_action_runs: list[dict[str, object]] = []
         self.scoped_revision_requests: list[dict[str, object]] = []
         self.scoped_revision_applies: list[dict[str, object]] = []
         self.next_scoped_revision_result: dict[str, object] | None = None
+
+    def _task(self, book_id: str, source_path: str = ""):  # type: ignore[no-untyped-def]
+        return type(
+            "Task",
+            (),
+            {
+                "book_id": book_id,
+                "source_path": source_path,
+                "render_status_line": lambda _self, active=False: f"{'* ' if active else '  '}{book_id} · source={source_path}",
+            },
+        )()
 
     def fail_next(self, operation: str, exc: Exception) -> None:
         self.failures[operation] = exc
@@ -58,15 +75,10 @@ class _TextualFakeFacade:
         return self.repo_root / ".indexes" / f"{book_id}.db"
 
     def ensure_task(self, *, book_id: str, source_path: str = ""):  # type: ignore[no-untyped-def]
-        return type(
-            "Task",
-            (),
-            {
-                "book_id": book_id,
-                "source_path": source_path,
-                "render_status_line": lambda _self, active=False: f"{'* ' if active else '  '}{book_id} · source={source_path}",
-            },
-        )()
+        return self._task(book_id, source_path)
+
+    def list_tasks(self):  # type: ignore[no-untyped-def]
+        return [self._task("couple"), self._task("longzu-32kb-agentic-12345678")]
 
     def render_task_list(self, *, active_book_id: str = "") -> str:
         return f"当前任务：\n* {active_book_id or 'couple'} · documents=2 · chapters=1 · 精读完成"
@@ -81,6 +93,25 @@ class _TextualFakeFacade:
                 "close_read_progress": 1,
                 "files": 1,
             },
+        }
+
+    def delete_task(self, *, book_id: str, confirm: bool = False, include_runs: bool = False):  # type: ignore[no-untyped-def]
+        self.calls.append("delete_task")
+        if confirm:
+            return {
+                "book_id": book_id,
+                "confirmed": True,
+                "deleted_paths": [str(self.repo_root / ".indexes" / f"{book_id}.db")],
+                "errors": [],
+            }
+        return {
+            "book_id": book_id,
+            "confirmed": False,
+            "candidate_paths": [
+                str(self.repo_root / ".indexes" / f"{book_id}.db"),
+                str(self.repo_root / ".memory" / "worlds" / f"{book_id}.world.md"),
+            ],
+            "include_runs": include_runs,
         }
 
     def query_close_read(
@@ -124,9 +155,10 @@ class _TextualFakeFacade:
         self._record("kb")
         return {"fragment_cards": 3, "clusters": 1, "representatives": 1}
 
-    def start_writer(self, **_kwargs):  # type: ignore[no-untyped-def]
+    def start_writer(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("writer")
-        self._record("writer")
+        self.writer_runs.append(dict(kwargs))
+        self._record("writer", kwargs=dict(kwargs))
         artifact_path = self.repo_root / "runs" / "writer" / "batch_plan.json"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         artifact_path.write_text(json.dumps({"stage_goal": "继续追查"}, ensure_ascii=False), encoding="utf-8")
@@ -139,9 +171,10 @@ class _TextualFakeFacade:
             },
         }
 
-    def writer_action(self, **_kwargs):  # type: ignore[no-untyped-def]
+    def writer_action(self, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append("writer_action")
-        self._record("writer_action")
+        self.writer_action_runs.append(dict(kwargs))
+        self._record("writer_action", kwargs=dict(kwargs))
         return {"status": "chapter_review", "checkpoint": {"stage": "chapter_review"}}
 
     def request_scoped_artifact_revision(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -374,14 +407,44 @@ def test_task_commands_list_create_and_select_active_task(tmp_path: Path) -> Non
             assert isinstance(screen, WorkbenchScreen)
             screen.handle_command("/tasks")
             await pilot.pause()
-            assert "当前任务" in app.session.messages.render(limit=20)
+            rendered = app.session.messages.render(limit=20)
+            assert "当前任务" in rendered
+            assert "1. * couple" in rendered
+            assert "/delete-task <编号|task_id>" in rendered
             screen.handle_command(f"/new-task fresh {source_path}")
             await pilot.pause()
             assert app.session.config.book_id == "fresh"
             assert app.session.config.source_path == str(source_path)
-            screen.handle_command("/task couple")
+            screen.handle_command("/task 1")
             await pilot.pause()
             assert app.session.config.book_id == "couple"
+
+    _run(scenario())
+
+
+def test_delete_task_command_previews_then_confirms_cleanup(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        async with app.run_test(size=(120, 36)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.handle_command("/delete-task couple")
+            await pilot.pause()
+            rendered = app.session.messages.render(limit=30)
+            assert "将删除任务 couple" in rendered
+            assert ".indexes/couple.db" in rendered
+            assert "/delete-task <task_id> --yes" in rendered
+            screen.handle_command("/tasks")
+            await pilot.pause()
+            screen.handle_command("/delete-task 1 --yes")
+            await pilot.pause()
+            rendered = app.session.messages.render(limit=30)
+            assert "已删除任务 couple" in rendered
+            assert "清理文件/目录：1" in rendered
+            assert app.session.config.book_id == ""
+            assert "delete_task" in app.session.facade.calls  # type: ignore[attr-defined]
 
     _run(scenario())
 
@@ -417,7 +480,26 @@ def test_close_read_without_task_shows_usage_guidance(tmp_path: Path) -> None:
             rendered = app.session.messages.render(limit=20)
             assert "请先选择 task id" in rendered
             assert "用法：先 /task <task_id> 或 /new-task <task_id> <source_path>，再执行 /close-read [source_path] [--batches N]" in rendered
-            assert "默认 N=1" in rendered
+            assert "默认跑完全部剩余已粗读 documents" in rendered
+
+    _run(scenario())
+
+
+def test_close_read_without_batches_processes_all_remaining_rough_read_documents(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        async with app.run_test(size=(120, 36)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.handle_command("/close-read")
+            await pilot.pause()
+            rendered = app.session.messages.render(limit=20)
+            assert "全部剩余精读 batch" in rendered
+            assert app.session.facade.last_read_kwargs["max_close_batches"] is None  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["max_read_kb"] == 0  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["build_creative_kb"] is True  # type: ignore[attr-defined]
 
     _run(scenario())
 
@@ -437,6 +519,49 @@ def test_close_read_batches_option_controls_work_amount_and_announces_default_bu
             assert "约 20000 字文档预算" in rendered
             assert app.session.facade.last_read_kwargs["max_close_batches"] == 3  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["close_step_batches"] == 1  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["close_document_chars_budget"] == 20000  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["build_creative_kb"] is True  # type: ignore[attr-defined]
+
+    _run(scenario())
+
+
+def test_close_read_document_budget_option_controls_batch_size(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        async with app.run_test(size=(120, 36)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.handle_command("/close-read --batches 2 --document-kb 60")
+            await pilot.pause()
+            rendered = app.session.messages.render(limit=20)
+            assert "最多 2 个精读 batch" in rendered
+            assert "约 61440 字文档预算" in rendered
+            assert app.session.facade.last_read_kwargs["max_close_batches"] == 2  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["close_document_chars_budget"] == 60 * 1024  # type: ignore[attr-defined]
+
+    _run(scenario())
+
+
+def test_read_all_runs_full_rough_read_close_read_and_kb(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        source_path = tmp_path / "source.txt"
+        source_path.write_text("第一章\n旧案开始。", encoding="utf-8")
+        async with app.run_test(size=(120, 36)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.handle_command(f"/read {source_path} --all --document-kb 64")
+            await pilot.pause()
+            rendered = app.session.messages.render(limit=20)
+            assert "完整粗读原文、精读全部已粗读 documents" in rendered
+            assert app.session.facade.last_read_kwargs["run_mode"] == "new"  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["max_read_kb"] is None  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["max_close_batches"] is None  # type: ignore[attr-defined]
+            assert app.session.facade.last_read_kwargs["close_document_chars_budget"] == 64 * 1024  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["build_creative_kb"] is True  # type: ignore[attr-defined]
 
     _run(scenario())
@@ -552,6 +677,7 @@ def test_artifact_editor_save_success_and_validation_failure(tmp_path: Path) -> 
             assert isinstance(screen, WorkbenchScreen)
             screen.show_artifact(artifact_path, stage="wait_length_review")
             editor = screen.query_one("#artifact-editor", ArtifactEditorPane)
+            editor.load_path(artifact_path, advanced_json=True)
             editor.query_one("#artifact-editor-text", TextArea).load_text('{"budgets": {}}')
             failed = editor.save_current()
             assert failed.saved is False
@@ -560,6 +686,135 @@ def test_artifact_editor_save_success_and_validation_failure(tmp_path: Path) -> 
             saved = editor.save_current()
             assert saved.saved is True
             assert saved.message == "已保存你的修改"
+
+    _run(scenario())
+
+
+def test_writer_intent_form_maps_template_to_start_writer_kwargs() -> None:
+    form = WriterIntentForm.from_template_text(
+        "\n".join(
+            [
+                "主要角色: 沈青, 顾迟",
+                "续写目标: 追查旧案; 建立有限合作",
+                "避免项: 不要突然告白",
+                "期望结果: 找到新证据",
+                "补充说明: 关系慢热",
+                "世界观补充: 旧楼不能随意进出",
+                "全书规划章节数: 4",
+                "生成梗概数: 2",
+                "目标总字数: 16000",
+                "默认单章字数: 4000",
+                "节奏类型: 慢热铺垫",
+                "长度分配说明: 第三章需要展开",
+                "冲突高潮: 公开对抗幕后势力",
+                "情绪高潮: 沈青必须选择是否信任顾迟",
+                "高潮章节位置: 3",
+                "必须铺垫: 旧案证据来源; 盟友立场摇摆",
+                "不得提前解决: 幕后主使身份",
+                "回收预期: 旧案线索得到阶段性回收",
+                "允许新角色: 否",
+            ]
+        )
+    )
+
+    assert form.to_start_writer_kwargs() == {
+        "intent_payload": {
+            "major_characters": ["沈青", "顾迟"],
+            "desired_actions": ["追查旧案", "建立有限合作"],
+            "avoidances": ["不要突然告白"],
+            "preferred_outcome": "找到新证据",
+            "notes": "关系慢热",
+            "allow_character_cast": False,
+            "story_scale": {
+                "target_chapter_count": 4,
+                "target_total_chars": 16000,
+                "default_chapter_target_chars": 4000,
+                "pacing_profile": "慢热铺垫",
+                "length_distribution_notes": "第三章需要展开",
+            },
+            "climax_plan": {
+                "conflict_climax": "公开对抗幕后势力",
+                "emotional_climax": "沈青必须选择是否信任顾迟",
+                "target_chapter_index": 3,
+                "must_foreshadow": ["旧案证据来源", "盟友立场摇摆"],
+                "must_not_resolve_before": ["幕后主使身份"],
+                "payoff_expectation": "旧案线索得到阶段性回收",
+            },
+        },
+        "user_world_notes": "旧楼不能随意进出",
+        "target_chapter_count": 4,
+        "chapter_count": 2,
+    }
+
+
+def test_writer_command_opens_intent_wizard_and_passes_structured_payload(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench(intent_text="接着写沈青追查旧案，关系慢热")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            screen.handle_command("/writer")
+            await pilot.pause()
+            wizard = screen.query_one("#writer-intent-wizard", WriterIntentWizardWidget)
+            assert "接着写沈青追查旧案" in wizard.value
+            wizard.value = "\n".join(
+                [
+                    "主要角色: 沈青",
+                    "续写目标: 追查旧案线索; 建立有限合作",
+                    "避免项: 不要突然告白",
+                    "期望结果: 找到新证据但保留悬念",
+                    "补充说明: 关系推进慢一点",
+                    "世界观补充: 旧楼权限仍受限制",
+                    "全书规划章节数: 4",
+                    "生成梗概数: 2",
+                    "目标总字数: 20000",
+                    "默认单章字数: 5000",
+                    "节奏类型: 后段爆发",
+                    "长度分配说明: 第四章写长",
+                    "冲突高潮: 暴露新证据",
+                    "情绪高潮: 有限合作出现裂痕",
+                    "高潮章节位置: 4",
+                    "必须铺垫: 新证据来源",
+                    "不得提前解决: 反派身份",
+                    "回收预期: 证明旧案仍有隐情",
+                    "允许新角色: 是",
+                ]
+            )
+            wizard.submit()
+            for _ in range(5):
+                await pilot.pause()
+
+            facade = app.session.facade
+            assert facade.calls[-1] == "writer"  # type: ignore[attr-defined]
+            writer_kwargs = facade.writer_runs[-1]  # type: ignore[attr-defined]
+            assert writer_kwargs["target_chapter_count"] == 4
+            assert writer_kwargs["chapter_count"] == 2
+            assert writer_kwargs["user_world_notes"] == "旧楼权限仍受限制"
+            assert writer_kwargs["intent_payload"] == {
+                "major_characters": ["沈青"],
+                "desired_actions": ["追查旧案线索", "建立有限合作"],
+                "avoidances": ["不要突然告白"],
+                "preferred_outcome": "找到新证据但保留悬念",
+                "notes": "关系推进慢一点",
+                "allow_character_cast": True,
+                "story_scale": {
+                    "target_chapter_count": 4,
+                    "target_total_chars": 20000,
+                    "default_chapter_target_chars": 5000,
+                    "pacing_profile": "后段爆发",
+                    "length_distribution_notes": "第四章写长",
+                },
+                "climax_plan": {
+                    "conflict_climax": "暴露新证据",
+                    "emotional_climax": "有限合作出现裂痕",
+                    "target_chapter_index": 4,
+                    "must_foreshadow": ["新证据来源"],
+                    "must_not_resolve_before": ["反派身份"],
+                    "payoff_expectation": "证明旧案仍有隐情",
+                },
+            }
 
     _run(scenario())
 
@@ -579,12 +834,40 @@ def test_textual_worker_e2e_read_kb_writer_minimal_path(tmp_path: Path) -> None:
             screen.handle_command("/kb")
             await pilot.pause()
             screen.handle_command("/writer")
+            await pilot.pause()
+            wizard = screen.query_one("#writer-intent-wizard", WriterIntentWizardWidget)
+            wizard.value = "\n".join(
+                [
+                    "主要角色: 沈青",
+                    "续写目标: 继续追查",
+                    "避免项: ",
+                    "期望结果: 保留悬念",
+                    "补充说明: ",
+                    "世界观补充: ",
+                    "全书规划章节数: 3",
+                    "生成梗概数: 3",
+                    "目标总字数: 12000",
+                    "默认单章字数: 4000",
+                    "节奏类型: 均衡推进",
+                    "长度分配说明: ",
+                    "冲突高潮: ",
+                    "情绪高潮: ",
+                    "高潮章节位置: 0",
+                    "必须铺垫: ",
+                    "不得提前解决: ",
+                    "回收预期: ",
+                    "允许新角色: 是",
+                ]
+            )
+            wizard.submit()
             for _ in range(5):
                 await pilot.pause()
             assert app.session.facade.calls == ["read", "kb", "writer"]  # type: ignore[attr-defined]
             assert app.session.current_status.step == "请审阅本批剧情大纲"
             assert app.session.current_artifact is not None
             assert app.session.current_artifact.path.name == "batch_plan.json"
+            assert "Writer已到达审阅节点：请审阅本批剧情大纲。" in app.session.messages.render()
+            assert "Writer本轮已完成" not in app.session.messages.render()
             assert "artifact saved" not in app.session.messages.render()
             assert "batch_review" not in app.session.messages.render()
 
@@ -788,7 +1071,105 @@ def test_decision_panel_widget_chapter_acceptance_options() -> None:
     assert "接受本章 -> 请确认写回续写记忆" in rendered
     assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
-    assert "action=accept_chapter" in rendered
+    assert "action=show_chapter_acceptance_form" in rendered
+
+
+def test_chapter_acceptance_form_maps_rework_choices_to_contract_payloads() -> None:
+    length_form = ChapterAcceptanceForm.from_template_text(
+        "\n".join(
+            [
+                "决策: revise_length",
+                "原因代码: length_or_pacing_revision_requested",
+                "反馈: 当前章需要更充分的追逐段落",
+                "目标字数: 5200",
+                "最小字数: 4800",
+                "最大字数: 5600",
+                "必须保留: 旧案线索; 有限合作",
+            ]
+        )
+    )
+    length_payload = length_form.to_workflow_payload()
+    assert length_payload["status"] == "revise_length"
+    assert length_payload["length_plan_update"] == {
+        "target_chars": 5200,
+        "min_chars": 4800,
+        "max_chars": 5600,
+        "reason_code": "length_or_pacing_revision_requested",
+        "feedback_text": "当前章需要更充分的追逐段落",
+        "preserve_story_direction": True,
+    }
+
+    replan_form = ChapterAcceptanceForm.from_template_text(
+        "\n".join(
+            [
+                "决策: replan_chapter",
+                "原因代码: chapter_plan_revision_requested",
+                "反馈: 章节目标偏散",
+                "必须保留: 旧案线索",
+                "必须修改: 把冲突集中到证人失踪",
+                "禁止沿用: 过早和解",
+                "长度建议: 维持 4000 字左右",
+            ]
+        )
+    )
+    replan_payload = replan_form.to_workflow_payload()
+    assert replan_payload["status"] == "replan_chapter"
+    assert replan_payload["chapter_replan_request"]["must_change"] == ["把冲突集中到证人失踪"]
+    assert replan_payload["chapter_replan_request"]["forbidden_carryover"] == ["过早和解"]
+
+
+def test_textual_chapter_acceptance_form_submits_review_contract(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+        draft_path = tmp_path / "generation_review_decision.json"
+        draft_path.write_text(
+            json.dumps(
+                {
+                    "decision_id": "review-1",
+                    "chapter_id": "ch-1",
+                    "draft_id": "draft-1",
+                    "status": "",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench(initial_status="wait_chapter_acceptance")
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, WorkbenchScreen)
+            app.session.set_status(
+                "wait_chapter_acceptance",
+                technical_details={"internal_stage": "wait_chapter_acceptance", "run_id": "run-1"},
+            )
+            screen.show_artifact(draft_path, stage="wait_chapter_acceptance")
+            await pilot.pause()
+            panel = screen.query_one("#decision-panel", DecisionPanelWidget)
+            panel.post_message(panel.Selected(panel.panel.choose("2")))
+            await pilot.pause()
+            form = screen.query_one("#chapter-acceptance-form", ChapterAcceptanceFormWidget)
+            form.value = "\n".join(
+                [
+                    "决策: revise_length",
+                    "原因代码: length_or_pacing_revision_requested",
+                    "反馈: 当前章需要更充分的追逐段落",
+                    "目标字数: 5200",
+                    "最小字数: 4800",
+                    "最大字数: 5600",
+                    "必须保留: 旧案线索",
+                ]
+            )
+            form.submit()
+            for _ in range(5):
+                await pilot.pause()
+            facade = app.session.facade
+            writer_action = facade.writer_action_runs[-1]  # type: ignore[attr-defined]
+            assert writer_action["action"] == "continue_after_chapter_acceptance"
+            assert writer_action["payload"]["status"] == "revise_length"  # type: ignore[index]
+            assert writer_action["payload"]["length_plan_update"]["target_chars"] == 5200  # type: ignore[index]
+
+    _run(scenario())
 
 
 def test_planning_decision_panel_exposes_scoped_revision_and_manual_edit() -> None:

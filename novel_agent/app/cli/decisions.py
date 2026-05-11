@@ -38,10 +38,10 @@ class DecisionPanel:
             artifact_path=draft_path,
             summary=summary,
             options=(
-                DecisionOption("1", "接受本章", "请确认写回续写记忆", "accept_chapter", {"status": "accepted"}),
-                DecisionOption("2", "调整字数后重写", "请确认章节长度与节奏", "revise_length", {"status": "revise_length"}),
-                DecisionOption("3", "修改章节梗概后重写", "请调整章节规划后重写", "replan_chapter", {"status": "replan_chapter"}),
-                DecisionOption("4", "作废本次草稿", "流程已暂停", "discard_chapter", {"status": "discarded"}),
+                DecisionOption("1", "接受本章", "请确认写回续写记忆", "show_chapter_acceptance_form", {"status": "accepted"}),
+                DecisionOption("2", "调整字数后重写", "请确认章节长度与节奏", "show_chapter_acceptance_form", {"status": "revise_length"}),
+                DecisionOption("3", "修改章节梗概后重写", "请调整章节规划后重写", "show_chapter_acceptance_form", {"status": "replan_chapter"}),
+                DecisionOption("4", "作废本次草稿", "流程已暂停", "show_chapter_acceptance_form", {"status": "discarded"}),
                 DecisionOption("5", "稍后再决定", "请验收当前章节", "defer_decision", {"status": ""}),
             ),
         )

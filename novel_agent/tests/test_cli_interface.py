@@ -183,6 +183,186 @@ def test_artifact_presenter_summarizes_batch_chapter_length_and_draft(tmp_path: 
     assert "请验收当前章节" in draft_summary.render()
 
 
+def test_artifact_presenter_summarizes_writer_scale_climax_and_character_cast(tmp_path: Path) -> None:
+    presenter = ArtifactPresenter()
+    book_plan_path = tmp_path / "book_continuation_plan.json"
+    book_plan_path.write_text(
+        json.dumps(
+            {
+                "continuation_goal": "追查旧案并建立有限合作",
+                "target_chapter_count": 4,
+                "target_total_chars": 20000,
+                "default_chapter_target_chars": 5000,
+                "pacing_profile": "后段爆发",
+                "climax_plan": {
+                    "conflict_climax": "公开暴露新证据",
+                    "emotional_climax": "沈青必须决定是否信任顾迟",
+                    "target_chapter_index": 4,
+                },
+                "chapter_outline_slots": [
+                    {"chapter_index": 1, "target_chars": 4500, "plot_function": "建立新目标"},
+                    {"chapter_index": 2, "target_chars": 5000, "plot_function": "推进调查"},
+                ],
+                "must_preserve": ["关系慢热"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    requirement_path = tmp_path / "character_requirement_report.json"
+    requirement_path.write_text(
+        json.dumps(
+            {
+                "named_existing_characters": [{"name": "沈青", "resolved_to": "沈青"}],
+                "named_new_characters": [{"name": "顾迟", "reason": "用户点名但未建档"}],
+                "unfilled_role_slots": [{"slot_id": "ally-1", "slot_type": "行动支援者", "reason": "调查线需要支援"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    seed_path = tmp_path / "character_seed_input.json"
+    seed_path.write_text(
+        json.dumps(
+            {
+                "character_seed_inputs": [
+                    {
+                        "seed_id": "seed-1",
+                        "display_name_hint": "顾迟",
+                        "faction": "友方",
+                        "core_concept": "外冷内热的情报中间人",
+                        "must_keep": ["克制"],
+                        "must_avoid": ["提前交底"],
+                        "world_constraints": ["不能越权调动官方力量"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    profiles_path = tmp_path / "planned_character_profiles.json"
+    profiles_path.write_text(
+        json.dumps(
+            {
+                "planned_character_profiles": [
+                    {
+                        "planned_character_id": "pc-1",
+                        "canonical_name": "顾迟",
+                        "faction": "友方",
+                        "narrative_role": "行动支援",
+                        "must_not_reveal_early": ["真实身份"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cast_plan_path = tmp_path / "character_cast_plan.json"
+    cast_plan_path.write_text(
+        json.dumps(
+            {
+                "cast_plan_id": "cast-1",
+                "planned_characters": [{"planned_character_id": "pc-1", "slot_id": "ally-1"}],
+                "must_not_consume": ["真实身份"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    book_rendered = presenter.summarize(book_plan_path).render()
+    assert "20000" in book_rendered
+    assert "公开暴露新证据" in book_rendered
+    assert "建立新目标" in book_rendered
+
+    requirement_rendered = presenter.summarize(requirement_path).render()
+    assert "已有人物" in requirement_rendered
+    assert "顾迟: 用户点名但未建档" in requirement_rendered
+    assert "行动支援者" in requirement_rendered
+
+    seed_rendered = presenter.summarize(seed_path).render()
+    assert "外冷内热的情报中间人" in seed_rendered
+    assert "不能越权调动官方力量" in seed_rendered
+    assert "seed-1" not in seed_rendered
+
+    profiles_rendered = presenter.summarize(profiles_path).render()
+    assert "顾迟 / 友方 / 行动支援" in profiles_rendered
+    assert "真实身份" in profiles_rendered
+
+    cast_rendered = presenter.summarize(cast_plan_path).render()
+    assert "顾迟 / 行动支援" in cast_rendered
+    assert "pc-1" not in cast_rendered
+    assert "ally-1" not in cast_rendered
+
+
+def test_artifact_presenter_field_edit_updates_writer_review_artifacts(tmp_path: Path) -> None:
+    presenter = ArtifactPresenter()
+    book_plan_path = tmp_path / "book_continuation_plan.json"
+    book_plan_path.write_text(
+        json.dumps(
+            {
+                "continuation_goal": "追查旧案",
+                "target_chapter_count": 3,
+                "target_total_chars": 12000,
+                "default_chapter_target_chars": 4000,
+                "climax_plan": {"must_foreshadow": []},
+                "stage_highlights": [],
+                "must_preserve": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    model = presenter.field_edit_model(book_plan_path)
+    assert model["field_edit"] is True
+    assert "全书目标: 追查旧案" in model["text"]
+    saved = presenter.save_field_text(
+        book_plan_path,
+        "\n".join(
+            [
+                "全书目标: 追查旧案并建立有限合作",
+                "目标章节数: 4",
+                "目标总字数: 20000",
+                "默认单章字数: 5000",
+                "冲突高潮: 公开暴露新证据",
+                "情绪高潮: 沈青决定是否信任顾迟",
+                "高潮章节位置: 4",
+                "必须铺垫: 新证据来源",
+                "不得提前解决: 反派身份",
+                "回收预期: 证明旧案仍有隐情",
+                "阶段高潮: 证人失踪",
+                "必须保留: 关系慢热",
+            ]
+        ),
+    )
+    assert saved.saved is True
+    updated = json.loads(book_plan_path.read_text(encoding="utf-8"))
+    assert updated["continuation_goal"] == "追查旧案并建立有限合作"
+    assert updated["target_total_chars"] == 20000
+    assert updated["climax_plan"]["must_not_resolve_before"] == ["反派身份"]
+
+    length_path = tmp_path / "chapter_length_plan.json"
+    length_path.write_text(json.dumps({"budgets": []}, ensure_ascii=False), encoding="utf-8")
+    saved = presenter.save_field_text(
+        length_path,
+        "\n".join(
+            [
+                "默认目标字数: 4200",
+                "重点章节: ch-1",
+                "高潮章节: ch-2",
+                "单章预算: ch-1=4200/3600/4800; ch-2=5200/4800/5800",
+            ]
+        ),
+    )
+    assert saved.saved is True
+    length_payload = json.loads(length_path.read_text(encoding="utf-8"))
+    assert length_payload["default_target_chars"] == 4200
+    assert length_payload["budgets"][1]["chapter_id"] == "ch-2"
+    assert length_payload["budgets"][1]["max_chars"] == 5800
+
+
 def test_artifact_save_validates_json_and_does_not_confirm(tmp_path: Path) -> None:
     presenter = ArtifactPresenter()
     path = tmp_path / "chapter_length_plan.json"
@@ -206,6 +386,7 @@ def test_command_router_supports_slash_commands_palette_and_context_filtering() 
     assert router.parse("/tasks", context).handler_name == "list_tasks"
     assert router.parse("/task couple", context).handler_name == "select_task"
     assert router.parse("/new-task couple ./couple.txt", context).handler_name == "create_task"
+    assert router.parse("/delete-task couple", context).handler_name == "delete_task"
     assert router.parse("/reset-close-read", context).handler_name == "reset_close_read"
     assert router.parse("/query summary", context).handler_name == "query_close_read"
     assert router.parse("/benchmark longzu-32kb", context).handler_name == "run_smoke_benchmark"
@@ -217,10 +398,13 @@ def test_command_router_supports_slash_commands_palette_and_context_filtering() 
     )
     assert router.parse("/confirm", context).handler_name == "confirm_current_step"
     assert router.parse("\x10", context).handler_name == "show_command_palette"
+    assert "/read  导入或继续粗读原文；/read --all 完整粗读、精读并更新 KB" in router.render_panel(context)
+    assert "/delete-task  删除任务及本地建模产物" in router.render_panel(context)
     assert "/close-read  运行精读；用法 /close-read [source_path] [--batches N]" in router.render_panel(context)
     assert "/benchmark  运行端到端 Agentic benchmark" in router.render_panel(context)
     assert "/creative-kb-benchmark  运行 Creative KB Benchmark" in router.render_panel(context)
-    assert "默认 1 batch/约 20000 字预算" in router.render_panel(context)
+    assert "--document-kb KB" in router.render_panel(context)
+    assert "默认跑完全部剩余已粗读 documents" in router.render_panel(context)
     panel = router.command_panel(context)
     assert "Writer" in panel
     assert any(command.command_id == "save" for command in panel["artifact"])
@@ -537,6 +721,42 @@ def test_workflow_facade_reset_close_read_keeps_documents_and_clears_progress(tm
         assert row["content_tags_csv"] == ""
 
 
+def test_workflow_facade_delete_task_previews_and_removes_local_artifacts(tmp_path: Path) -> None:
+    facade = WorkflowFacade(repo_root=tmp_path)
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一章\n旧案开始。", encoding="utf-8")
+    facade.ensure_task(book_id="couple", source_path=str(source_path))
+    db_path = facade.db_path_for_book("couple")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("db", encoding="utf-8")
+    wal_path = Path(f"{db_path}-wal")
+    wal_path.write_text("wal", encoding="utf-8")
+    world_path = tmp_path / ".memory" / "worlds" / "couple.world.md"
+    world_path.parent.mkdir(parents=True, exist_ok=True)
+    world_path.write_text("world", encoding="utf-8")
+    writer_memory_dir = tmp_path / ".memory" / "writer" / "couple"
+    writer_memory_dir.mkdir(parents=True)
+    (writer_memory_dir / "state.json").write_text("{}", encoding="utf-8")
+
+    preview = facade.delete_task(book_id="couple")
+
+    assert preview["confirmed"] is False
+    assert str(db_path) in preview["candidate_paths"]  # type: ignore[operator]
+    assert db_path.exists()
+    assert source_path.exists()
+
+    result = facade.delete_task(book_id="couple", confirm=True)
+
+    assert result["confirmed"] is True
+    assert str(db_path) in result["deleted_paths"]  # type: ignore[operator]
+    assert not db_path.exists()
+    assert not wal_path.exists()
+    assert not world_path.exists()
+    assert not writer_memory_dir.exists()
+    assert source_path.exists()
+    assert "couple" not in facade.render_task_list(active_book_id="")
+
+
 def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> None:
     panel = DecisionPanel.chapter_acceptance(draft_path="/tmp/draft.md", draft_chars=4820, target_chars=5000)
     rendered = panel.render()
@@ -546,8 +766,10 @@ def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> N
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
     assert "作废本次草稿 -> 流程已暂停" in rendered
     assert "稍后再决定 -> 请验收当前章节" in rendered
-    assert panel.choose("2").workflow_action == "revise_length"
-    assert panel.choose("3").workflow_action == "replan_chapter"
+    assert panel.choose("2").workflow_action == "show_chapter_acceptance_form"
+    assert panel.choose("2").payload == {"status": "revise_length"}
+    assert panel.choose("3").workflow_action == "show_chapter_acceptance_form"
+    assert panel.choose("3").payload == {"status": "replan_chapter"}
 
 
 def test_prompt_writer_review_uses_public_status_copy_and_save_guidance(
