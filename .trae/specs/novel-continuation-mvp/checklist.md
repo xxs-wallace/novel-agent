@@ -1,0 +1,11 @@
+- [x] 复用路径明确：不修改 `src/smolagents` 也能构造 Agent 与注册工具
+- [x] 索引构建成功：生成 SQLite + FTS5 数据库，且能通过关键字检索到文档片段
+- [x] `read_anchor_context` 可用：能按锚点读取前后窗口并返回 sources
+- [x] `search_by_character` 可用：支持别名并返回 top_k 结果与 sources
+- [x] `search_lore` 可用：支持关键字检索并返回 sources
+- [x] `search_by_timeline` 最小可用：支持章节范围或顺序检索并返回 sources
+- [x] `plan_scene` 输出稳定：符合 ScenePlan schema，包含必写/禁写/证据引用
+- [x] `check_continuity` 输出稳定：符合 ContinuityReport schema，能拦截明显冲突并给出建议
+- [x] Runner 闭环可跑：一次运行生成 scene_plan、draft、continuity_report、final 等产物并落盘
+- [x] pytest 通过：包含工具单测、索引单测与至少 1 个集成测试（模型可 mock）
+- [x] 形成决策结论：给出“继续在本仓库迭代 / 建议另建项目”的可执行理由

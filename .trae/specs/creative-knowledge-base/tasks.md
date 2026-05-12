@@ -1,0 +1,326 @@
+# Tasks
+
+## Status Legend
+- `已实现`：当前仓库代码已具备主要能力，可视为保留项或文档补全项
+- `部分实现`：当前已有基础实现，但仍需独立模块化、补 schema 或强化规则
+- `待新增`：当前设计已明确，但代码尚未正式落地
+
+- [x] Task 1: 明确创作知识库层边界与外部依赖（已实现，文档层）
+  - [x] 确认本层只消费 `documents`，不直接负责人物档案、世界观和章节摘要维护
+  - [x] 明确对主 MVP 的外部依赖：至少已有 `documents` 表、粗读入库链路和基础检索运行入口
+  - [x] 明确本层输出给续写主 Agent 的标准产物：`fragment_cards`、`fragment_clusters`、粗筛候选、rerank 结果
+
+- [x] Task 2: 定义 `fragment_card` 与 `fragment_cluster` schema（已实现）
+  - [x] 明确 `fragment_card` 的建模粒度为 `document`：每个 `document` 恰好对应 1 张 `fragment_card`，而不是按 `chapter` 建卡
+  - [x] 固化 `fragment_card` 字段：`fragment_id`、`doc_id`、`cluster_id`、`is_cluster_representative`、多视图文本字段、`preferred_tags`、`transferability_score`、`context_dependency_level`
+  - [x] 固化 `fragment_cluster` 字段：`cluster_id`、`cluster_theme`、`representative_fragment_id`、`member_count`、`dedup_reason`
+  - [x] 定义 Python schema / Pydantic schema / JSON schema 的统一命名约定
+
+- [x] Task 3: 设计创作知识库 SQLite 表与读写仓储（已实现）
+  - [x] 设计并创建 `fragment_cards` 表
+  - [x] 设计并创建 `fragment_clusters` 表
+  - [x] 设计 `cluster_members` 等价结构或确定是否复用 `fragment_cards.cluster_id`
+  - [x] 为 `content_summary`、`narrative_function_text`、`emotion_mechanism_text`、`style_profile_text` 和 `preferred_tags` 设计索引策略
+  - [x] 实现 repo 接口：插入卡片、更新 cluster、查询代表片段、按 cluster 去重读取
+
+- [ ] Task 4: 设计 `fragment_card` 生成 prompt 与输出校验（部分实现）
+  - [x] 当前 `FragmentCardBuilderService` 已实现固定建卡主路径：`documents -> fragment_card`
+  - [x] 当前建卡服务已限制模型输出走结构化 JSON 解析与 schema 校验路径
+  - [ ] 约束 `preferred_tags` 只来自预定义词典
+  - [ ] 为 `transferability_score` 和 `context_dependency_level` 设计明确评分语义
+  - [x] 增加 schema 校验与失败重试策略
+  - [x] 冻结建卡接口草案：
+    - `build_fragment_card(document: DocumentRecord, preferred_tags: list[str]) -> FragmentCardBuildResult`
+    - 主路径为：prompt 调用 -> JSON 解析 -> schema 校验 -> 字段后处理 -> 成功落库
+  - [x] 冻结重试策略草案：
+    - 首次失败后允许按同一固定 prompt 重试 `1-2` 次
+    - 重试只允许修复 JSON 非法、字段缺失、schema 校验失败等结构化问题
+    - 不允许在重试阶段自由改变任务语义或切换为另一套 prompt contract
+  - [x] 冻结 fallback 策略草案：
+    - 若模型建卡连续失败，可进入 deterministic fallback
+    - fallback 仅允许生成最小可用卡片：
+      - 保留 `doc_id`、`source_path`、`source_offsets`、`source_excerpt`
+      - 继承清洗后的 `preferred_tags`
+      - 以规则化方式补最小 `content_summary`
+      - 其余证据不足字段使用空数组、保守短句或显式低可迁移评分
+    - fallback 卡片必须被显式标记，便于后续重建或人工复核
+  - [x] 冻结失败落库策略草案：
+    - 区分 `success`、`fallback_success`、`failed`
+    - `success` 与 `fallback_success` 可进入 `fragment_cards`
+    - `failed` 不写入正式 `fragment_cards`，但必须记录到构建结果与失败日志
+    - 失败记录至少包含：`doc_id`、失败阶段、失败原因、重试次数、最后错误摘要
+  - [x] 冻结 `FragmentCardBuildResult` 草案字段：
+    - `status`
+    - `fragment_card`
+    - `retry_count`
+    - `used_fallback`
+    - `failure_stage`
+    - `failure_reason`
+    - `warnings`
+  - [x] 已补 builder 级测试，覆盖 `success / fallback_success / failed` 三态与失败可见性
+  - [ ] `preferred_tags` 词典约束与评分语义仍需进一步冻结为更强验收口径
+
+- [ ] Task 5: 实现轻量标签提炼与卡片建卡流水线（部分实现）
+  - [x] 当前粗读链路已基于轻量中文分词与规则为 `documents` 生成最多 4 个高置信轻量标签
+  - [x] 当前标签已写入 `documents`
+  - [ ] 实现离线流水线顺序：逐个 `document` 执行“轻量标签 -> `fragment_card`”，保持 `1 document -> 1 fragment_card`
+  - [ ] 将标签同步写入 `fragment_cards.preferred_tags`
+  - [ ] 记录每张卡片的来源 `doc_id`、source offset 与节选片段
+
+- [x] Task 6: 设计并实现近重复检测规则（已实现）
+  - [x] 定义近重复检测特征：词面相似度、`preferred_tags` 重合度、`content_summary` 相似度、`emotion_mechanism_text` 相似度、`style_profile_text` 相似度
+  - [x] 定义可合并与不可合并的判定边界，避免误合并“事件相似但写法用途不同”的桥段
+  - [x] 实现近重复候选生成策略
+  - [x] 实现 cluster 归并结果落库
+
+- [x] Task 7: 设计并实现代表片段选择规则（已实现）
+  - [x] 定义代表片段评分因素：`transferability_score`、`context_dependency_level`、信息完整性、风格代表性
+  - [x] 实现每个 cluster 恰好选择 1 个 `representative_fragment`
+  - [x] 回填 `fragment_cards.cluster_id` 与 `is_cluster_representative`
+  - [x] 对“文学性强但上下文依赖高”的片段增加降权规则
+
+- [x] Task 8: 定义 `SceneBrief` 输入输出 contract（已实现）
+  - [x] 固化 `SceneBrief` 的上游输入：`anchor_context`、`recent_window_summary`、`goal`、`previous_generated_segment`、`retrieval_context`
+  - [x] 固化 `SceneBrief` 输出字段：`scene_objective`、`emotional_goal`、`conflict_goal`、`narrative_function`、`emotion_mode`、`character_temperament`、`relationship_state`、`style_need`、`must_avoid`、`preferred_tags`
+  - [x] 设计 `SceneBrief` 生成 prompt 与 schema 校验
+
+- [ ] Task 9: 基础检索工具向创作知识库主路径迁移（部分实现）
+  - [x] 当前 `search_by_character`、`search_lore`、`search_by_timeline` 已存在，可作为过渡期输入
+  - [ ] 梳理这些工具在续写主路径中的实际使用位置
+  - [ ] 明确这些工具在新架构中的定位：保留为基础检索与辅助手段，只产出 `retrieval_context`，而非桥段主检索入口
+  - [ ] 设计创作知识库主路径与基础检索工具的协作方式：上游基于故事梗概、锚点上下文、最近窗口与目标生成 `SceneBrief`，基础检索结果只作为 `retrieval_context` 参与 `SceneBrief` 构造或过滤提示
+  - [ ] 明确 `retrieval_context` 不得直接生成 `candidate_fragment_ids`，不得单独决定最终参考桥段
+  - [ ] 明确续写主 Agent 在创作知识库层的默认入口为 `SceneBrief -> 粗筛 -> rerank`
+  - [ ] 冻结 `RetrievalContext` 适配接口草案：
+    - `build_retrieval_context(character_hits: list[str], timeline_hits: list[str], lore_hits: list[str]) -> RetrievalContext`
+    - 只负责标准化基础检索结果，不负责生成 `SceneBrief` 或候选桥段
+  - [ ] 冻结基础检索协作接口草案：
+    - `prepare_scene_brief_input(anchor_context, recent_window_summary, goal, previous_generated_segment, retrieval_context) -> SceneBriefInput`
+    - 明确 `retrieval_context` 只是 `SceneBriefService` 的辅助手段，不是独立检索入口
+  - [ ] 明确 `RetrievalContext` 允许影响的阶段仅限：
+    - `SceneBrief` 构造
+    - 可选的过滤提示
+    - 调试解释信息
+  - [ ] 明确 `RetrievalContext` 禁止直接影响的阶段：
+    - 不得直接生成 `candidate_fragment_ids`
+    - 不得跳过 `fragment_cards` / `fragment_clusters`
+    - 不得单独决定 `selected_fragment_ids`
+  - [ ] 增加 Task 9 验收口径：
+    - 在没有有效 `fragment_cards` 命中的情况下，不允许仅依赖 `retrieval_context` 输出最终参考桥段
+    - 相同 `retrieval_context` 但不同 `SceneBrief` 时，不应稳定返回相同结果，除非 `fragment_cards` 主路径本身一致
+    - 调试输出中可解释 `retrieval_context` 的作用，但主结果必须能追溯到 `fragment_cards -> coarse -> rerank`
+
+- [x] Task 10: 扩展 `ScenePlan` / `SceneBrief` 的兼容演进（已实现）
+  - [x] 当前 MVP 子集版 `ScenePlan` 已存在，可作为兼容输入基础
+  - [x] 明确当前 MVP 子集版 `ScenePlan` 与扩展版 `ScenePlan` 的字段映射关系
+  - [x] 明确 `SceneBrief` 与 `ScenePlan` 的职责区分：`SceneBrief` 负责检索意图，`ScenePlan` 负责写作任务卡
+  - [x] 设计兼容策略：旧 `ScenePlan` schema 暂时保留，新字段以向后兼容方式扩展
+  - [x] 为创作知识库层提供同时消费“旧 `ScenePlan` 子集”和“新 `SceneBrief`”的过渡期 contract
+  - [x] 冻结兼容适配接口草案：
+    - `adapt_scene_plan_to_scene_brief(scene_plan: ScenePlanSubset) -> SceneBrief`
+    - `resolve_scene_brief(scene_brief: SceneBrief | None, scene_plan: ScenePlanSubset | None) -> SceneBrief`
+  - [x] 明确兼容优先级：
+    - 若显式提供 `SceneBrief`，优先使用 `SceneBrief`
+    - 仅在缺失 `SceneBrief` 时，才通过旧 `ScenePlan` 子集补出最小可用 `SceneBrief`
+  - [x] 明确适配边界：
+    - 适配器只做字段映射与最小补齐
+    - 不得修改 `contracts.md` 中已冻结的 `SceneBrief` 字段语义
+    - 不得把 `ScenePlan` 重新抬升为在线检索主入口
+  - [x] 明确最小兼容输出要求：
+    - 产出的 `SceneBrief` 必须满足 `scene_objective`
+    - `narrative_function`
+    - `emotion_mode`
+    - `must_avoid`
+  - [x] 已实现 runtime adapter，并补充 `SceneBrief` 优先级与兼容输出测试
+
+- [x] Task 11: 实现粗筛 contract 与候选压缩（已实现）
+  - [x] 设计粗筛输入对象：`SceneBrief`、`fragment_cards`、`fragment_clusters`、可选 `FTS` 结果
+  - [x] 设计粗筛输出对象：`candidate_fragment_ids`、`matched_by`、`filtered_cluster_ids`、`coarse_score`
+  - [x] 实现 “FTS + 轻量标签 + 多视图文本字段” 的粗筛逻辑
+  - [x] 将候选数控制在约 `12-40`
+  - [x] 默认限制同一 `cluster_id` 的重复候选进入结果
+
+- [x] Task 12: 实现高精度 rerank contract（已实现）
+  - [x] 设计 rerank 输入对象：`SceneBrief`、候选 `fragment_cards`、`source_excerpt`、可选 `anchor_context` 与 `recent_window_summary`
+  - [x] 设计 rerank 输出对象：`candidate_id`、`cluster_id`、固定 rubric 分数字段与 `reason`
+  - [x] 实现固定 rubric 的 rerank prompt
+  - [x] 限制最终参考桥段数量在 `1-4`
+  - [x] 实现同簇冲突时优先保留 `is_cluster_representative = true` 的规则
+
+- [x] Task 13: 落实轻量标签的辅助定位并避免语义回退（已实现）
+  - [x] 当前粗读轻量标签设计已经存在，可作为 `preferred_tags` 的上游来源
+  - [x] 审查当前轻量标签设计，确认其定位仅为粗筛、聚类辅助与 `preferred_tags`
+  - [x] 明确禁止把轻量标签重新提升为桥段主排序依据
+  - [x] 在粗筛与 rerank contract 中显式区分“标签命中”与“多视图文本命中”
+  - [x] 增加实现约束，避免后续检索路径退化为“标签 TopK”
+
+- [x] Task 14: 提供创作知识库层的 service-level facade（已实现）
+  - [x] 实现 Creative Knowledge Base Agent 的离线 facade：从 `documents` 构建 `fragment_cards` 与 `fragment_clusters`
+  - [x] 明确离线 facade 只编排建卡、近重复归并与代表片段选择，不重写 Task 5/6/7 的核心规则
+  - [x] 实现 Retrieval Agent 的在线 facade：`SceneBrief -> 粗筛 -> rerank`
+  - [x] 明确 Retrieval Agent 的主输出为 `RerankResult.selected_fragment_ids`
+  - [x] 明确最终选中结果以 `fragment_id` 为主键，`cluster_id` 仅用于去重约束，`doc_id` 仅作为回源到 `documents` 的桥接字段
+  - [x] 明确输出给续写主 Agent 的数据 contract：核心结果为 `RerankResult`，并允许 facade 附带已展开的参考片段信息
+  - [x] 明确本任务提供的是可被主编排层调用的 service-level 接口，而不是新的主 Runner / CLI / 总编排入口
+  - [x] 冻结离线 facade 接口草案：
+    - `build_creative_kb(documents: list[DocumentRecord]) -> CreativeKBBuildResult`
+    - 输入主语义为共享 `documents` 基线，不接管粗读入口
+    - 输出至少包含：`built_fragment_count`、`built_cluster_count`、`representative_count`
+    - 输出可选包含：`fragment_ids`、`cluster_ids`、`warnings`
+  - [x] 冻结在线 facade 接口草案：
+    - `retrieve_reference_fragments(scene_brief: SceneBrief, retrieval_context: RetrievalContext | None = None) -> CreativeKBRetrievalResult`
+    - 主执行路径固定为：`SceneBrief -> CoarseRetrievalService -> RerankService`
+    - `retrieval_context` 仅作辅助输入或过滤提示，不得绕过主路径直接返回参考桥段
+  - [x] 冻结 `CreativeKBBuildResult` 草案字段：
+    - `built_fragment_count`
+    - `built_cluster_count`
+    - `representative_count`
+    - `fragment_ids`
+    - `cluster_ids`
+    - `failed_doc_ids`
+    - `skipped_doc_ids`
+    - `warnings`
+  - [x] 冻结 `CreativeKBRetrievalResult` 草案字段：
+    - `scene_brief`
+    - `coarse_result`
+    - `rerank_result`
+    - `reference_fragments`
+  - [x] 明确 `coarse_result` 不属于默认主流程返回字段：仅在调试、验收、观测粗筛行为或解释候选来源时返回
+  - [x] 明确 `reference_fragments` 为可选展开结果，建议每项至少包含：
+    - `fragment_id`
+    - `doc_id`
+    - `source_path`
+    - `source_excerpt`
+    - `content_summary`
+    - `style_profile_text`
+  - [x] 明确 `reference_fragments` 不属于强制默认返回字段：仅在调用方需要直接消费参考片段内容时展开返回；若未展开，调用方应基于 `rerank_result.selected_fragment_ids` 自行回查
+  - [x] 明确 `rerank_result` 仍是对外核心 contract；`reference_fragments` 仅作为主编排层/Writer 的可选便利展开，不替代 `RerankResult`
+  - [x] 明确 `CreativeKBRetrievalResult` 的默认最小稳定返回为：`scene_brief + rerank_result`
+  - [x] 明确 facade 层不负责：
+    - 装配 `WriterInputBundle`
+    - 生成正文
+    - 更新人物档案、世界观、章节摘要
+    - 修改共享 `documents` 基线
+  - [x] 当前代码已落地：
+    - 离线 facade：`novel_agent/app/services/creative_kb_facade.py`
+    - 在线 facade：`novel_agent/app/services/retrieval_facade.py`
+
+- [ ] Task 15: 测试与验收（部分实现）
+  - [x] 增加 `fragment_card` schema 测试
+  - [x] 增加 `fragment_cluster` schema 测试
+  - [x] 增加轻量标签到 `preferred_tags` 的映射测试
+  - [x] 增加近重复检测测试，覆盖“应合并”和“不应合并”两类样例
+  - [x] 增加代表片段选择测试
+  - [x] 增加基础检索工具仅作为辅助输入而非主检索路径的测试，断言其只能形成 `retrieval_context`，不能直接产出最终参考桥段
+  - [x] 增加旧 `ScenePlan` 子集与新 `SceneBrief` 兼容输入测试
+  - [x] 增加粗筛 contract 测试
+  - [x] 增加 rerank contract 测试
+  - [x] 增加 `CreativeKBRetrievalResult` 返回策略测试：默认主流程仅暴露 `scene_brief + rerank_result`
+  - [x] 增加 `coarse_result` 暴露边界测试：当前已通过显式开关验证其不作为默认稳定对外字段
+  - [x] 增加 `selected_fragment_ids` 以 `fragment_id` 为主键、且可稳定回查 `doc_id` / `source_excerpt` 的测试
+  - [x] 增加“近重复去重只发生在 Creative KB 内部，不修改共享 `documents` 基线”的测试或验收断言
+  - [x] 增加端到端测试：`documents -> fragment_cards -> fragment_clusters -> SceneBrief -> 粗筛 -> rerank`
+  - [x] 增加离线 facade 测试：覆盖 `failed_doc_ids`、`skipped_doc_ids`、fallback 构建与 representative 回填
+  - [ ] 仍建议后续补充更显式的 QA/调试模式断言与主编排层接入验收
+
+- [x] Task 16: 固化 Creative KB Benchmark 需求与设计基线（已实现，文档层）
+  - [x] 在 `spec.md` 中明确 Creative KB benchmark 的目标：建库质量、检索 / rerank 质量、Writer 增益诊断三层分开观察
+  - [x] 在 `design.md` 中明确 `CreativeKBBenchmarkService` 只做 benchmark 编排，不替代 `CreativeKnowledgeBaseFacade` 或 `RetrievalFacade`
+  - [x] 明确检索 / rerank 是主评测层，Writer A/B 只是增益诊断层
+  - [x] 明确 rerank 质量不做绝对文学评分，而通过 `SceneBrief + selected references + decoy references` 做相对排序判断
+  - [x] 明确当前 `AgenticSmokeBenchmarkService` 默认路径更接近 `kb_enabled`，不得被误用为 `kb_disabled` baseline
+  - [x] 明确 benchmark Reviewer 结论不得反向注入 KB 构建、检索或 rerank 输入
+
+- [ ] Task 17: 新增 `CreativeKBBenchmarkService` 编排入口（待新增）
+  - [ ] 设计服务输入 contract：source / fixture、run_id、case_count、artifact_dir、是否启用 Writer A/B、模型配置与随机种子
+  - [ ] 编排真实链路：source window 构造 -> 粗读入库 -> `CreativeKnowledgeBaseFacade` 建库 -> case 构造 -> `RetrievalFacade` 检索
+  - [ ] 统一输出 `CreativeKBBenchmarkResult`，至少包含 run_id、artifact_dir、build summary、retrieval review summary、可选 Writer A/B summary
+  - [ ] 确保服务不直接调用基础检索工具产出最终参考桥段，最终 references 必须能追溯到 `fragment_cards`
+  - [ ] 在异常、空 KB、空 selected references、无法回源等情况下生成可读失败结果与调试产物
+
+- [ ] Task 18: 构造 benchmark windows 与 `SceneBrief` cases（待新增）
+  - [ ] 从真实 source 或固定 fixture 中切分 prefix window 与 held-out reference window
+  - [ ] 复用 close-read / synopsis 能力生成 reference truth 或 reference synopsis，避免手写一套平行剧情理解逻辑
+  - [ ] 构造 `3-5` 个 `KBBenchmarkCase`，覆盖情绪停顿 / 关系收束、冲突升级 / 行动推进、信息揭示 / 设定承接
+  - [ ] 每个 case 固化 `anchor_context`、`recent_window_summary`、`goal`、`scene_brief`、`reference_synopsis`、`expected_traits`
+  - [ ] 支持稳定 seed，确保同一 fixture 的 case id、窗口边界和产物目录可复现
+  - [ ] 保存 `scene_brief_cases.json`
+
+- [ ] Task 19: 增加建卡与聚类质量抽样 Reviewer（待新增）
+  - [ ] 从 `fragment_cards` 中抽样保存原始 document excerpt 与对应 card
+  - [ ] 从 `fragment_clusters` 中抽样保存 cluster members、representative card 与 `dedup_reason`
+  - [ ] 定义 `KBFragmentCardReviewReport` schema，覆盖忠实度、可检索性、情绪机制、关系事实、风格可迁移性与上下文依赖风险
+  - [ ] 定义 `KBClusterReviewReport` schema，覆盖近重复合理性、误合并风险与 representative 选择质量
+  - [ ] 使用真实 LLM Reviewer 生成建卡 / 聚类质量分，并纳入顶层 `kb_reviewer_report.json`
+  - [ ] 保存 Reviewer prompt 与 report，便于复盘模型判断依据
+
+- [ ] Task 20: 增加 retrieval audit artifacts 与 decoy 构造（待新增）
+  - [ ] 对每个 `KBBenchmarkCase` 调用正式 `RetrievalFacade`，启用 `include_coarse_result=True` 与 `expand_reference_fragments=True`
+  - [ ] 保存 `coarse_result.json`、`rerank_result.json`、`selected_reference_fragments.json`
+  - [ ] 构造 `decoy_fragments.json`，优先包含 `random_decoy`、`same_cluster_decoy`、`tag_similar_decoy`、`high_dependency_decoy`、`rejected_high_score`
+  - [ ] 当某类 decoy 不存在时记录缺失原因，但在 KB 非空时尽量保证 decoy 集合不为空
+  - [ ] 断言 selected references 与 decoy references 都能回源到 `fragment_cards` / `fragment_clusters`
+  - [ ] 将 rerank score、rerank reason、cluster 信息与 source excerpt 一起纳入审计输入
+
+- [ ] Task 21: 实现 `KBRetrievalReviewer` 与聚合评分（待新增）
+  - [ ] 定义 Reviewer 输入 schema：`scene_brief`、上下文窗口、selected references、rerank scores、decoy references、rejected high-score references
+  - [ ] 定义 Reviewer 输出 schema：`decision`、`score`、`summary`、固定 `checks`、`selected_fragment_ids`、`decoy_fragment_ids`、`issues`
+  - [ ] 固化 checks：`top1_beats_decoys`、`selected_fragments_match_scene_brief`、`scene_function_fit`、`emotion_mechanism_fit`、`relationship_state_fit`、`style_reference_value`、`transferability`、`cluster_diversity`、`context_dependency_risk`、`negative_transfer_risk`
+  - [ ] 聚合多个 case report，生成顶层 `kb_reviewer_report.json`
+  - [ ] 实现通过标准：`score >= 0.60` 为 pass，`0.45 <= score < 0.60` 为 borderline，`score < 0.45` 为 fail
+  - [ ] 对空 KB、空 selected references、无法回源的 references 直接降为 fail
+
+- [ ] Task 22: 增加 Writer A/B 增益诊断 variants（待新增）
+  - [ ] 复用 `AgenticSmokeBenchmarkService` 的 window split、prefix close-read、reference synopsis、Writer execution 与 ExpansionReviewer 能力
+  - [ ] 增加显式 variant 控制：`kb_enabled`、`kb_disabled`、`kb_random`，可选 `kb_oracle`
+  - [ ] `kb_enabled` 保持现有 KB 路径；`kb_disabled` 禁用建库或清空 `style_reference_bundle.references`；`kb_random` 注入随机 / decoy references
+  - [ ] 保存每个 variant 的 writer execution input、draft 与 Reviewer report
+  - [ ] 定义 `KBWriterABReport`，输出 winner、variant scores、negative transfer issues
+  - [ ] 确保 Writer A/B 结果只作为诊断信号，不覆盖 retrieval / rerank 主评测结论
+
+- [ ] Task 23: 接入 benchmark runner / CLI summary（待新增）
+  - [ ] 提供可被 CLI 调用的 Creative KB benchmark runner，不要求 CLI 直接生成 Reviewer prompt
+  - [ ] CLI summary 优先展示建卡质量、检索 / rerank 结论、主要问题、Writer A/B 简述与产物目录
+  - [ ] 失败时展示明确原因：空 KB、空 references、Reviewer 失败、真实 LLM 调用失败或产物写入失败
+  - [ ] 保持 CLI 只展示 benchmark 结果，不直接修改 KB 或覆写 benchmark 输入
+  - [ ] 为长耗时真实 LLM benchmark 提供进度事件或阶段日志，便于交互式 CLI 暴露当前阶段
+
+- [ ] Task 24: Creative KB Benchmark 测试与验收（待新增）
+  - [ ] 增加 `KBBenchmarkCase` 构造测试
+  - [ ] 增加 decoy fragment 构造测试，覆盖同 cluster、标签相似、高上下文依赖与 rejected high-score 候选
+  - [ ] 增加 `KBRetrievalReviewer` schema 与聚合评分测试
+  - [ ] 增加空 KB / 空 selected references / reference 无法回源直接 fail 的测试
+  - [ ] 增加 Writer A/B variant 测试，断言当前 smoke 默认路径不被误判为 no-KB baseline
+  - [ ] 增加 artifact shape 测试，校验 `runs/creative_kb_benchmarks/<run_id>/` 关键产物存在且 JSON 可解析
+  - [ ] 单元测试使用 fake LLM / stub Reviewer；真实 LLM smoke 通过显式环境变量或 marker 启用
+
+# Task Dependencies
+- Task 1 has no internal dependencies
+- Task 2 depends on Task 1
+- Task 3 depends on Task 2
+- Task 4 depends on Task 2
+- Task 5 depends on Task 3, Task 4
+- Task 6 depends on Task 3, Task 5
+- Task 7 depends on Task 3, Task 6
+- Task 8 depends on Task 1
+- Task 9 depends on Task 1
+- Task 10 depends on Task 8, Task 9
+- Task 11 depends on Task 3, Task 7, Task 8, Task 9, Task 10
+- Task 12 depends on Task 8, Task 10, Task 11
+- Task 13 depends on Task 5, Task 11, Task 12
+- Task 14 depends on Task 5, Task 7, Task 10, Task 11, Task 12, Task 13
+- Task 15 depends on Task 9, Task 10, Task 11, Task 12, Task 13, Task 14
+- Task 16 depends on Task 14, Task 15
+- Task 17 depends on Task 14, Task 16
+- Task 18 depends on Task 8, Task 10, Task 16, Task 17
+- Task 19 depends on Task 2, Task 6, Task 7, Task 16, Task 17
+- Task 20 depends on Task 11, Task 12, Task 17, Task 18
+- Task 21 depends on Task 20
+- Task 22 depends on Task 17, Task 18, Task 21
+- Task 23 depends on Task 17, Task 21, Task 22
+- Task 24 depends on Task 17, Task 18, Task 19, Task 20, Task 21, Task 22, Task 23
+
+# External Dependencies
+- Depends on `novel-continuation-mvp/spec.md` 已提供的 `documents` 基线与粗读入库能力
+- Should align with `narrative-memory-context/spec.md` 的上下文装配输入，但不依赖其先完成
+- Writer A/B diagnostics should reuse `agentic-benchmark` / `AgenticSmokeBenchmarkService` 的窗口切分、Writer execution 与 Reviewer 能力
