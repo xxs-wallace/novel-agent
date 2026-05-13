@@ -41,6 +41,23 @@
     "must_foreshadow": ["旧案证据来源"],
     "must_not_resolve_before": ["幕后主使身份"]
   },
+  "extracted_character_mentions": [
+    {
+      "text": "顾迟",
+      "mention_type": "name",
+      "source_text": "让顾迟和沈青在旧案调查中被迫合作",
+      "confidence": 0.96,
+      "resolution_status": "resolved",
+      "resolved_character_id": "char-gu-chi"
+    },
+    {
+      "text": "大反派 X",
+      "mention_type": "new_character_hint",
+      "source_text": "大反派 X 暂时不要现身",
+      "confidence": 0.82,
+      "resolution_status": "missing"
+    }
+  ],
   "character_index": [
     {
       "name": "沈青",
@@ -78,10 +95,73 @@
 
 注意：
 
+- 用户不需要先手工填写涉及人物名单；系统先从用户概述中抽取人物提及，再由本地 Agent 对齐 Character Memory。
+- `extracted_character_mentions` 记录本轮用户概述中的重点人物，`character_index` 只提供可查询的人物入口。
 - 人物索引只给名字、别名和极短标签，不展开人物档案。
 - 世界观只给精炼梗概和概念名词，不展开全部规则。
 - 历史故事总览只讲每部小说的大致内容和起止时间，不包含完整时间线。
 - 详细事实必须通过 research request 获取。
+
+## 3.1 Character Mention Extraction
+
+在装配 `OutlineSeedPacket` 前，系统应从用户故事概述中抽取人物提及。
+
+输入：
+
+- 用户续写概述
+- 用户目标、禁止项和补充说明
+- 可选：已有角色名 / 别名轻量索引
+
+模型输出：
+
+```json
+{
+  "mentions": [
+    {
+      "text": "顾迟",
+      "mention_type": "name",
+      "source_text": "让顾迟和沈青在旧案调查中被迫合作",
+      "confidence": 0.96,
+      "possible_role_hint": "行动支援 / 关系推进对象"
+    },
+    {
+      "text": "大反派 X",
+      "mention_type": "new_character_hint",
+      "source_text": "大反派 X 暂时不要现身",
+      "confidence": 0.82,
+      "possible_role_hint": "幕后反派"
+    }
+  ]
+}
+```
+
+本地 Agent 随后执行 Character Memory 对齐：
+
+```json
+{
+  "resolutions": [
+    {
+      "mention_text": "顾迟",
+      "status": "resolved",
+      "character_id": "char-gu-chi",
+      "matched_by": ["canonical_name"]
+    },
+    {
+      "mention_text": "大反派 X",
+      "status": "missing",
+      "candidate_matches": []
+    }
+  ]
+}
+```
+
+状态语义：
+
+- `resolved`：匹配到既有人物，后续 research 可以请求其 `character_profile`。
+- `ambiguous`：可能匹配多个既有人物，需要用户选择。
+- `missing`：历史档案中不存在，需要询问用户是否新增人物。
+
+只有当用户确认 `missing` 人物确实是新增人物后，系统才要求用户补充最小 `CharacterSeedInput`。未确认新增的人物不得直接进入 `CharacterCastPlan` 或正式 Character Memory。
 
 ## 4. Research Request
 
@@ -175,8 +255,10 @@
 - `need_more_info`：继续向本地查询。
 - `needs_user_input`：本地资料无法回答，需要用户确认授权边界或创作偏好。
 - `enough`：信息足够，可以生成大纲。
+- `proceed_with_assumptions`：剩余缺口低风险，可在明确假设下生成草案。
+- `blocked`：建模基础不足，不能生成正式大纲。
 
-如果达到预算上限仍未 `enough`，系统必须在 `needs_user_input` 和 `proceed_with_assumptions` 之间选择；高风险剧情不得静默假设。
+如果达到预算上限仍未 `enough`，系统必须输出 `SufficiencyDecision`，并在 `needs_user_input`、`proceed_with_assumptions` 和 `blocked` 之间选择；高风险剧情不得静默假设。
 
 ## 6. Research Budget
 
@@ -386,18 +468,77 @@ Notebook 是生成大纲的工作台，不是正式 Memory。进入 Freeze A 的
 }
 ```
 
+达到预算上限后，`Sufficiency Gate` 的职责是明确模型生成和用户补充知识的边界：
+
+- 模型可以整合已经确认的事实、推断和结构模式。
+- 模型可以提出低风险假设，但必须显式标注。
+- 模型不得把终局秘密、主要人物身份、关系跃迁、世界规则突破或新增人物成立与否静默写成事实。
+- 用户补充用于确认授权边界、创作偏好和本地资料无法回答的知识；这些回答应记录为 `user_authorized` evidence。
+
 如果是 `needs_user_input`，必须给出少量高价值问题：
 
 ```json
 {
   "status": "needs_user_input",
+  "known_enough": [
+    "主角当前关系状态明确",
+    "旧案线索来源已有可用证据"
+  ],
   "blocking_gaps": [
     {
-      "gap": "高潮处是否允许揭露幕后主使身份不明确",
-      "why_it_matters": "会影响第 8-10 章伏笔回收节奏",
-      "question": "这一轮续写是否允许在高潮前暴露幕后主使？"
+      "gap": "大反派 X 是否是新增人物，还是已有角色的隐藏身份",
+      "why_it_matters": "会影响人物档案、伏笔回收和高潮揭露节奏",
+      "question": "大反派 X 是新角色，还是已有角色的隐藏身份？"
+    }
+  ],
+  "optional_gaps": [
+    {
+      "gap": "顾迟在本批次是否主动暴露更多旧案关联",
+      "safe_default": "先保持有限合作，不提前交底"
     }
   ]
+}
+```
+
+如果可以带假设继续，输出 `proceed_with_assumptions`：
+
+```json
+{
+  "status": "proceed_with_assumptions",
+  "assumptions": [
+    "本批次不揭露幕后主使身份",
+    "顾迟与沈青只推进到有限信任"
+  ],
+  "remaining_risks": [
+    "若用户希望更快推进关系，需要重做 BatchPlan"
+  ],
+  "optional_gaps": [
+    "顾迟是否主动暴露更多旧案关联可留到后续章节确认"
+  ]
+}
+```
+
+如果建模基础不足，输出 `blocked`：
+
+```json
+{
+  "status": "blocked",
+  "reason": "缺少可用人物档案和历史大纲索引，无法判断续写起点",
+  "required_actions": [
+    "先完成 close-read / Memory 建模",
+    "补充当前续写起点和主要人物"
+  ]
+}
+```
+
+用户回答 `needs_user_input` 后，系统应把回答写入 planning notebook：
+
+```json
+{
+  "fact_status": "user_authorized",
+  "text": "大反派 X 是新增人物，但本批次只作为幕后压力存在，不正式登场。",
+  "source": "user_answer",
+  "applies_to": ["BookContinuationPlan", "CharacterCasting"]
 }
 ```
 

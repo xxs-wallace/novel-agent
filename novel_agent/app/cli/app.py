@@ -257,6 +257,8 @@ class TuiApp:
             "sample_path": None,
             "db_path": None,
             "use_real_model": True,
+            "enable_outline_research_loop": False,
+            "outline_research_author_brief": False,
         }
         index = 0
         while index < len(args):
@@ -288,6 +290,15 @@ class TuiApp:
                 options["use_real_model"] = True
                 index += 1
                 continue
+            if token == "--outline-research":
+                options["enable_outline_research_loop"] = True
+                index += 1
+                continue
+            if token == "--author-brief":
+                options["outline_research_author_brief"] = True
+                options["enable_outline_research_loop"] = True
+                index += 1
+                continue
             if token.startswith("--"):
                 return f"未知 /benchmark 参数：{token}"
             if options["target"]:
@@ -304,6 +315,8 @@ class TuiApp:
             sample_path=options["sample_path"],  # type: ignore[arg-type]
             db_path=options["db_path"],  # type: ignore[arg-type]
             use_real_model=bool(options["use_real_model"]),
+            enable_outline_research_loop=bool(options["enable_outline_research_loop"]),
+            outline_research_author_brief=bool(options["outline_research_author_brief"]),
         )
         return str(payload.get("summary_text") or payload.get("reviewer_summary") or payload)
 

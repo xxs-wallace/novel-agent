@@ -297,6 +297,22 @@ def run_writer_workflow_action(
         )
     if action == "continue_after_planning_review":
         return workflow.continue_after_planning_review(run_id=run_id)
+    if action == "continue_after_outline_research_input":
+        return workflow.continue_after_outline_research_input(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+            user_answers={
+                str(key): str(value)
+                for key, value in (payload.get("user_answers") or {}).items()
+            }
+            if isinstance(payload.get("user_answers"), dict)
+            else {},
+            user_world_notes=str(payload.get("user_world_notes") or ""),
+            character_seed_payloads=cast(list[Mapping[str, Any]], payload.get("character_seed_payloads") or []),
+            roster_hint_payloads=cast(list[Mapping[str, Any]], payload.get("roster_hint_payloads") or []),
+        )
     if action == "prepare_batch_plan":
         return workflow.prepare_batch_plan(
             conn,
@@ -574,6 +590,13 @@ def run_writer_guided_flow(
         intent_payload=intent_payload,
         user_world_notes=user_world_notes,
     )
+    if result["planning"].get("stage") in {"outline_research_user_input", "outline_research_blocked"}:
+        return {
+            **result,
+            "status": result["planning"].get("status"),
+            "checkpoint": result["planning"].get("checkpoint"),
+            "stage": result["planning"].get("stage"),
+        }
     pending = _maybe_confirm_pending_review(
         workflow=workflow,
         run_id=run_id,

@@ -17,9 +17,7 @@ Writer 层负责把已经建模的原作事实、世界观、人物档案、故�
 - 创作知识库字段与 rerank，见 [`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md)
 - Memory 字段与上下文装配，见 [`../narrative-memory-context/spec.md`](../narrative-memory-context/spec.md)
 - 大纲生成 research / query 细节，见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)
-- 正文执行输入细节，见 [`specs/writer-input.spec.md`](specs/writer-input.spec.md)
-- 恢复与回滚，见 [`specs/workflow-and-recovery.spec.md`](specs/workflow-and-recovery.spec.md)
-- 章节验收与写回，见 [`specs/review-and-writeback.spec.md`](specs/review-and-writeback.spec.md)
+- 正文执行输入、恢复回滚、章节验收与写回运行边界，见 [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)
 
 Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md) 中已冻结的跨层对象冲突。
 
@@ -54,12 +52,15 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - 在生成 `BookContinuationPlan` 之前，由 TUI 引导用户把“想写什么”补充为“准备写多长、分几章、高潮在哪里”
 - 把用户自然语言方向转化为可传给 Book Planner 的规模、节奏和高潮约束
 - 帮助初学者不必直接写完整大纲，而是先确认故事长度、章节数量、高潮设计和节奏偏好
+- 不要求用户单独预填“涉及人物名单”；人物提及应从用户故事概述中自动抽取
 
 典型输入：
 
 - `StoryScaleInput`
 - `PacingSpec`
 - `ClimaxPlanInput`
+- `UserStoryOverview`
+- `ExtractedCharacterMentions`
 
 要求：
 
@@ -68,6 +69,32 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - `ClimaxPlanInput` SHALL 至少描述冲突高潮、情绪高潮、希望靠近的章节位置，以及必须提前铺垫的伏笔或关系变化
 - 若用户只填写章节数或总字数之一，系统 MAY 推导另一个字段，但必须在 TUI 中展示推导结果并允许用户修改
 - 该层不得读取 reference truth 原文或 Reviewer 结果；只能消费用户输入和已经确认的建模记忆
+
+### Layer 0A.5: 人物提及抽取与 Memory 对齐层
+
+目标：
+
+- 从用户提供的故事概述、续写意图和补充说明中自动抽取人物姓名、别名、称谓和疑似新角色
+- 将抽取结果交给本地 Agent 查询 Character Memory
+- 对已存在人物进行对齐，对未匹配人物询问用户是否新增
+- 只在确认新增人物时要求用户补充最小人物档案
+
+典型输出：
+
+- `ExtractedCharacterMentions`
+- `CharacterMentionResolution`
+- `MissingCharacterConfirmationRequest`
+- `CharacterSeedInput`
+
+要求：
+
+- 系统 SHALL 优先从用户自然语言概述中抽取人物提及，而不是要求用户先手工填写涉及人物名单
+- 模型 SHALL 返回候选人名、称谓、上下文片段和置信度，不直接写入正式人物档案
+- 本地 Agent SHALL 使用人物名、别名、称谓和上下文线索查询 Character Memory，并输出 resolved / ambiguous / missing 三类结果
+- 对 `resolved` 人物，系统 SHALL 使用既有人物档案作为后续 research 和规划输入
+- 对 `ambiguous` 人物，系统 SHALL 让用户选择匹配到哪个既有人物，或确认这是新人物
+- 对 `missing` 人物，系统 SHALL 询问用户是否新增人物；只有用户确认新增后，才进入最小人物档案补充
+- 用户拒绝新增的人名不得进入 `CharacterCastPlan`，除非后续剧情结构缺位流程重新提出受约束角色需求
 
 ### Layer 0B: 大纲研究循环层
 
@@ -91,12 +118,14 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 要求：
 
 - 初始输入只应包含用户续写意图、故事规模、高潮约束、人物姓名索引、世界观精炼梗概、世界观概念名词索引、历史故事精炼总览，以及可选未决伏笔标题级索引
+- `OutlineSeedPacket` 中的重点人物 SHOULD 来自 `CharacterMentionResolution`，而不是用户手工填写的人物清单
 - 模型 SHALL 通过语义请求向本地 Agent 查询更多信息，而不是直接编写 SQL 或读取任意文件
 - 语义请求至少 SHOULD 支持 `story_detail`、`character_profile`、`world_concept`
 - 本地 Agent SHALL 将语义请求转换为 SQLite / Markdown / Memory / KB 可理解的查询，并返回带来源的 evidence
 - 模型 MAY 发起多轮请求，但必须受 `ResearchBudget` 限制
 - 每轮 research 必须维护或更新 `planning_notebook`
 - 若达到预算上限仍缺少关键授权边界，系统 SHALL 向用户提出少量阻塞问题，而不是静默假设高风险剧情
+- `SufficiencyDecision` SHALL 明确区分模型可生成内容、需要用户补充的知识、可安全假设的低风险缺口和必须先补建模的阻塞项
 
 ### Layer 1: 全书续写规划层
 
@@ -156,7 +185,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 目标：
 
-- 处理用户已经显式提到、但当前 Memory 中尚未建档的新角色
+- 处理用户概述中已经显式提到、但当前 Memory 中尚未建档，并被用户确认新增的新角色
 - 处理剧情规划中尚未被具体人物承接的角色功能位
 - 在正文开始前冻结“谁将登场、为何登场、何时登场、不能越界到什么程度”
 
@@ -172,9 +201,10 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 要求：
 
 - 必须先区分：
-  - 显式命名角色：用户或规划文本已经点名的人物
+  - 显式命名角色：模型从用户概述或规划文本中抽取到的人物提及
   - 隐式角色缺位：剧情结构上需要、但尚未绑定到具体人物的功能位
-- 不得只靠剧情推断替代显式角色解析
+- 不得要求用户在启动流程中手工列全人物名单，作为进入规划的硬前置
+- 不得只靠剧情推断替代显式人物提及抽取和 Memory 对齐
 - 模糊人数与阵营要求可以触发受约束候选生成，但不得无约束自由随机
 - `PlannedCharacterProfile` 属于 Writer 层上游规划对象，不等同于 Memory 层正式 `character_profiles`
 - 只有当角色在正文中首次登场、通过校验并完成回写后，才可转入正式 Character Memory
@@ -266,7 +296,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 详细输入边界、输入分类与 `ChapterBrief -> SceneBrief` 对齐规则见：
 
-- [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 - [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
 
 在主 spec 中仅保留摘要：
@@ -282,7 +312,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 详细产品语义已迁移到：
 
-- [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 - [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
 
 在主 spec 中仅保留摘要：
@@ -301,16 +331,15 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - `Freeze D`: 单章写作 brief 冻结
 - `Freeze E`: 本章已验收终稿与状态变化冻结
 
-详细工作流语义、恢复点与级联回滚规则已迁移到：
+详细工作流语义、恢复点与级联回滚规则见：
 
-- [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
-- [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ## Writer Agent Boundary
 
 详细正文层边界已迁移到：
 
-- [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 在主 spec 中仅保留摘要：
 
@@ -364,8 +393,30 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 #### Scenario: 初始输入只给索引入口
 - **WHEN** 系统准备生成全书或批次大纲
 - **THEN** 系统装配 `OutlineSeedPacket`
-- **AND** `OutlineSeedPacket` 包含人物姓名索引、世界观精炼梗概、世界观概念名词索引和历史故事精炼总览
+- **AND** `OutlineSeedPacket` 包含已对齐的重点人物、可查询人物索引、世界观精炼梗概、世界观概念名词索引和历史故事精炼总览
 - **AND** 不应把完整人物档案、完整世界观文档或完整历史时间线一次性塞入初始 prompt
+
+### Requirement: 系统必须自动抽取用户概述中的人物提及
+
+系统 SHALL 从用户故事概述中自动抽取人物姓名和称谓，并交给本地 Agent 对齐 Character Memory；只有未匹配人物才进入新增人物确认。
+
+#### Scenario: 自动抽取人物姓名
+- **WHEN** 用户提交续写概述、故事目标或补充说明
+- **THEN** 模型提取其中的人物姓名、别名、称谓和上下文片段
+- **AND** 输出 `ExtractedCharacterMentions`
+- **AND** 不要求用户先手工填写完整人物名单
+
+#### Scenario: 本地对齐 Character Memory
+- **WHEN** 系统收到 `ExtractedCharacterMentions`
+- **THEN** 本地 Agent 使用人物名、别名、称谓和上下文线索查询历史人物档案
+- **AND** 输出 `CharacterMentionResolution`
+- **AND** 将结果分为 `resolved / ambiguous / missing`
+
+#### Scenario: 未匹配人物需要用户确认
+- **WHEN** 某个人物提及在历史档案中没有匹配结果
+- **THEN** 系统询问用户是否将其作为新增人物
+- **AND** 只有用户确认新增后，系统才要求补充最小人物档案
+- **AND** 未经确认的人物不得直接写入 `CharacterCastPlan` 或正式 Character Memory
 
 #### Scenario: 模型提出 story_detail 查询
 - **WHEN** 模型需要了解历史剧情细节
@@ -382,8 +433,26 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 #### Scenario: 信息不足时询问用户
 - **WHEN** 本地资料无法回答关键授权边界，或预算耗尽后仍存在阻塞缺口
 - **THEN** 模型输出 `needs_user_input`
-- **AND** 系统向用户提出少量具体问题
+- **AND** 系统向用户提出少量具体问题，问题应能直接补齐大纲生成所需知识
 - **AND** 不得对高风险剧情、终局秘密、关系跃迁或世界规则突破做静默假设
+
+#### Scenario: 预算耗尽后继续生成草案
+- **WHEN** ResearchBudget 已耗尽，但剩余不明确点均为低风险细节
+- **THEN** 模型可以输出 `proceed_with_assumptions`
+- **AND** 必须列出 `assumptions`、`optional_gaps` 和 `remaining_risks`
+- **AND** 后续大纲必须标注这些假设，不得把它们写成已确认事实
+
+#### Scenario: 预算耗尽后阻塞
+- **WHEN** ResearchBudget 已耗尽，且缺少可用人物档案、历史大纲索引、当前续写起点或其他基础建模材料
+- **THEN** 模型输出 `blocked`
+- **AND** 返回 `required_actions`
+- **AND** 系统不得继续生成正式大纲，只能生成低置信调试草案或引导用户先补建模
+
+#### Scenario: 用户补充知识进入 research
+- **WHEN** 用户回答 `needs_user_input` 中的问题
+- **THEN** 系统将用户回答记录为 `user_authorized` evidence
+- **AND** 将其加入 `planning_notebook`
+- **AND** 系统 MAY 继续一小轮 research 或直接生成大纲
 
 ### Requirement: story_detail 必须通过本地 Resolver 解析
 
@@ -410,8 +479,8 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 系统 SHALL 在 `Freeze A` 之前处理新增角色需求，并区分“用户已点名角色”和“剧情仍缺角色功能位”。
 
 #### Scenario: 显式命名新角色
-- **WHEN** 用户续写意图中明确提到一个当前 Memory 中不存在的人物，例如“大反派 X”
-- **THEN** 系统先将其视为显式命名新角色
+- **WHEN** `ExtractedCharacterMentions` 中出现一个当前 Memory 中不存在、且用户确认新增的人物，例如“大反派 X”
+- **THEN** 系统先将其视为显式命名新角色，并进入最小人物档案补充
 - **AND** 不得把这类角色仅作为“缺失角色槽位”推断结果处理
 
 #### Scenario: 隐式角色缺位
@@ -495,7 +564,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 该 requirement 的详细恢复语义已迁移到：
 
-- [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ### Requirement: 章节生成后必须支持验收或重生成
 
@@ -503,7 +572,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 本 requirement 的详细分支语义、场景与 accepted-only writeback 规则已迁移到：
 
-- [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 - [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
 
 ### Requirement: 上游修改必须触发级联回滚
@@ -512,7 +581,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 该 requirement 的详细失效传播与回滚语义已迁移到：
 
-- [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ### Requirement: 章节生成基于批次而非全书一次性细纲
 
@@ -529,7 +598,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 该 requirement 的详细输入边界已迁移到：
 
-- [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ### Requirement: 世界观补全与剧情规划分离
 
@@ -556,7 +625,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 该 requirement 的详细语义已迁移到：
 
-- [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ### Requirement: 章节终稿必须回写状态
 
@@ -564,7 +633,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 accepted-only writeback 的详细规则已迁移到：
 
-- [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ### Requirement: 失败恢复必须基于冻结点
 
@@ -572,7 +641,7 @@ accepted-only writeback 的详细规则已迁移到：
 
 该 requirement 的详细重试与回退语义已迁移到：
 
-- [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
+- [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
 ## Output Artifacts
 

@@ -67,6 +67,9 @@ CLI 应只有一个正式用户入口。这个入口进入统一 TUI 后，用�
 | `/kb` | 构建或查看 Creative KB |
 | `/benchmark <source_path> --prefix N` | 运行最小续写回归测试：读取前 N 段生成第 N+1 段，并输出 Reviewer 报告 |
 | `/writer` | 开始或恢复 Writer 分层生成 |
+| `/writer-research` | 查看或继续 Writer 大纲研究循环 |
+| `/writer-answer` | 回答大纲研究循环提出的阻塞问题 |
+| `/writer-skip-research` | 在允许的产品模式下降级跳过大纲研究，生成低置信草案 |
 | `/resume` | 恢复最近一次未完成流程 |
 | `/artifacts` | 查看当前会话产物 |
 | `/open` | 打开当前重点产物 |
@@ -396,8 +399,9 @@ JSON contract 仍 SHALL 保留用于：
 |---|---|---|---|
 | 选择任务 | 任务列表 / `/task` | `book_id` | read、close-read、KB、Writer 共用同一个 `book_id`。 |
 | 建模检查 | 只读状态卡 + 修复按钮 | `allow_incomplete_modeling` | 默认不鼓励跳过；如果允许低置信规划，必须明确提示风险。 |
+| 故事概述 | 多行文本 | `user_story_overview` / `intent_payload.notes` | 用户用自然语言描述想写什么；系统从中抽取人物提及和剧情目标。 |
 | 续写目标 | 多行文本 + 拆条确认 | `intent_payload.desired_actions` | 用户描述想推进的剧情动作，系统可拆成多条目标。 |
-| 主要角色 | 多选 chips + 自由输入 | `intent_payload.major_characters` | 从 Memory 人物档案推荐，可输入新名字。 |
+| 人物提及确认 | 自动抽取 chips + resolved / ambiguous / missing 分组 | `ExtractedCharacterMentions` / `CharacterMentionResolution` | 用户不必手填完整人物名单；只确认歧义人物和是否新增缺失人物。 |
 | 避免项 | 列表编辑 | `intent_payload.avoidances` | 明确不要写的剧情、关系、设定或风格。 |
 | 期望结果 | 多行文本 | `intent_payload.preferred_outcome` | 本轮结束时希望达到的状态。 |
 | 补充说明 | 多行文本 | `intent_payload.notes` | 其它写作偏好、节奏、风格提示。 |
@@ -407,19 +411,64 @@ JSON contract 仍 SHALL 保留用于：
 | 生成章节数 | 数字输入 / stepper | `chapter_count` | 本次先生成几章梗概。 |
 | 执行模式 | segmented control | `product_mode` | 普通用户默认 Assist。 |
 
-TUI MAY 提供“从自然语言自动拆字段”能力，但在提交前必须展示可编辑摘要。例如用户输入“接着写沈青追查旧案，关系慢热，不要立刻告白”，界面应拆成：
+TUI SHALL 提供“从自然语言自动拆字段”能力，并在提交前展示可编辑摘要。例如用户输入“接着写沈青追查旧案，关系慢热，不要立刻告白”，界面应拆成：
 
 ```json
 {
-  "major_characters": ["沈青"],
   "desired_actions": ["追查旧案"],
   "avoidances": ["不要立刻告白"],
   "preferred_outcome": "",
-  "notes": "关系慢热"
+  "notes": "关系慢热",
+  "extracted_character_mentions": [
+    {
+      "text": "沈青",
+      "resolution_status": "resolved"
+    }
+  ]
 }
 ```
 
 这段 JSON 只用于说明映射和 smoke；正式界面展示应是表单摘要，而不是要求用户直接编辑这段 JSON。
+
+### 9.3A Writer 大纲研究循环交互映射
+
+`/writer` 提交启动向导后，正式 TUI SHOULD 进入“大纲研究”阶段，而不是直接跳到全书大纲草案。该阶段由 Writer orchestration 执行，CLI 只展示研究过程和收集用户补充。
+
+推荐用户可见状态：
+
+| 内部对象 / 状态 | 用户文案 | TUI 展示 |
+|---|---|---|
+| `ExtractedCharacterMentions` | 请确认识别到的人物 | resolved 人物 chips、ambiguous 选择、missing 新增确认 |
+| `OutlineSeedPacket` | 已准备大纲研究资料 | 用户意图、规模、高潮、人物索引、世界观概念、历史总览摘要 |
+| `need_more_info` | 正在查找更多故事资料 | 本轮 research requests、工具结果摘要、预算剩余 |
+| `needs_user_input` | 需要你补充几个关键问题 | 1-3 个阻塞问题的决策 / 文本输入面板 |
+| `proceed_with_assumptions` | 可以带明确假设生成草案 | assumptions、remaining risks、继续 / 返回补充 |
+| `blocked` | 前置建模不足 | required_actions、跳转精读 / 建模状态 / 稍后继续 |
+| `enough` | 大纲研究已足够 | research summary、进入全书规划 |
+
+推荐新增命令：
+
+| 命令 | 用途 |
+|---|---|
+| `/writer-research` | 打开当前 Writer research 面板，查看 requests、evidence、budget、notebook 摘要 |
+| `/writer-answer` | 在 `needs_user_input` 状态下提交用户补充回答 |
+| `/writer-skip-research` | 仅在 debug / Auto Novel 降级场景下跳过 research，必须提示低置信风险 |
+| `/open research-trace` | 打开 `outline_research_trace.json` 摘要 |
+| `/open planning-notebook` | 打开 `planning_notebook.json` 摘要 |
+
+TUI 面板要求：
+
+- `CharacterMentionResolutionPanel`：展示 `resolved / ambiguous / missing` 三类结果。resolved 只读展示；ambiguous 让用户选择既有人物或确认为新人物；missing 询问是否新增人物，并在确认后打开最小人物档案表单。
+- `OutlineResearchPanel`：展示每轮 research request、类型、purpose、priority、返回 evidence 摘要和来源数量。默认不展开完整上下文。
+- `SufficiencyDecisionPanel`：展示 known_enough、blocking_gaps、optional_gaps、assumptions、remaining_risks 和 required_actions。
+- `UserKnowledgeAnswerPanel`：在 `needs_user_input` 时替代底部输入区，要求用户逐条回答阻塞问题。回答保存为 `user_authorized` evidence，由 workflow 处理。
+
+CLI 禁止事项：
+
+- 不得由 Textual 层直接调用 Memory / SQLite 查询。
+- 不得由 Textual 层拼 Outline Research prompt。
+- 不得把用户回答直接写入正式 Memory；只能传给 Writer workflow 作为 `user_authorized` research evidence。
+- 不得把 `proceed_with_assumptions` 的 assumptions 显示成 confirmed facts。
 
 ### 9.4 审阅表单到 Artifact JSON 的映射
 
@@ -510,6 +559,28 @@ CLI / TUI 不应要求用户填写 `decision_id`、`draft_id`、`created_at`、`
 - 手动编辑：打开 artifact 编辑器
 - 返回上一层：回到上游可修改节点
 - 稍后继续：保持当前状态
+
+示例：Writer 大纲研究需要用户补充
+
+```text
+需要你补充几个关键问题
+
+已确认：
+- 主角当前关系状态明确
+- 旧案线索来源已有可用证据
+
+阻塞问题：
+1. “大反派 X”是新增人物，还是已有角色的隐藏身份？
+2. 这一批是否允许揭露旧案证据来源？
+
+[1] 逐条回答
+[2] 查看研究记录
+[3] 带假设继续生成草案
+[4] 返回修改故事概述
+[5] 稍后继续
+```
+
+如果用户选择“带假设继续”，界面必须展示 assumptions 和 remaining risks，并要求二次确认。若缺口属于终局秘密、主要人物身份、世界规则突破、关系跃迁或新增人物是否成立，界面不得提供静默跳过，只能要求用户回答或返回上游修改。
 
 ## 11. Read Pipeline 交互设计
 

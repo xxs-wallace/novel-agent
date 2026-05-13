@@ -40,6 +40,8 @@ MODE_CONFIRMATION_POINTS = {
     AUTO_NOVEL_MODE: [],
 }
 RESUMABLE_WORKFLOW_STAGES = {
+    "outline_research_user_input",
+    "outline_research_blocked",
     "freeze_a_review",
     "batch_review",
     "chapter_review",
@@ -123,7 +125,13 @@ class WriterInteractiveWorkflow:
             auto_confirm=mode != ASSIST_MODE,
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
-        if mode == ASSIST_MODE:
+        if result.get("stage") in {"outline_research_user_input", "outline_research_blocked"}:
+            checkpoint = dict(result.get("checkpoint") or {})
+            state["pending_checkpoint"] = checkpoint
+            state["current_stage"] = str(result.get("stage") or "")
+            if result.get("stage") == "outline_research_blocked":
+                state["terminal_stage"] = "outline_research_blocked"
+        elif mode == ASSIST_MODE:
             run_dir = self.run_writer.layout.run_dir(run_id)
             checkpoint = self._write_checkpoint(
                 run_id=run_id,
@@ -136,6 +144,51 @@ class WriterInteractiveWorkflow:
         else:
             state["current_stage"] = "freeze_a"
             state["pending_checkpoint"] = None
+        self._save_workflow_state(run_id, state)
+        return result
+
+    def continue_after_outline_research_input(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        product_mode: str,
+        user_answers: Mapping[str, str],
+        user_world_notes: str = "",
+        character_seed_payloads: list[Mapping[str, Any]] | None = None,
+        roster_hint_payloads: list[Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        mode = self._normalize_mode(product_mode)
+        result = self.planner.continue_outline_research_with_user_input(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            user_answers=user_answers,
+            user_world_notes=user_world_notes,
+            character_seed_payloads=character_seed_payloads,
+            roster_hint_payloads=roster_hint_payloads,
+            auto_confirm=mode != ASSIST_MODE,
+        )
+        state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
+        if result.get("stage") in {"outline_research_user_input", "outline_research_blocked"}:
+            state["pending_checkpoint"] = dict(result.get("checkpoint") or {})
+            state["current_stage"] = str(result.get("stage") or "")
+            state["terminal_stage"] = "outline_research_blocked" if result.get("stage") == "outline_research_blocked" else None
+        elif mode == ASSIST_MODE:
+            checkpoint = self._write_checkpoint(
+                run_id=run_id,
+                stage="freeze_a_review",
+                artifact_path=str(self.run_writer.layout.run_dir(run_id) / "book_continuation_plan.json"),
+                source="continue_after_outline_research_input",
+            )
+            state["pending_checkpoint"] = checkpoint
+            state["current_stage"] = "freeze_a_review"
+            state["terminal_stage"] = None
+        else:
+            state["pending_checkpoint"] = None
+            state["current_stage"] = "freeze_a"
+            state["terminal_stage"] = None
         self._save_workflow_state(run_id, state)
         return result
 

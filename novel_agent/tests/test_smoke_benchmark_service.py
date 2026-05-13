@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from novel_agent.app.services.smoke_benchmark_service import (
     AgenticSmokeBenchmarkService,
+    OutlineResearchReviewer,
     SmokeBenchmarkRunService,
     SmokeBenchmarkSampleService,
 )
@@ -504,3 +508,75 @@ def test_smoke_benchmark_run_service_rejects_without_real_model(tmp_path: Path) 
         assert "real LLM config" in str(exc)
     else:
         raise AssertionError("smoke benchmark should reject offline runs")
+
+
+def test_outline_research_reviewer_fake_report_covers_required_checks() -> None:
+    reviewer = OutlineResearchReviewer()
+    prompt = reviewer.build_prompt(
+        prefix_story_outline="前缀大纲",
+        user_story_overview="沈青追查旧案，顾迟协助。",
+        outline_seed_packet={
+            "extracted_character_mentions": [{"text": "沈青"}, {"text": "顾迟"}],
+            "character_resolutions": [
+                {"mention_text": "沈青", "canonical_name": "沈青", "status": "resolved"},
+                {"mention_text": "顾迟", "canonical_name": "顾迟", "status": "resolved"},
+            ],
+        },
+        outline_research_trace={
+            "rounds": [
+                {
+                    "requests": [{"request_type": "story_detail"}],
+                    "results": [{"fact_status": "confirmed"}],
+                }
+            ]
+        },
+        planning_notebook={"confirmed_facts": [{"claim": "旧案线索仍未收束"}]},
+        sufficiency_decision={"status": "enough"},
+        generated_outline={"outline_nodes": [{"summary": "沈青追查旧案"}, {"summary": "顾迟协助"}]},
+        reference_future_outline={"plot_beats": ["沈青追查旧案", "顾迟协助"]},
+        reference_character_set={
+            "existing_characters": [{"name": "沈青"}, {"name": "顾迟"}],
+            "new_characters": [],
+        },
+        leakage_audit={"status": "pass", "issues": []},
+    )
+
+    report = reviewer.fake_review(prompt_payload=prompt)
+
+    assert report["decision"] in {"pass", "borderline"}
+    assert set(report["checks"]) == set(OutlineResearchReviewer.CHECK_NAMES)  # type: ignore[arg-type]
+    assert "research_tool_usefulness_score" in report["scores"]  # type: ignore[operator]
+
+
+def test_outline_research_leakage_audit_fails_reference_only_in_writer_payload() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    reference_future_outline = {"plot_beats": ["隐藏答案：主角抵达学院"]}
+    reference_character_set = {"new_characters": [{"name": "隐藏新人物"}]}
+
+    clean = service._build_leakage_audit(
+        writer_stage_payloads={"writer_input": {"desired_actions": ["根据用户概述续写"]}},
+        authorized_user_input="用户概述：主角收到邀请。",
+        reference_future_outline=reference_future_outline,
+        reference_character_set=reference_character_set,
+        future_raw_text="这是后窗原文的很长一段内容。" * 20,
+    )
+    leaked = service._build_leakage_audit(
+        writer_stage_payloads={"planning_notebook": {"reference_future_outline": reference_future_outline}},
+        authorized_user_input="用户概述：主角收到邀请。",
+        reference_future_outline=reference_future_outline,
+        reference_character_set=reference_character_set,
+        future_raw_text="这是后窗原文的很长一段内容。" * 20,
+    )
+
+    assert clean["status"] == "pass"
+    assert leaked["status"] == "fail"
+    assert leaked["issues"]  # type: ignore[index]
+
+
+@pytest.mark.real_llm_outline_research
+@pytest.mark.skipif(
+    os.getenv("RUN_REAL_LLM_OUTLINE_RESEARCH") != "1",
+    reason="Set RUN_REAL_LLM_OUTLINE_RESEARCH=1 to run the real LLM Outline Research smoke.",
+)
+def test_real_llm_outline_research_smoke_is_explicitly_gated() -> None:
+    assert os.getenv("DEEPSEEK_API_KEY"), "DEEPSEEK_API_KEY is required for the gated smoke"

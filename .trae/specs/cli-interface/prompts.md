@@ -17,7 +17,7 @@
 2. .trae/specs/spec.md
 3. .trae/specs/cli-interface/design.md
 4. .trae/specs/cli-interface/tasks.md
-5. .trae/specs/writer-agent-layered-generation/design.md 中的 “Writer 用户可见状态词典”
+5. .trae/specs/writer-agent-layered-generation/design.md
 6. 当前 Textual 骨架：novel_agent/app/cli_tui.py
 7. 当前 CLI 交互层：novel_agent/app/cli/
 
@@ -204,7 +204,7 @@
 - .trae/specs/spec.md
 - .trae/specs/cli-interface/design.md
 - .trae/specs/cli-interface/tasks.md
-- .trae/specs/writer-agent-layered-generation/design.md 中的 “Writer 用户可见状态词典”
+- .trae/specs/writer-agent-layered-generation/design.md
 - novel_agent/app/runner/segmentation_runner.py
 - novel_agent/app/runner/close_read_runner.py
 - novel_agent/app/services/creative_kb_facade.py

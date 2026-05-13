@@ -6,9 +6,9 @@
 - 只有涉及章节验收对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
 - 只有涉及跨层输入对象时才读 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)。
 - 当前尚未拆出的规划域与人物补充域，暂时继续以 [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 和 [design.md](.trae/specs/writer-agent-layered-generation/design.md) 为主。
-- 涉及 terminal 展示、确认点、长度计划交互与恢复时，优先读 [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)。
-- 涉及正文草稿审阅、`draft.md` 预览和验收分支时，优先读 [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)。
-- 涉及 `NarrativeStructurePattern` / `ArcPatternCard` 如何进入 Writer 输入，或 `SourceArcMap` 如何作为源作品定位事实可选进入上下文时，优先读 [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md) 与 [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)。
+- 涉及 terminal 展示、确认点、长度计划交互与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及正文草稿审阅、`draft.md` 预览和验收分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及 `NarrativeStructurePattern` / `ArcPatternCard` 如何进入 Writer 输入，或 `SourceArcMap` 如何作为源作品定位事实可选进入上下文时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 与 [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)。
 
 ## Group A: 主总览 / 待拆分规划域
 
@@ -99,7 +99,7 @@
 
 - [ ] Task 7A: 建立 ChapterLengthPlan 章节长度规划层
   - `来源`: 拆自 `spec.md` / `design.md` 中 `Freeze C -> ChapterLengthPlan -> Freeze D` 的正式预算层要求
-  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md)
+  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [ ] 定义 `ChapterLengthPlan` 与单章 `ChapterLengthBudget` 运行时 schema
   - [ ] 在 `Freeze C` 后基于 `ChapterPackage` 生成 `chapter_length_plan.json`
@@ -116,7 +116,7 @@
   - [ ] 增加 `revise_length -> wait_length_review -> 更新长度预算 -> 重写当前章` 的回归测试
 
 - [x] Task 13: 支持三种产品模式
-  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md)
+  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - [x] `Assist Mode`
   - [x] `Batch Mode`
   - [x] `Auto Novel Mode`
@@ -141,7 +141,7 @@
 ## Group B: Writer Input / Execution
 
 - [ ] Task 8: 扩展正文层输入 contract（部分实现，待接入结构模式 KB）
-  - `建议只读`: [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md), [writer-execution.design.md](.trae/specs/writer-agent-layered-generation/designs/writer-execution.design.md), [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
   - [x] 在现有 `ScenePlan` 之上设计 `ChapterBrief`
   - [x] 定义 Writer Agent 的事实输入、风格输入、禁止输入
   - [x] 增加 style reference bundle 装配
@@ -151,7 +151,7 @@
   - [ ] 在需要源作品定位时，可在事实上下文中装配相关 `SourceArcMap` 片段，包含 `source_arc_id`、`source_arc_role`、源作品阶段定位与未回收线索
 
 - [x] Task 9: 重构 Writer Agent 为“受限执行器”
-  - `建议只读`: [writer-input.spec.md](.trae/specs/writer-agent-layered-generation/specs/writer-input.spec.md), [writer-execution.design.md](.trae/specs/writer-agent-layered-generation/designs/writer-execution.design.md), [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
   - [x] 将正文层改为只消费冻结 brief
   - [x] 禁止正文层直接补大型设定
   - [x] 禁止正文层跳过关系桥接
@@ -161,7 +161,7 @@
 ## Group C: Review And Writeback
 
 - [x] Task 10: 建立章节后校验与回写链路
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 复用并扩展 `ContinuityReport`
   - [x] 提取 `StateDelta`
   - [x] 回写人物状态、关系状态、时间线事件、世界状态
@@ -169,15 +169,15 @@
   - [x] 当计划角色首次正式登场并通过校验后，将其转写为正式 Character Memory
 
 - [ ] Task 10A: 优化章节验收界面的 draft 展示策略
-  - `来源`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md) 的 `Review Display Policy`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `来源`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 的 `User Review Display`
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - [ ] 在章节验收节点展示 `draft.md` 路径、当前字数、目标字数、连续性状态与开头短预览
   - [ ] 默认草稿预览限制在约 1-2KB，不把完整正文刷入 terminal
   - [ ] 完整展示或提示 `generation_review_decision.json` 的可编辑位置
   - [ ] 增加测试覆盖：长草稿只输出短预览、完整路径仍可见、结构化审阅产物可编辑
 
 - [x] Task 14A: 旧代码结构改造 - 将写入流程重构为“验收后提交”
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 拆分旧的“生成后直接回写”路径，引入 `GenerationReviewDecision` 驱动的 accept-gated commit
   - [x] 仅当 `GenerationReviewDecision.status = accepted` 时允许进入 `Freeze E` 与正式 `MemoryWriteback`
   - [x] 当 `GenerationReviewDecision.status = revise_length` 时，消费 `LengthPlanUpdate` 并回退到 `wait_length_review`，不得触发正式回写
@@ -187,7 +187,7 @@
   - [x] 将“是否成为 canon”的判定从“生成完成”改为“用户接受并完成回写”
 
 - [x] Task 14C: 旧代码结构改造 - 重构 runs 产物与评审决策落盘
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 新增 `generation_review_decision.json`
   - [x] 新增 `length_plan_update.json`
   - [x] 新增 `chapter_replan_request.json`
@@ -197,7 +197,7 @@
 ## Group D: Workflow And Recovery
 
 - [ ] Task 11: 建立失败恢复与重规划机制
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - [x] 正文失败时支持从 `Freeze D` 重试
   - [x] 连续失败时支持回退到 `Freeze C`
   - [x] 必要时回退到 `Freeze B`
@@ -206,7 +206,7 @@
   - [ ] 支持已进入 `canon_active` 的计划角色修改时的冲突分支处理
 
 - [x] Task 12: 建立交互式工作流控制器
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - [x] 在建模检查、世界观确认、批次大纲审阅、章节包审阅处支持暂停
   - [x] 在建模状态中检查 `SourceArcMap` 是否存在；缺失时提示运行 post-close-read 源作品篇章地图生成或继续但降级
   - [x] 在建模状态中检查 `NarrativeStructurePattern` / `ArcPatternCard` 是否存在；缺失时提示运行 KB 结构模式沉淀或继续但降级
@@ -223,7 +223,7 @@
   - [x] 记录每次确认的时间与来源
 
 - [x] Task 14B: 旧代码结构改造 - 重构工作流状态机以接入章节验收分支
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - [x] 在旧工作流控制器中补齐 `wait_chapter_acceptance`
   - [x] 在旧工作流控制器中补齐 `wait_length_review`
   - [x] 在旧工作流控制器中补齐 `halted`
@@ -257,7 +257,7 @@
   - [ ] 增加批次级连续生成测试
 
 - [x] Task 15A: 写入流程重构专项测试
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 增加 `accepted -> Freeze E -> MemoryWriteback` 的正向测试
   - [x] 增加 `revise_length -> wait_length_review -> 不回写` 的分支测试
   - [x] 增加 `replan_chapter -> wait_chapter_review -> 不回写` 的分支测试
@@ -269,7 +269,7 @@
 
 - [x] Task 14A-1: 运行时代码中引入 `GenerationReviewDecision` / `LengthPlanUpdate` / `ChapterReplanRequest`
   - `来源`: 拆自 `Task 14A`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/schemas/__init__.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 在运行时代码里增加 review 决策对象的最小数据结构
   - [x] 对齐 `accepted / revise_length / replan_chapter / discarded` 四种状态
@@ -278,7 +278,7 @@
 
 - [x] Task 14A-2: 为 `RestrictedWriterExecutor` 增加 accept-gated writeback 门禁
   - `来源`: 拆自 `Task 14A`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/schemas/continuity.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 停止在 `execute_frozen_chapter()` 内基于 `canon_ready` 直接触发正式回写
   - [x] 将正式回写前置条件收紧为“continuity 通过 + review decision 已 accepted”
@@ -286,7 +286,7 @@
 
 - [x] Task 14A-3: 为旧 writeback 审批入口增加 guard，阻止绕过章节验收直接提交
   - `来源`: 拆自 `Task 14A`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] `approve_writeback()` 读取并校验 `generation_review_decision.json`
   - [x] 未提供 `accepted` 决策时拒绝正式回写
@@ -294,7 +294,7 @@
 
 - [x] Task 14B-1: 扩展 workflow 状态枚举与 checkpoint，接入验收等待态
   - `来源`: 拆自 `Task 14B`
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 在 workflow state 中补齐 `wait_chapter_acceptance`
   - [x] 在 workflow state 中补齐 `wait_length_review`
@@ -303,7 +303,7 @@
 
 - [x] Task 14B-2: 在 `execute_current_chapter()` 后接入四态验收分流
   - `来源`: 拆自 `Task 14B`
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] `accepted -> freeze_e / writeback_review`
   - [x] `revise_length -> wait_length_review`
@@ -313,7 +313,7 @@
 
 - [x] Task 14B-3: 调整 resume / rollback 逻辑，兼容新的 rejection path
   - `来源`: 拆自 `Task 14B`
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] `resume_from_latest_checkpoint()` 能正确返回新的等待态
   - [x] `discarded` 不污染恢复点
@@ -321,7 +321,7 @@
 
 - [x] Task 14C-1: 落盘 `generation_review_decision.json`
   - `来源`: 拆自 `Task 14C`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 在验收发生时稳定落盘 `generation_review_decision.json`
   - [x] 保证字段与 contract 对齐
@@ -329,7 +329,7 @@
 
 - [x] Task 14C-2: 落盘 `length_plan_update.json` 与 `chapter_replan_request.json`
   - `来源`: 拆自 `Task 14C`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] `revise_length` 分支落盘 `length_plan_update.json`
   - [x] `replan_chapter` 分支落盘 `chapter_replan_request.json`
@@ -337,7 +337,7 @@
 
 - [x] Task 14C-3: 增加 `superseded / discarded` 草稿保留策略
   - `来源`: 拆自 `Task 14C`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 明确废稿保留在 runs 内但不得进入正式回写链路
   - [x] 明确被新稿替代时旧稿的 `superseded` 策略
@@ -345,7 +345,7 @@
 
 - [x] Task 15A-1: 补 accepted-only writeback 的行为测试
   - `来源`: 拆自 `Task 15A`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`
   - [x] 覆盖 `accepted -> Freeze E -> MemoryWriteback`
   - [x] 覆盖旧入口在无 accepted 决策时被 guard
@@ -353,7 +353,7 @@
 
 - [x] Task 15A-2: 补 rejection path 的 workflow 分支测试
   - `来源`: 拆自 `Task 15A`
-  - `建议只读`: [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/app/orchestrators/writer_workflow.py`
   - [x] 覆盖 `revise_length -> wait_length_review -> 不回写`
   - [x] 覆盖 `replan_chapter -> wait_chapter_review -> 不回写`
@@ -361,7 +361,7 @@
 
 - [x] Task 15A-3: 补 review artifact 落盘测试
   - `来源`: 拆自 `Task 15A`
-  - `建议只读`: [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`
   - [x] 覆盖 `generation_review_decision.json`
   - [x] 覆盖 `length_plan_update.json`
@@ -370,8 +370,8 @@
 ## Group G: Writer 用户可见状态重构
 
 - [x] Task 16: 建立 Writer 状态翻译层（待新增）
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `Writer 用户可见状态词典`
-  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md), [review-writeback.design.md](.trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/gui/main.py`, `novel_agent/app/gui/writer_cli.py`, `novel_agent/app/run_interactive.py`
   - [x] 定义 `WriterStatusPresenter` 或等价 presenter，将内部 stage / event 翻译为中文用户文案
   - [x] 覆盖 `artifact saved -> 已保存你的修改`
@@ -382,8 +382,8 @@
   - [x] 将内部 stage、freeze record、checkpoint path 放入技术详情，不作为主状态展示
 
 - [x] Task 17: 替换 CLI / 交互输出中的内部状态文案（待新增）
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `状态展示与跳转`
-  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/run_interactive.py`, `novel_agent/app/gui/writer_cli.py`
   - [x] `_prompt_writer_review` 等交互提示显示中文状态、背景说明和下一步动作
   - [x] 保存 artifact 后显示“已保存你的修改”，并明确“保存不等于确认”
@@ -392,7 +392,7 @@
   - [x] 不再把 `freeze_d_review`、`wait_chapter_acceptance`、`checkpoint confirmed` 作为主输出给用户
 
 - [x] Task 18: 替换 GUI Writer 面板中的内部状态文案（待新增）
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `当前实现需要对齐的点`
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [../cli-interface/design.md](.trae/specs/cli-interface/design.md)
   - `建议只关注代码文件`: `novel_agent/app/gui/main.py`
   - [x] `_refresh_writer_state_buttons` 使用中文状态和下一步说明
@@ -403,8 +403,8 @@
   - [x] 为 `wait_chapter_review` 补齐 GUI 动作入口，支持返回章节梗概调整后继续
 
 - [x] Task 19: 对齐 Writer 模式确认点与状态机实现（待新增）
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `当前实现需要对齐的点`
-  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md)
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 核对 `MODE_CONFIRMATION_POINTS` 与实际 `prepare_planning()` 行为是否一致
   - [x] 明确 Batch 模式是否需要停在“请审阅全书续写规划”
@@ -413,8 +413,8 @@
   - [x] 确认 `wait_chapter_review` 从验收分支进入后有可继续执行路径
 
 - [x] Task 20: Writer 状态重构测试与快照验收（待新增）
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `Writer 用户可见状态词典`
-  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [review-and-writeback.spec.md](.trae/specs/writer-agent-layered-generation/specs/review-and-writeback.spec.md), [workflow-and-recovery.spec.md](.trae/specs/writer-agent-layered-generation/specs/workflow-and-recovery.spec.md)
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/tests/test_run_interactive_pipeline.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 增加状态翻译单测，覆盖所有 Writer 用户确认点
   - [x] 增加 CLI 输出测试，断言主输出不包含 `artifact saved`、`Freeze B pending`、`freeze_d_review`、`wait_chapter_acceptance`
@@ -476,7 +476,7 @@
 ## Group H: JSON Contract 与正式 TUI 映射
 
 - [x] Task 21: 定义 Writer 启动输入 ViewModel 与 JSON contract 映射
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `JSON Contract 与 TUI 步骤映射`
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [../cli-interface/design.md](.trae/specs/cli-interface/design.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_cli_textual_components.py`
   - [x] 定义 `WriterIntentForm` / `WriterIntentWizard` 或等价 ViewModel
@@ -488,7 +488,7 @@
   - [x] 增加测试覆盖 TUI 表单到 `intent_payload` 的映射
 
 - [x] Task 21A: 扩展 Writer 启动向导以收集故事规模与高潮输入
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `故事规模 / 高潮输入映射`
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [../cli-interface/design.md](.trae/specs/cli-interface/design.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/forms.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/tests/test_cli_textual_components.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 将 `target_total_chars`、`default_chapter_target_chars`、`pacing_profile`、`length_distribution_notes` 加入 Writer 启动表单
@@ -499,7 +499,7 @@
   - [x] 增加测试覆盖 TUI 表单到故事规模 / 高潮 JSON 输入的映射
 
 - [x] Task 22: 定义 Character Casting 表单与 JSON artifact 映射
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `人物补充输入映射`
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/artifacts.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/tests/test_cli_textual_components.py`
   - [x] 将 `CharacterRequirementReport` 展示为已有人物、新角色候选、剧情缺位角色三类卡片
@@ -510,8 +510,8 @@
   - [x] 保留 JSON artifact 供 smoke 和恢复运行使用
 
 - [x] Task 23: 定义 Writer 审阅 artifact 字段化编辑映射
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `审阅类 artifact 映射`
-  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [workflow-state-machine.design.md](.trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md)
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/artifacts.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/tests/test_cli_textual_components.py`
   - [x] `book_continuation_plan.json` 映射为全书目标、目标章节数、目标总字数、默认单章字数、节奏 profile、终局方向、阶段高潮、必须保留、未决问题
   - [x] 将 `climax_plan` 映射为冲突高潮、情绪高潮、目标章节位置、必须铺垫、不得提前解决、回收预期
@@ -523,7 +523,7 @@
   - [x] 高级 JSON 编辑保留，但普通路径必须可通过字段化编辑或受控修订完成
 
 - [x] Task 24: 定义章节验收 TUI 决策到 review contract 的映射
-  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的 `章节验收 contract 映射`
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/decisions.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_cli_textual_components.py`
   - [x] “接受本章”映射到 `GenerationReviewDecision.status = accepted`
@@ -537,3 +537,113 @@
 - Task 22 depends on Task 4, Task 21
 - Task 23 depends on Task 6, Task 7, Task 7A, Task 21, Task 21A
 - Task 24 depends on Task 10, Task 14A, Task 21
+
+## Group I: Outline Research Loop 落地
+
+- [x] Task 47: 定义 Outline Research Loop 运行时 schema 与落盘结构
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 定义 `OutlineSeedPacket`
+  - [x] 定义 `ExtractedCharacterMentions` / `CharacterMentionResolution`
+  - [x] 定义 `ResearchRequest`，覆盖 `story_detail`、`character_profile`、`world_concept`、`structure_pattern`
+  - [x] 定义 `ResearchBudget`
+  - [x] 定义 `StoryDetailResult` / `ResearchResult`
+  - [x] 定义 `PlanningNotebook`
+  - [x] 定义 `SufficiencyDecision`，覆盖 `enough / needs_user_input / proceed_with_assumptions / blocked`
+  - [x] 在 runs 中稳定落盘 `outline_seed_packet.json`、`outline_research_trace.json`、`planning_notebook.json`、`sufficiency_decision.json`
+  - [x] 为 schema 序列化、缺字段、非法 status、路径关联补单元测试
+
+- [x] Task 48: 实现用户概述人物提及抽取与 Character Memory 对齐
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 的 `Layer 0A.5`
+  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/app/repos/`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 从用户故事概述、续写目标、避免项和补充说明中抽取人物姓名、称谓、别名和上下文片段
+  - [x] 输出置信度、来源文本和 possible role hint
+  - [x] 使用 Character Memory / alias / evidence 对抽取结果进行 `resolved / ambiguous / missing` 对齐
+  - [x] 对 `resolved` 人物绑定既有 `character_id`
+  - [x] 对 `ambiguous` 人物生成用户选择请求
+  - [x] 对 `missing` 人物生成是否新增人物的确认请求
+  - [x] 未经用户确认新增的人名不得进入 `CharacterCastPlan`
+  - [x] 增加测试覆盖：命中既有人物、别名命中、多候选歧义、缺失人物、用户拒绝新增
+
+- [x] Task 49: 实现 OutlineSeedPacket 装配
+  - `来源`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md) 的 `Outline Seed Packet`
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/outline_service.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 汇总用户意图、故事规模、高潮输入和人物提及对齐结果
+  - [x] 装配可查询人物索引，人物只包含姓名、别名和极短标签，不展开完整档案
+  - [x] 装配世界观精炼梗概和世界观概念名词索引
+  - [x] 装配历史故事精炼总览和当前续写起点
+  - [x] 可选装配未决伏笔 / SourceArcMap / ArcPatternCard 的标题级索引
+  - [x] 确保初始 prompt 不直接塞入完整 Memory、完整世界观或完整历史时间线
+  - [x] 增加快照测试，断言 seed packet 信息密度和敏感字段边界
+
+- [x] Task 50: 实现 Context Broker 与 research request resolver
+  - `来源`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md) 的 `Context Broker`
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/repos/`, `novel_agent/tools/`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 实现 `character_profile` resolver，返回人物状态、能力边界、关系状态、最近变化和来源
+  - [x] 实现 `world_concept` resolver，返回规则、限制、代价、例外、禁止突破点和来源
+  - [x] 实现 `structure_pattern` resolver，调用 KB 层结构模式 / ArcPatternCard 检索
+  - [x] 所有结果必须带 `fact_status` 和 sources
+  - [x] 支持请求去重、低优先级降级、预算不足时只返回索引摘要
+  - [x] 增加测试覆盖来源记录、结果裁剪、重复请求合并和不把 candidate 当 confirmed
+
+- [x] Task 51: 实现 Story Detail Resolver 与历史大纲索引
+  - `来源`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md) 的 `Story Detail Resolver`
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/services/outline_service.py`, `novel_agent/app/repos/`, `novel_agent/app/runner/close_read_runner.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 定义最低可用的 `ChapterSummaryIndex`，每条摘要保存人物、概念、事件概要、结果和 source document 位置
+  - [x] 设计可升级的 `HistoricalOutlineEventIndex` 事件卡结构
+  - [x] 实现 query understanding，将 `story_detail.query` 解析为人物、概念、事件意图、时间提示和 facts facets
+  - [x] 使用章节摘要 / 事件卡检索候选
+  - [x] 对候选事件执行 rerank，返回 matches、confidence、covered_facets、missing_facets
+  - [x] 只展开高相关候选的详细材料
+  - [x] 增加测试覆盖“最近一次信任冲突”“某伏笔来源”“某事件结果”等自然语言 query
+
+- [x] Task 52: 实现 Outline Research Loop 控制器与预算门禁
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 根据 `OutlineSeedPacket` 调用模型产生 research requests
+  - [x] 逐轮调用 Context Broker 并把结果回传模型
+  - [x] 维护 `planning_notebook`
+  - [x] 执行 `ResearchBudget`：max_rounds、max_requests_per_round、max_total_requests、max_return_tokens_per_request
+  - [x] 预算耗尽后必须进入 `Sufficiency Gate`
+  - [x] 支持 `needs_user_input` 暂停，等待用户补充后继续一小轮 research 或生成大纲
+  - [x] 支持 `proceed_with_assumptions`，并把假设标注到大纲来源
+  - [x] 支持 `blocked`，返回 required_actions，不生成正式大纲
+  - [x] 增加测试覆盖多轮请求、预算耗尽、用户补充、带假设继续和 blocked
+
+- [x] Task 53: 将 Outline Research Loop 接入 Book / Batch / Chapter 规划
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [x] 在生成 `BookContinuationPlan` 前执行 Outline Research Loop
+  - [x] 将 `planning_notebook` 和 `SufficiencyDecision` 作为 Book Planner 输入
+  - [x] `needs_user_input` 时进入可恢复等待态，不推进 Freeze A
+  - [x] `proceed_with_assumptions` 时生成低风险草案，并在 `BookContinuationPlan` sources / assumptions 中标注
+  - [x] `blocked` 时提示缺失建模步骤，不生成正式 `BookContinuationPlan`
+  - [x] Batch / Chapter 规划可复用已有 notebook，必要时追加局部 research
+  - [x] 增加端到端测试：用户概述 -> 人物抽取 -> research -> BookContinuationPlan -> batch_review
+
+- [x] Task 54: Outline Research Loop 测试与 CLI 联动验收基线
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [../cli-interface/design.md](.trae/specs/cli-interface/design.md)
+  - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [../cli-interface/design.md](.trae/specs/cli-interface/design.md)
+  - `建议只关注代码文件`: `novel_agent/tests/test_writer_outline_research.py`, `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_cli_textual_components.py`
+  - [x] 单元测试覆盖所有 schema、resolver 和 sufficiency status
+  - [x] workflow 测试覆盖 `needs_user_input` 暂停与用户回答后继续
+  - [x] workflow 测试覆盖 `proceed_with_assumptions` 的 assumptions 写入正式大纲
+  - [x] workflow 测试覆盖 `blocked` 不生成正式大纲
+  - [x] CLI fake facade 测试覆盖 research trace、用户补充问题和继续按钮
+- [x] 默认测试不得触发真实 LLM；模型调用使用 fake adapter / stub
+
+- Task 47 depends on Task 1, Task 2
+- Task 48 depends on Task 47
+- Task 49 depends on Task 47, Task 48
+- Task 50 depends on Task 47, Task 49
+- Task 51 depends on Task 47, Task 50
+- Task 52 depends on Task 47, Task 50, Task 51
+- Task 53 depends on Task 52
+- Task 54 depends on Task 48, Task 52, Task 53

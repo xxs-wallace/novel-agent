@@ -122,6 +122,7 @@ dev = [
 addopts = "-sv --durations=0"
 markers = [
   "slow: explicitly enabled smoke tests that may call real services",
+  "real_llm_outline_research: explicitly enabled real LLM Outline Research smoke",
   "timeout(seconds): per-test timeout used when pytest-timeout is installed",
 ]
 

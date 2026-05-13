@@ -4,7 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ...runs.writer import RunWriter
 from ..prompts.writer_planning_prompt import (
@@ -32,12 +32,27 @@ from ..schemas.orchestration_schema import (
     FreezeRecord,
     ModelingCheckItem,
     ModelingStatus,
+    OutlineSeedPacket,
+    PlanningFact,
+    PlanningNotebook,
     RelationshipTarget,
+    ResearchBudget,
+    SufficiencyDecision,
     TraceableSource,
     WorldConstraintRule,
     WorldExpansionPack,
 )
 from ..services.character_mention_service import CharacterMentionService
+from ..services.outline_research_service import (
+    CharacterMentionExtractor,
+    CharacterMentionResolver,
+    HeuristicOutlineResearchModelAdapter,
+    OutlineResearchContextBroker,
+    OutlineResearchLoopController,
+    OutlineResearchModelAdapter,
+    OutlineResearchRunResult,
+    OutlineSeedPacketBuilder,
+)
 from .writer_planning_types import (
     CastPlanBinding,
     CharacterCastPlan,
@@ -115,6 +130,7 @@ class WriterLayeredGenerationOrchestrator:
         character_profiles_repo: CharacterProfilesRepo | None = None,
         assets_repo: AssetsRepo | None = None,
         mention_service: CharacterMentionService | None = None,
+        outline_research_adapter: OutlineResearchModelAdapter | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.run_writer = run_writer
@@ -123,6 +139,22 @@ class WriterLayeredGenerationOrchestrator:
         self.character_profiles_repo = character_profiles_repo or CharacterProfilesRepo()
         self.assets_repo = assets_repo or AssetsRepo()
         self.mention_service = mention_service or CharacterMentionService()
+        self.character_mention_extractor = CharacterMentionExtractor(self.mention_service)
+        self.character_mention_resolver = CharacterMentionResolver(self.character_profiles_repo)
+        self.outline_seed_builder = OutlineSeedPacketBuilder(
+            repo_root=repo_root,
+            assets_repo=self.assets_repo,
+            character_profiles_repo=self.character_profiles_repo,
+            documents_repo=self.documents_repo,
+        )
+        self.outline_research_controller = OutlineResearchLoopController(
+            broker=OutlineResearchContextBroker(
+                repo_root=repo_root,
+                assets_repo=self.assets_repo,
+                character_profiles_repo=self.character_profiles_repo,
+            ),
+            model_adapter=outline_research_adapter or HeuristicOutlineResearchModelAdapter(),
+        )
 
     def check_modeling_status(self, conn: sqlite3.Connection, *, book_id: str) -> ModelingStatus:
         checks: list[ModelingCheckItem] = []
@@ -404,7 +436,29 @@ class WriterLayeredGenerationOrchestrator:
 
         intent = self.build_continuation_intent(intent_payload)
         self.run_writer.write_json(run_id, "continuation_intent.json", intent)
-        book_plan = self.plan_book_continuation(conn, book_id=book_id, intent=intent)
+        research = self.prepare_outline_research(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            intent=intent,
+            intent_payload=intent_payload,
+            confirmed_new_character_names=[
+                str(item.get("display_name_hint") or "")
+                for item in (character_seed_payloads or [])
+                if isinstance(item, Mapping)
+            ],
+            budget=ResearchBudget(),
+        )
+        if research.sufficiency_decision.status in {"needs_user_input", "blocked"}:
+            return self._outline_research_wait_payload(run_id=run_id, research=research)
+
+        book_plan = self._plan_book_continuation_after_research(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            planning_notebook=research.planning_notebook,
+            sufficiency_decision=research.sufficiency_decision,
+        )
         world_pack = self.plan_world_expansion(
             conn,
             book_id=book_id,
@@ -412,11 +466,12 @@ class WriterLayeredGenerationOrchestrator:
             book_plan=book_plan,
             user_world_notes=user_world_notes,
         )
-        requirement_report = self.analyze_character_requirements(
+        requirement_report = self._analyze_character_requirements_after_research(
             conn,
             book_id=book_id,
             intent=intent,
             book_plan=book_plan,
+            character_resolutions=research.seed_packet.character_resolutions,
         )
         seeds = [
             CharacterSeedInput.from_dict(dict(item))
@@ -482,6 +537,283 @@ class WriterLayeredGenerationOrchestrator:
         if auto_confirm:
             self.confirm_freeze_a(run_id=run_id)
         return self._freeze_a_bundle_to_dict(bundle)
+
+    def prepare_outline_research(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        intent: ContinuationIntent,
+        intent_payload: Mapping[str, Any],
+        budget: ResearchBudget | None = None,
+        notebook: PlanningNotebook | None = None,
+        user_answers: Mapping[str, str] | None = None,
+        confirmed_new_character_names: Sequence[str] | None = None,
+    ) -> OutlineResearchRunResult:
+        mentions = self.character_mention_extractor.extract(intent_payload)
+        confirmations = {
+            name: True for name in (confirmed_new_character_names or []) if str(name).strip()
+        }
+        if isinstance(intent_payload.get("user_new_character_confirmations"), Mapping):
+            confirmations.update(
+                {
+                    str(key): bool(value)
+                    for key, value in (intent_payload.get("user_new_character_confirmations") or {}).items()
+                }
+            )
+        resolutions = self.character_mention_resolver.resolve(
+            conn,
+            book_id=book_id,
+            mentions=mentions,
+            user_new_character_confirmations=confirmations,
+        )
+        seed_packet = self.outline_seed_builder.build(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            mentions=mentions,
+            resolutions=resolutions,
+        )
+        result = self.outline_research_controller.run(
+            conn,
+            book_id=book_id,
+            seed_packet=seed_packet,
+            budget=budget or ResearchBudget(),
+            notebook=notebook,
+            user_answers=user_answers,
+        )
+        self._write_outline_research_artifacts(run_id=run_id, result=result)
+        return result
+
+    def continue_outline_research_with_user_input(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        user_answers: Mapping[str, str],
+        user_world_notes: str = "",
+        character_seed_payloads: list[Mapping[str, Any]] | None = None,
+        roster_hint_payloads: list[Mapping[str, Any]] | None = None,
+        auto_confirm: bool = False,
+    ) -> dict[str, Any]:
+        intent_payload = self._load_run_json(run_id, "continuation_intent.json")
+        intent = self._continuation_intent_from_dict(intent_payload)
+        seed_payload = self._load_run_json(run_id, "outline_seed_packet.json")
+        notebook_payload = self._load_run_json(run_id, "planning_notebook.json")
+        seed_packet = OutlineSeedPacket.from_dict(seed_payload)
+        notebook = PlanningNotebook.from_dict(notebook_payload)
+        research = self.outline_research_controller.run(
+            conn,
+            book_id=book_id,
+            seed_packet=seed_packet,
+            budget=ResearchBudget(max_rounds=1, max_requests_per_round=3, max_total_requests=3),
+            notebook=notebook,
+            user_answers=user_answers,
+        )
+        self._write_outline_research_artifacts(run_id=run_id, result=research)
+        if research.sufficiency_decision.status in {"needs_user_input", "blocked"}:
+            return self._outline_research_wait_payload(run_id=run_id, research=research)
+        return self._prepare_freeze_a_from_research(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            intent=intent,
+            research=research,
+            user_world_notes=user_world_notes,
+            character_seed_payloads=character_seed_payloads,
+            roster_hint_payloads=roster_hint_payloads,
+            auto_confirm=auto_confirm,
+        )
+
+    def _prepare_freeze_a_from_research(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        intent: ContinuationIntent,
+        research: OutlineResearchRunResult,
+        user_world_notes: str = "",
+        character_seed_payloads: list[Mapping[str, Any]] | None = None,
+        roster_hint_payloads: list[Mapping[str, Any]] | None = None,
+        auto_confirm: bool = False,
+    ) -> dict[str, Any]:
+        modeling_status = self.check_modeling_status(conn, book_id=book_id)
+        self.run_writer.write_json(run_id, "modeling_status.json", modeling_status)
+        if not modeling_status.ready_for_continuation:
+            raise ValueError(
+                "建模状态未满足续写要求: " + ", ".join(modeling_status.missing_modeling_steps)
+            )
+        book_plan = self._plan_book_continuation_after_research(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            planning_notebook=research.planning_notebook,
+            sufficiency_decision=research.sufficiency_decision,
+        )
+        world_pack = self.plan_world_expansion(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            book_plan=book_plan,
+            user_world_notes=user_world_notes,
+        )
+        requirement_report = self._analyze_character_requirements_after_research(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            book_plan=book_plan,
+            character_resolutions=research.seed_packet.character_resolutions,
+        )
+        seeds = [
+            CharacterSeedInput.from_dict(dict(item))
+            for item in (character_seed_payloads or [])
+            if isinstance(item, Mapping)
+        ]
+        roster_hints = [dict(item) for item in (roster_hint_payloads or []) if isinstance(item, Mapping)]
+        cast_request = self.build_character_cast_request(
+            requirement_report=requirement_report,
+            character_seeds=seeds,
+            roster_hints=roster_hints,
+        )
+        planned_character_profiles: list[PlannedCharacterProfile] = []
+        character_cast_plan: CharacterCastPlan | None = None
+        character_introduction_plan: CharacterIntroductionPlan | None = None
+        if cast_request is not None and cast_request.requirements:
+            planned_character_profiles, character_cast_plan, character_introduction_plan = self.plan_character_cast(
+                book_id=book_id,
+                intent=intent,
+                book_plan=book_plan,
+                world_pack=world_pack,
+                requirement_report=requirement_report,
+                cast_request=cast_request,
+                character_seeds=seeds,
+            )
+
+        self.run_writer.write_json(run_id, "book_continuation_plan.json", book_plan)
+        self.run_writer.write_json(run_id, "world_expansion_pack.json", world_pack)
+        self.run_writer.write_json(run_id, "character_requirement_report.json", requirement_report)
+        if cast_request is not None:
+            self.run_writer.write_json(run_id, "character_cast_request.json", cast_request)
+        if planned_character_profiles:
+            self.run_writer.write_json(run_id, "planned_character_profiles.json", planned_character_profiles)
+        if character_cast_plan is not None:
+            self.run_writer.write_json(run_id, "character_cast_plan.json", character_cast_plan)
+        if character_introduction_plan is not None:
+            self.run_writer.write_json(run_id, "character_introduction_plan.json", character_introduction_plan)
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        checkpoint = PlanningReviewCheckpoint(
+            review_stage="freeze_a_review",
+            status="needs_review",
+            artifact_name=REVIEW_BUNDLE_NAME,
+            artifact_path=str(run_dir / "book_continuation_plan.json"),
+            message="请审阅全书规划、世界观补全与人物补充文件，确认后进入 Freeze A。",
+            next_freeze_stage="freeze_a",
+        )
+        self.run_writer.write_json(run_id, "freeze_a_review_checkpoint.json", checkpoint)
+        bundle = FreezeABundle(
+            modeling_status=modeling_status,
+            continuation_intent=intent,
+            book_continuation_plan=book_plan,
+            world_expansion_pack=world_pack,
+            character_requirement_report=requirement_report,
+            character_cast_request=cast_request,
+            planned_character_profiles=planned_character_profiles,
+            character_cast_plan=character_cast_plan,
+            character_introduction_plan=character_introduction_plan,
+        )
+        if auto_confirm:
+            self.confirm_freeze_a(run_id=run_id)
+        return self._freeze_a_bundle_to_dict(bundle)
+
+    def _plan_book_continuation_after_research(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        intent: ContinuationIntent,
+        planning_notebook: PlanningNotebook,
+        sufficiency_decision: SufficiencyDecision,
+    ) -> BookContinuationPlan:
+        try:
+            return self.plan_book_continuation(
+                conn,
+                book_id=book_id,
+                intent=intent,
+                planning_notebook=planning_notebook,
+                sufficiency_decision=sufficiency_decision,
+            )
+        except TypeError:
+            return self.plan_book_continuation(conn, book_id=book_id, intent=intent)
+
+    def _analyze_character_requirements_after_research(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        intent: ContinuationIntent,
+        book_plan: BookContinuationPlan,
+        character_resolutions: Sequence[Any],
+    ) -> CharacterRequirementReport:
+        try:
+            return self.analyze_character_requirements(
+                conn,
+                book_id=book_id,
+                intent=intent,
+                book_plan=book_plan,
+                character_resolutions=character_resolutions,
+            )
+        except TypeError:
+            return self.analyze_character_requirements(
+                conn,
+                book_id=book_id,
+                intent=intent,
+                book_plan=book_plan,
+            )
+
+    def _write_outline_research_artifacts(self, *, run_id: str, result: OutlineResearchRunResult) -> None:
+        self.run_writer.write_json(run_id, "outline_seed_packet.json", result.seed_packet)
+        self.run_writer.write_json(
+            run_id,
+            "extracted_character_mentions.json",
+            {"mentions": [item.to_dict() for item in result.seed_packet.extracted_character_mentions]},
+        )
+        self.run_writer.write_json(
+            run_id,
+            "character_resolution.json",
+            {"resolutions": [item.to_dict() for item in result.seed_packet.character_resolutions]},
+        )
+        self.run_writer.write_json(run_id, "outline_research_trace.json", result.trace)
+        self.run_writer.write_json(run_id, "planning_notebook.json", result.planning_notebook)
+        self.run_writer.write_json(run_id, "sufficiency_decision.json", result.sufficiency_decision)
+        self.run_writer.write_json(run_id, "generated_outline.json", dict(result.generated_outline))
+
+    def _outline_research_wait_payload(self, *, run_id: str, research: OutlineResearchRunResult) -> dict[str, Any]:
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        stage = (
+            "outline_research_user_input"
+            if research.sufficiency_decision.status == "needs_user_input"
+            else "outline_research_blocked"
+        )
+        checkpoint = PlanningReviewCheckpoint(
+            review_stage=stage,
+            status=research.sufficiency_decision.status,
+            artifact_name="sufficiency_decision.json",
+            artifact_path=str(run_dir / "sufficiency_decision.json"),
+            message="大纲研究需要补充信息后才能继续。" if stage == "outline_research_user_input" else "前置建模不足，暂不生成正式全书规划。",
+            next_freeze_stage="freeze_a",
+        )
+        self.run_writer.write_json(run_id, "outline_research_checkpoint.json", checkpoint)
+        return {
+            "status": research.sufficiency_decision.status,
+            "stage": stage,
+            "checkpoint": checkpoint.to_dict(),
+            "outline_seed_packet": research.seed_packet.to_dict(),
+            "planning_notebook": research.planning_notebook.to_dict(),
+            "sufficiency_decision": research.sufficiency_decision.to_dict(),
+        }
 
     def confirm_freeze_a(self, *, run_id: str, artifact_overrides: Mapping[str, str] | None = None) -> dict[str, str]:
         artifact_names = [
@@ -720,11 +1052,24 @@ class WriterLayeredGenerationOrchestrator:
         *,
         book_id: str,
         intent: ContinuationIntent,
+        planning_notebook: PlanningNotebook | None = None,
+        sufficiency_decision: SufficiencyDecision | None = None,
     ) -> BookContinuationPlan:
         outline_path = self._get_required_asset_path(conn, book_id=book_id, field_name="outline_markdown_path")
         world_summary_path = self._get_required_asset_path(conn, book_id=book_id, field_name="world_summary_path")
-        outline_markdown = outline_path.read_text(encoding="utf-8", errors="replace")
-        world_summary_markdown = world_summary_path.read_text(encoding="utf-8", errors="replace")
+        if planning_notebook is not None and sufficiency_decision is not None:
+            outline_markdown = json.dumps(
+                {
+                    "planning_notebook": planning_notebook.to_dict(),
+                    "sufficiency_decision": sufficiency_decision.to_dict(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            world_summary_markdown = "World details were accessed through Outline Research Loop evidence only."
+        else:
+            outline_markdown = outline_path.read_text(encoding="utf-8", errors="replace")
+            world_summary_markdown = world_summary_path.read_text(encoding="utf-8", errors="replace")
         system_prompt, user_prompt = build_book_continuation_plan_prompt(
             book_id=book_id,
             continuation_intent=intent.to_dict(),
@@ -750,6 +1095,25 @@ class WriterLayeredGenerationOrchestrator:
             )
         payload.setdefault("plan_id", f"{book_id}-book-plan")
         payload.setdefault("book_id", book_id)
+        if sufficiency_decision is not None:
+            existing_sources = [item for item in (payload.get("sources") or []) if isinstance(item, dict)]
+            existing_sources.append(
+                {
+                    "type": "outline_research",
+                    "path": "planning_notebook.json",
+                    "evidence_level": "structured_state",
+                    "snippet": sufficiency_decision.status,
+                    "note": "Book plan generated after Outline Research Loop.",
+                }
+            )
+            payload["sources"] = existing_sources
+            if sufficiency_decision.status == "proceed_with_assumptions":
+                payload["assumptions"] = [item.to_dict() for item in sufficiency_decision.assumptions]
+                open_questions = [str(item) for item in (payload.get("open_questions") or [])]
+                for gap in sufficiency_decision.optional_gaps:
+                    if gap not in open_questions:
+                        open_questions.append(gap)
+                payload["open_questions"] = open_questions
         return self._book_plan_from_dict(payload)
 
     def plan_world_expansion(
@@ -800,8 +1164,12 @@ class WriterLayeredGenerationOrchestrator:
         book_id: str,
         intent: ContinuationIntent,
         book_plan: BookContinuationPlan,
+        character_resolutions: Sequence[Any] | None = None,
     ) -> CharacterRequirementReport:
-        rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
+        try:
+            rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
+        except sqlite3.OperationalError:
+            rows = []
         known_name_map: dict[str, str] = {}
         for row in rows:
             canonical = _normalize_text(row["canonical_name"])
@@ -824,13 +1192,22 @@ class WriterLayeredGenerationOrchestrator:
             ),
         ]
         cleaned_names = self.mention_service.clean_names(raw_names)
+        unconfirmed_missing_names: set[str] = set()
+        confirmed_missing_names: set[str] = set()
+        for resolution in character_resolutions or []:
+            status = getattr(resolution, "status", "")
+            name = getattr(resolution, "mention_text", "")
+            if status == "missing" and getattr(resolution, "confirmed_new_character", False):
+                confirmed_missing_names.add(str(name))
+            elif status in {"missing", "ambiguous"}:
+                unconfirmed_missing_names.add(str(name))
         named_existing: list[ResolvedCharacterRef] = []
         named_new: list[NamedNewCharacter] = []
         for name in cleaned_names:
             resolved = known_name_map.get(name)
             if resolved:
                 named_existing.append(ResolvedCharacterRef(name=name, resolved_to=resolved))
-            else:
+            elif name not in unconfirmed_missing_names or name in confirmed_missing_names or character_resolutions is None:
                 named_new.append(
                     NamedNewCharacter(
                         name=name,
@@ -1624,11 +2001,32 @@ class WriterLayeredGenerationOrchestrator:
             relationship_guardrails=[str(item) for item in (data.get("relationship_guardrails") or [])],
             must_preserve=[str(item) for item in (data.get("must_preserve") or [])],
             open_questions=[str(item) for item in (data.get("open_questions") or [])],
+            assumptions=[
+                PlanningFact.from_dict(item)
+                for item in (data.get("assumptions") or [])
+                if isinstance(item, Mapping)
+            ],
             evidence=[
                 self._evidence_item_from_dict(item) for item in (data.get("evidence") or []) if isinstance(item, Mapping)
             ],
             sources=[
                 self._traceable_source_from_dict(item) for item in (data.get("sources") or []) if isinstance(item, Mapping)
+            ],
+        )
+
+    def _continuation_intent_from_dict(self, data: Mapping[str, Any]) -> ContinuationIntent:
+        return ContinuationIntent(
+            major_characters=[str(item) for item in (data.get("major_characters") or [])],
+            desired_actions=[str(item) for item in (data.get("desired_actions") or [])],
+            avoidances=[str(item) for item in (data.get("avoidances") or [])],
+            preferred_outcome=str(data.get("preferred_outcome") or ""),
+            notes=str(data.get("notes") or ""),
+            story_scale=dict(data.get("story_scale") or {}),
+            climax_plan=dict(data.get("climax_plan") or {}),
+            sources=[
+                self._traceable_source_from_dict(item)
+                for item in (data.get("sources") or [])
+                if isinstance(item, Mapping)
             ],
         )
 

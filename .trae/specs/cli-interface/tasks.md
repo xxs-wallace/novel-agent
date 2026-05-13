@@ -4,7 +4,7 @@
 
 - 产品级流程、入口类型与用户可见状态文案，以 [`../spec.md`](../spec.md) 为准。
 - CLI / TUI 信息架构、命令面板、状态侧栏、artifact 审阅和 read / Writer 合并入口，以 [`design.md`](design.md) 为准。
-- Writer 内部状态含义与确认点，以 [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md) 的 `Writer 用户可见状态词典` 为准。
+- Writer 内部状态含义与确认点，以 [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md) 为准。
 - read pipeline 的业务实现仍以现有 segmentation / close-read runner 为准；本任务只做统一入口与交互层，不重写粗读/精读业务逻辑。
 
 ## Status Legend
@@ -306,7 +306,7 @@
   - [x] 失败时展示失败 doc 数、错误摘要和可重试动作
 
 - [x] Task 29: 将 Writer workflow 接入 Textual 审阅循环（待新增）
-  - `来源`: [`design.md`](design.md) 的 `Writer 交互设计入口`, [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md) 的 `Writer 用户可见状态词典`
+  - `来源`: [`design.md`](design.md) 的 `Writer 交互设计入口`, [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md)
   - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/cli/`
   - [x] 支持开始新 Writer run
@@ -373,8 +373,8 @@
 ## Group I: Scoped Artifact Revision
 
 - [x] Task 35: 定义 Scoped Artifact Revision 的 workflow contract 与权限边界（待新增）
-  - `来源`: [`design.md`](design.md) 的 `Scoped Artifact Revision`, [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md) 的 `Scoped Artifact Revision`
-  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md), [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md), [`../writer-agent-layered-generation/designs/review-writeback.design.md`](../writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `来源`: [`design.md`](design.md) 的 `Scoped Artifact Revision`, `../writer-agent-layered-generation/design.md` 的 `Scoped Artifact Revision`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md), [`../writer-agent-layered-generation/specs/runtime-boundaries.spec.md`](../writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 定义 `ScopedArtifactRevisionRequest`，字段至少包含 `request_id`、`run_id`、`target_stage`、`target_artifact_type`、`target_artifact_path`、`user_feedback`、`scope`、`created_at`
   - [x] 定义 `ScopedArtifactRevisionResult`，字段至少包含 `revision_id`、`request_id`、`status`、`change_summary`、`revised_artifact` 或 `patch`、`validation`、`created_at`
@@ -385,8 +385,8 @@
   - [x] 增加单元测试，覆盖合法 stage、非法 stage、非当前 artifact、越权 target、缺失反馈、schema 字段缺失
 
 - [x] Task 36: 在 Writer workflow / orchestration 层实现受控修订执行链路（待新增）
-  - `来源`: [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md) 的 `Scoped Artifact Revision`
-  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md), [`../writer-agent-layered-generation/designs/review-writeback.design.md`](../writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `来源`: `../writer-agent-layered-generation/design.md` 的 `Scoped Artifact Revision`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md), [`../writer-agent-layered-generation/specs/runtime-boundaries.spec.md`](../writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/runs/writer.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [x] 新增 workflow action，例如 `request_scoped_artifact_revision(...)` 或等价 facade 方法
   - [x] 由 orchestration 层根据 target stage 选择白名单上下文并组装 LLM 输入；CLI 不得传入完整 prompt
@@ -412,8 +412,8 @@
   - [x] 增加组件测试，覆盖按钮文案、反馈输入、facade 调用参数、diff 展示、校验失败展示和“不自动确认”
 
 - [x] Task 38: Scoped Artifact Revision 集成测试与安全回归（待新增）
-  - `来源`: [`design.md`](design.md) 的 `Scoped Artifact Revision`, [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md), [`../writer-agent-layered-generation/designs/review-writeback.design.md`](../writer-agent-layered-generation/designs/review-writeback.design.md)
-  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md), [`../writer-agent-layered-generation/designs/workflow-state-machine.design.md`](../writer-agent-layered-generation/designs/workflow-state-machine.design.md), [`../writer-agent-layered-generation/designs/review-writeback.design.md`](../writer-agent-layered-generation/designs/review-writeback.design.md)
+  - `来源`: [`design.md`](design.md) 的 `Scoped Artifact Revision`, `../writer-agent-layered-generation/design.md`, `../writer-agent-layered-generation/specs/runtime-boundaries.spec.md`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md), [`../writer-agent-layered-generation/specs/runtime-boundaries.spec.md`](../writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_cli_interface.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/cli/`
   - [x] 覆盖 `batch_review -> 按反馈修改 -> diff -> 接受候选 -> 仍停留 batch_review -> confirm -> freeze_b`
   - [x] 覆盖 `chapter_review -> 按反馈修改 -> 下游长度计划和正文失效`
@@ -477,9 +477,8 @@
 
 目标：为 Scoped Artifact Revision 建立 workflow contract、权限白名单和 scope guard。请先阅读：
 - .trae/specs/cli-interface/design.md 的 Scoped Artifact Revision
-- .trae/specs/writer-agent-layered-generation/design.md 的 Writer 用户可见状态词典
-- .trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md 的 Scoped Artifact Revision
-- .trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md 的 Feedback Routing And Scoped Revision
+- .trae/specs/writer-agent-layered-generation/design.md
+- .trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md
 
 实现要求：
 - 定义 ScopedArtifactRevisionRequest / ScopedArtifactRevisionResult 或等价 Python 类型。
@@ -521,7 +520,7 @@
 
 目标：在 CLI / Textual 审阅界面接入“按我的反馈修改”，但保持 CLI 是薄交互层。请先阅读：
 - .trae/specs/cli-interface/design.md 的 Artifact 审阅、Scoped Artifact Revision、阻塞决策面板、技术架构建议
-- .trae/specs/writer-agent-layered-generation/design.md 的用户可见状态词典
+- .trae/specs/writer-agent-layered-generation/design.md 的 Writer 用户可见流程与状态边界
 
 实现要求：
 - 在规划类审阅点的 DecisionPanelWidget 中增加“按我的反馈修改”和“手动编辑”。
@@ -543,8 +542,8 @@
 
 目标：为 Scoped Artifact Revision 编写集成测试和安全回归测试，验证 Task 35-37 的实现确实符合设计。请先阅读：
 - .trae/specs/cli-interface/design.md 的 Scoped Artifact Revision
-- .trae/specs/writer-agent-layered-generation/designs/workflow-state-machine.design.md 的 Scoped Artifact Revision
-- .trae/specs/writer-agent-layered-generation/designs/review-writeback.design.md 的 Feedback Routing And Scoped Revision
+- .trae/specs/writer-agent-layered-generation/design.md
+- .trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md
 - .trae/specs/cli-interface/tasks.md 的 Task 35-37
 
 测试要求：
@@ -650,3 +649,85 @@
 - Task 44 depends on Task 30, Task 37, Task 43
 - Task 45 depends on Task 31, Task 43
 - Task 46 depends on Task 43
+
+## Group L: Writer Outline Research Loop TUI 接入
+
+- [ ] Task 47: 更新 Writer 启动向导，支持故事概述与自动人物提及抽取
+  - `来源`: [`design.md`](design.md) 的 `Writer 输入表单到 JSON 参数的映射`、`Writer 大纲研究循环交互映射`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/cli/forms.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_cli_textual_components.py`
+  - [ ] 将 Writer 启动向导中的“主要角色必填”降级为可选参考，不再作为进入规划硬前置
+  - [ ] 新增“故事概述”多行输入，作为人物提及抽取和 OutlineSeedPacket 的主要用户输入
+  - [ ] 提交 `/writer` 后调用 facade 的人物提及抽取 / research 准备接口，而不是直接进入空 payload Writer
+  - [ ] 展示自动拆分出的 desired_actions、avoidances、notes 和 extracted character mentions
+  - [ ] 用户可在进入 research 前编辑拆分结果
+  - [ ] 增加组件测试覆盖自然语言概述 -> WriterIntentWizard ViewModel -> facade 参数
+
+- [ ] Task 48: 实现 CharacterMentionResolutionPanel
+  - `来源`: [`design.md`](design.md) 的 `Writer 大纲研究循环交互映射`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_cli_textual_components.py`
+  - [ ] 展示 `resolved` 人物 chips，包含姓名、角色标签和来源片段
+  - [ ] 展示 `ambiguous` 人物，允许用户选择匹配到哪个既有人物，或确认这是新人物
+  - [ ] 展示 `missing` 人物，询问是否新增人物
+  - [ ] 用户确认新增后打开最小 `CharacterSeedInput` 表单
+  - [ ] 用户拒绝新增后，该人名不得进入 `CharacterCastPlan`
+  - [ ] 所有确认动作只调用 facade，不由 TUI 直接写 Memory 或 artifact
+  - [ ] 增加测试覆盖 resolved / ambiguous / missing 三类交互和参数
+
+- [ ] Task 49: 实现 OutlineResearchPanel 与 research trace 展示
+  - `来源`: [`design.md`](design.md) 的 `Writer 大纲研究循环交互映射`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/cli/artifacts.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/tests/test_cli_textual_components.py`
+  - [ ] 为 `outline_seed_packet.json` 提供摘要视图
+  - [ ] 为 `outline_research_trace.json` 提供逐轮 request / result / budget 摘要
+  - [ ] 为 `planning_notebook.json` 提供 confirmed facts、constraints、candidate plot moves、blocked plot moves、open questions 摘要
+  - [ ] 默认只展示 evidence 摘要和来源数量，不刷完整上下文
+  - [ ] 支持 `/writer-research` 打开当前 research 面板
+  - [ ] 支持 `/open research-trace` 与 `/open planning-notebook`
+  - [ ] 增加 snapshot / 组件测试覆盖 trace 摘要、预算显示和长内容折叠
+
+- [ ] Task 50: 实现 SufficiencyDecisionPanel 与用户补充知识输入
+  - `来源`: [`design.md`](design.md) 的 `阻塞决策面板`、`Writer 大纲研究循环交互映射`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/cli/decisions.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_cli_textual_components.py`
+  - [ ] `needs_user_input` 时展示 known_enough、blocking_gaps、optional_gaps 和 1-3 个具体问题
+  - [ ] 提供“逐条回答 / 查看研究记录 / 返回修改故事概述 / 稍后继续”
+  - [ ] 用户回答通过 `/writer-answer` 或决策面板提交给 facade，作为 `user_authorized` evidence
+  - [ ] `proceed_with_assumptions` 时展示 assumptions、remaining_risks，并要求二次确认
+  - [ ] 高风险缺口不得提供静默跳过；只能回答问题或返回上游修改
+  - [ ] `blocked` 时展示 required_actions，并提供跳转建模状态、运行精读、稍后继续
+  - [ ] 增加测试覆盖三种 sufficiency status、用户回答提交、带假设继续二次确认、blocked 恢复建议
+
+- [ ] Task 51: 更新 CommandRouter 与命令面板，接入 Writer research 命令
+  - `来源`: [`design.md`](design.md) 的 `单一入口与模式切换`、`命令面板与快捷键`
+  - `建议只读`: [`design.md`](design.md)
+  - `建议只关注代码文件`: `novel_agent/app/cli/router.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/tests/test_cli_textual_components.py`, `novel_agent/tests/test_cli_interface.py`
+  - [ ] 新增 `/writer-research`
+  - [ ] 新增 `/writer-answer`
+  - [ ] 新增 `/writer-skip-research`，仅 debug / 降级上下文可用
+  - [ ] 新增 `/open research-trace`
+  - [ ] 新增 `/open planning-notebook`
+  - [ ] 命令面板新增 “Writer Research” 分组
+  - [ ] 当前状态不可执行的 research 命令应隐藏或置灰，并说明原因
+  - [ ] 未知或不可用命令必须保留用户原始输入并展示恢复建议
+  - [ ] 增加命令路由和上下文过滤测试
+
+- [ ] Task 52: 将 Writer research 测试接入 CLI TUI smoke
+  - `来源`: [`design.md`](design.md), [`../writer-agent-layered-generation/tasks.md`](../writer-agent-layered-generation/tasks.md) 的 `Group I`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/tests/test_cli_textual_components.py`, `novel_agent/tests/test_cli_interface.py`
+  - [ ] 使用 fake facade 覆盖 `/writer` -> 故事概述 -> 人物提及确认 -> research 面板
+  - [ ] 覆盖 `needs_user_input` -> 用户回答 -> 继续 research / 进入大纲草案
+  - [ ] 覆盖 `proceed_with_assumptions` -> 二次确认 -> 大纲草案 assumptions 可见
+  - [ ] 覆盖 `blocked` -> required_actions 和跳转建模状态
+  - [ ] 覆盖 `/writer-research`、`/writer-answer`、`/open research-trace`
+  - [ ] 断言默认测试不触发真实 LLM，不访问互联网，不直接查询 SQLite
+  - [ ] 断言主界面不显示内部 status 或完整 prompt，只展示用户文案和摘要
+
+- Task 47 depends on Task 43
+- Task 48 depends on Task 47
+- Task 49 depends on Task 47
+- Task 50 depends on Task 49
+- Task 51 depends on Task 23, Task 24, Task 49, Task 50
+- Task 52 depends on Task 47, Task 48, Task 49, Task 50, Task 51

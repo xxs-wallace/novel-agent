@@ -106,9 +106,11 @@ novel_agent/tests/longzu_32kb.txt
 ```text
 novel_agent/tests/longzu_96kb.txt
 novel_agent/tests/longzu_120kb.txt
+novel_agent/tests/longzu_240kb.txt
 ```
 
 这些文件从 `/Users/luliao/longzu.txt` 按对应字节上限截取，并回退到最后一个换行符。`longzu_120kb.txt` 用于在 96KB 仍偏短时，把 prefix 建模和 held-out reference truth 推到更靠后的剧情位置。
+`longzu_240kb.txt` 用于 Outline Research Loop 的 author brief reconstruction smoke：前 120KB 作为 prefix modeling snapshot，后 120KB 作为用户授权剧情概述和 reference-only 对照来源。
 
 为了控制 DeepSeek token 成本，`AgenticSmokeBenchmarkService` 支持 modeling cache。缓存边界只覆盖 Writer 之前的真实建模层：
 
@@ -226,6 +228,225 @@ runs/benchmarks/<run_id>/
 - 正文通过 continuity 后写入 `generation_review_decision=accepted`，再走 `approve_writeback` 写回 Writer memory DB。
 - 下一 step 从写回后的 writer DB 重新读取 recent synopses / character docs，验证连续生成上下文是否滚动。
 
+### Outline Research Author Brief Reconstruction Smoke
+
+Outline Research Loop 需要一条比普通 continuation smoke 更直接的真实模型验收路径。该 smoke 的目标不是让 Writer 盲猜后续剧情，而是模拟作者已经给出一段高信息密度但不完整的剧情概述，验证 Writer 是否能：
+
+- 从用户概述中抽取人物提及
+- 通过约定好的 tool call 查询前文已有角色、世界观概念和历史故事细节
+- 把新增人物与既有人物区分开
+- 基于多轮 research 生成接近 reference outline 的高密度大纲
+
+该模式命名为 **Author Brief Reconstruction Smoke**。
+
+```text
+~/longzu.txt
+  -> cut longzu_240kb.txt
+  -> split prefix_120kb + future_120kb
+
+prefix_120kb
+  -> real rough-read
+  -> real close-read
+  -> real Creative KB / Memory artifacts
+  -> save prefix modeling snapshot
+  -> build ChapterSummaryIndex / HistoricalOutlineEventIndex
+
+future_120kb
+  -> real close-read
+  -> reference_future_outline.json
+  -> reference_character_set.json
+  -> summarize close-read chapter synopses into 500-1000 char user_story_overview
+
+Writer smoke
+  -> user_story_overview + prefix modeling snapshot
+  -> ExtractedCharacterMentions
+  -> CharacterMentionResolution through tool call / resolver
+  -> Outline Research Loop
+  -> generated_outline.json
+  -> OutlineResearchReviewer
+```
+
+#### Input Boundary
+
+Author brief smoke 仍必须遵守防泄漏边界，但它和 blind continuation smoke 的授权输入不同：
+
+- `prefix_facts`: 只来自前 120KB 的粗读、精读、Creative KB、Memory、世界观和历史大纲索引快照。
+- `authorized_user_input`: 由后 120KB close-read 章梗概浓缩出的 500-1000 字 `user_story_overview`。它模拟用户给 Writer 的原始写作意图，可以进入 Writer。
+- `reference_only`: 后 120KB 的详细 close-read 分章梗概、reference outline、reference character set 和原文，只能进入 Reviewer、泄漏审计和人工复核，不能进入 Writer prompt、Context Broker 或 tool call resolver。
+
+因此，后 120KB 的浓缩概述不是泄漏，它是用户授权输入；后 120KB 的详细 outline 和人物全集才是隐藏答案。
+
+#### Modeling Cache
+
+该 smoke SHOULD 复用 `AgenticSmokeBenchmarkService` 的 modeling cache，但 cache key 必须包含：
+
+- source path 或 fixture id
+- `prefix_chars=120KB`
+- `future_chars=120KB`
+- rough-read / close-read 参数
+- Creative KB 参数
+- author brief summarizer prompt version
+
+推荐缓存边界：
+
+```text
+longzu_240kb + window params
+  -> prefix_modeling_cache/
+       prefix_rough_read
+       prefix_close_read
+       creative_kb_artifacts
+       prefix_story_outline
+       prefix_character_snapshot
+       chapter_summary_index
+       historical_outline_event_index
+  -> future_reference_cache/
+       future_close_read
+       reference_future_outline.json
+       reference_character_set.json
+       user_story_overview.txt
+```
+
+cache hit 后仍必须真实重跑：
+
+- Writer Outline Research Loop
+- CharacterMentionResolution
+- generated outline generation
+- OutlineResearchReviewer
+
+因为该 smoke 主要验证模型是否能主动研究、选择 tool call、判断信息是否足够，并生成大纲。
+
+#### Character Evaluation
+
+`reference_character_set.json` 应至少区分：
+
+```json
+{
+  "existing_characters": [
+    {
+      "name": "string",
+      "prefix_evidence": ["source ids from prefix_120kb"],
+      "future_evidence": ["source ids from future_120kb"]
+    }
+  ],
+  "new_characters": [
+    {
+      "name": "string",
+      "future_evidence": ["source ids from future_120kb"]
+    }
+  ]
+}
+```
+
+Writer 不得直接读取该 reference set。Reviewer 用它检查：
+
+- `ExtractedCharacterMentions` 是否覆盖 user_story_overview 中的关键人物名
+- 前 120KB 已出现人物是否通过 `character_profile` / Character Memory resolver 对齐到既有人物
+- 后 120KB 新人物是否进入 `missing` / `new character seed` 流程，而不是被错误绑定到既有人物
+- 未出现在授权输入或 prefix facts 中的人物是否被模型凭空加入大纲
+
+#### OutlineResearchReviewer
+
+Author brief smoke 增加第三个 Reviewer：`OutlineResearchReviewer`。它读取：
+
+- prefix story outline / recent story summaries
+- `user_story_overview.txt`
+- `outline_seed_packet.json`
+- `outline_research_trace.json`
+- `planning_notebook.json`
+- `generated_outline.json`
+- `reference_future_outline.json`
+- `reference_character_set.json`
+
+它不得把 reference-only 材料反馈给 Writer。最小报告格式：
+
+```json
+{
+  "decision": "pass | borderline | fail",
+  "score": 0.0,
+  "summary": "string",
+  "checks": {
+    "outline_similarity": "pass | borderline | fail",
+    "plot_node_coverage": "pass | borderline | fail",
+    "character_extraction": "pass | borderline | fail",
+    "existing_character_resolution": "pass | borderline | fail",
+    "new_character_detection": "pass | borderline | fail",
+    "research_tool_usefulness": "pass | borderline | fail",
+    "leakage_boundary": "pass | suspicious | leaked"
+  },
+  "scores": {
+    "outline_similarity_score": 0,
+    "plot_node_coverage_score": 0,
+    "character_extraction_recall": 0,
+    "existing_character_resolution_score": 0,
+    "new_character_detection_score": 0,
+    "research_tool_usefulness_score": 0
+  },
+  "major_failures": []
+}
+```
+
+评分重点：
+
+- 大纲是否覆盖 reference outline 的主要剧情节点、人物行动、场景变化和结果
+- 大纲是否使用 prefix facts 中已有的关系状态、世界规则和历史事件
+- research trace 中的 tool call 是否有实际贡献，而不是只产生空查询或重复查询
+- sufficiency decision 是否合理，是否过早认为信息足够
+- 是否把 assumptions 标注为 assumptions，而不是伪装成 confirmed facts
+
+#### Artifacts
+
+Author brief smoke 的产物 SHOULD 落盘到：
+
+```text
+runs/benchmarks/<run_id>/outline_research_author_brief/
+  prefix_source.txt
+  future_source.txt
+  user_story_overview.txt
+  prefix_modeling_snapshot.json
+  chapter_summary_index.json
+  historical_outline_event_index.json
+  reference_future_outline.json
+  reference_character_set.json
+  outline_seed_packet.json
+  extracted_character_mentions.json
+  character_resolution.json
+  outline_research_trace.json
+  planning_notebook.json
+  sufficiency_decision.json
+  generated_outline.json
+  outline_research_reviewer_prompt.json
+  outline_research_reviewer_report.json
+  leakage_audit.json
+  summary.json
+```
+
+#### Entrypoints
+
+独立脚本入口 SHOULD 复用 `run_single_sample_smoke.py`：
+
+```bash
+PYTHONUNBUFFERED=1 .venv/bin/python -m novel_agent.app.run_single_sample_smoke \
+  --source novel_agent/tests/longzu_240kb.txt \
+  --runs-dir runs/benchmarks/outline_research_longzu_240kb \
+  --use-real-model \
+  --api-key "$DEEPSEEK_API_KEY" \
+  --prefix-min-chars 120000 \
+  --reference-min-chars 120000 \
+  --max-read-kb 240 \
+  --max-close-batches 48 \
+  --enable-outline-research-loop \
+  --outline-research-author-brief \
+  --reuse-modeling-cache
+```
+
+统一 CLI / TUI 中 SHOULD 暴露：
+
+```text
+/benchmark longzu-240kb --outline-research --author-brief
+```
+
+短调试路径 MAY 使用更小窗口，但不得替代 240KB author brief smoke 的真实回归意义。
+
 ### Reusable Components
 
 为了让 benchmark 能在 CLI 中使用，同时避免把 UI 逻辑塞进 runner，建议拆分为以下服务：
@@ -235,16 +456,19 @@ AgenticSmokeBenchmarkService
   - split source into prefix source + held-out reference truth
   - run real rough read / close read / Creative KB
   - run real Writer planning workflow
+  - run real Outline Research Loop when enabled
   - build or locate target story outline for the benchmark window
   - extract generated story synopsis from Writer ChapterPackage / ChapterBrief
   - build reference story synopsis from held-out reference truth
   - execute Writer frozen chapter and extract generated draft
   - run LLM Reviewers for synopsis and expansion layers
+  - run OutlineResearchReviewer for author brief reconstruction smoke
 
 SmokeReviewerService
   - run JSON-only LLM review for a specific benchmark layer
   - compare generated synopsis with reference synopsis
   - compare generated draft with reference synopsis and held-out reference truth
+  - compare generated outline / research trace with reference future outline
 
 SmokeBenchmarkSummaryPresenter
   - render_cli_summary(run_result, reviewer_report)

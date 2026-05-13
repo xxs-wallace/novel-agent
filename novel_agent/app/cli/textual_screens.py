@@ -350,6 +350,8 @@ class WorkbenchScreen(Screen[None]):
                 sample_path=options["sample_path"],  # type: ignore[arg-type]
                 db_path=options["db_path"],  # type: ignore[arg-type]
                 use_real_model=bool(options["use_real_model"]),
+                enable_outline_research_loop=bool(options["enable_outline_research_loop"]),
+                outline_research_author_brief=bool(options["outline_research_author_brief"]),
             )
             return
         if invocation.handler_name == "run_creative_kb_benchmark":
@@ -620,6 +622,8 @@ class WorkbenchScreen(Screen[None]):
             "sample_path": None,
             "db_path": None,
             "use_real_model": True,
+            "enable_outline_research_loop": False,
+            "outline_research_author_brief": False,
         }
         index = 0
         while index < len(args):
@@ -648,6 +652,15 @@ class WorkbenchScreen(Screen[None]):
                 continue
             if token == "--use-real-model":
                 options["use_real_model"] = True
+                index += 1
+                continue
+            if token == "--outline-research":
+                options["enable_outline_research_loop"] = True
+                index += 1
+                continue
+            if token == "--author-brief":
+                options["outline_research_author_brief"] = True
+                options["enable_outline_research_loop"] = True
                 index += 1
                 continue
             if token.startswith("--source="):
@@ -680,7 +693,7 @@ class WorkbenchScreen(Screen[None]):
 
     @staticmethod
     def _benchmark_usage() -> str:
-        return "/benchmark longzu-32kb | /benchmark --source novel_agent/tests/longzu_32kb.txt"
+        return "/benchmark longzu-32kb | /benchmark longzu-240kb --outline-research --author-brief | /benchmark --source novel_agent/tests/longzu_32kb.txt"
 
     def _parse_creative_kb_benchmark_options(self, args: tuple[str, ...]) -> dict[str, object]:
         options: dict[str, object] = {
@@ -802,6 +815,8 @@ class WorkbenchScreen(Screen[None]):
         sample_path: Path | None,
         db_path: Path | None,
         use_real_model: bool,
+        enable_outline_research_loop: bool = False,
+        outline_research_author_brief: bool = False,
     ) -> None:
         self._start_worker(
             "MVP smoke benchmark",
@@ -811,6 +826,8 @@ class WorkbenchScreen(Screen[None]):
                 sample_path=sample_path,
                 db_path=db_path,
                 use_real_model=use_real_model,
+                enable_outline_research_loop=enable_outline_research_loop,
+                outline_research_author_brief=outline_research_author_brief,
                 api_key=os.getenv("DEEPSEEK_API_KEY", "unused"),
             ),
         )

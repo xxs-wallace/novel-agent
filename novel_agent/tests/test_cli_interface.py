@@ -486,6 +486,28 @@ def test_tui_app_benchmark_command_renders_reviewer_summary(tmp_path: Path) -> N
     assert "产物目录" in rendered
 
 
+def test_tui_app_benchmark_outline_research_author_brief_flags(tmp_path: Path) -> None:
+    class _FacadeWithOutlineBenchmark:
+        def run_smoke_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["target"] == "longzu-240kb"
+            assert kwargs["enable_outline_research_loop"] is True
+            assert kwargs["outline_research_author_brief"] is True
+            return {
+                "summary_text": (
+                    "OutlineResearchReviewer：通过 (pass, 0.80)\n"
+                    "artifact_dir：/tmp/outline_research_author_brief\n"
+                    "leakage_audit：/tmp/leakage_audit.json"
+                )
+            }
+
+    app = TuiApp(repo_root=tmp_path, facade=_FacadeWithOutlineBenchmark())  # type: ignore[arg-type]
+
+    rendered = app.dispatch_command("/benchmark longzu-240kb --outline-research --author-brief")
+
+    assert "OutlineResearchReviewer" in rendered
+    assert "leakage_audit" in rendered
+
+
 def test_tui_app_creative_kb_benchmark_command_renders_summary(tmp_path: Path) -> None:
     class _FacadeWithCreativeKBBenchmark:
         def run_creative_kb_benchmark(self, **kwargs):  # type: ignore[no-untyped-def]

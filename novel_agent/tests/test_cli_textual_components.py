@@ -217,6 +217,14 @@ class _TextualFakeFacade:
         target = str(kwargs.get("target") or "")
         self._record("benchmark", target=target, kwargs=dict(kwargs))
         self._raise_if_configured(f"benchmark:{target}", "benchmark")
+        if target == "longzu-240kb" and kwargs.get("outline_research_author_brief"):
+            return {
+                "summary_text": (
+                    "OutlineResearchReviewer：CLI 大纲研究通过 (pass, 0.80)\n"
+                    f"artifact_dir：{self.repo_root / 'runs' / 'benchmarks' / 'outline_research_author_brief'}\n"
+                    "leakage_audit：pass"
+                )
+            }
         if target not in {"", "longzu-32kb"}:
             raise ValueError(f"未知 benchmark 目标：{target}")
         return {
@@ -980,6 +988,26 @@ def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmark
             assert "Creative KB Benchmark" in rendered
             assert "artifact_dir" in rendered
             assert "artifact saved" not in rendered
+
+    _run(scenario())
+
+
+def test_textual_cli_benchmark_outline_research_author_brief_flags(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        app = _app(tmp_path)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.open_workbench()
+            await pilot.pause()
+            harness = TuiSmokeHarness(app, pilot)
+
+            rendered = await harness.submit_command("/benchmark longzu-240kb --outline-research --author-brief")
+            facade = app.session.facade
+
+            assert "OutlineResearchReviewer" in rendered
+            assert facade.benchmark_runs[-1]["target"] == "longzu-240kb"  # type: ignore[attr-defined]
+            assert facade.benchmark_runs[-1]["enable_outline_research_loop"] is True  # type: ignore[attr-defined]
+            assert facade.benchmark_runs[-1]["outline_research_author_brief"] is True  # type: ignore[attr-defined]
 
     _run(scenario())
 

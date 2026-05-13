@@ -567,6 +567,8 @@ class WorkflowFacade:
         db_path: Path | None = None,
         use_real_model: bool = True,
         api_key: str | None = None,
+        enable_outline_research_loop: bool = False,
+        outline_research_author_brief: bool = False,
     ) -> dict[str, Any]:
         if not use_real_model:
             raise ValueError("端到端 Agentic benchmark 必须使用真实 LLM。")
@@ -588,28 +590,57 @@ class WorkflowFacade:
                 source_path=source_path,
                 api_key=api_key or "",
                 runs_dir=self.repo_root / "runs" / "benchmarks",
+                enable_outline_research_loop=enable_outline_research_loop,
+                outline_research_author_brief=outline_research_author_brief,
+                use_real_outline_research_reviewer=outline_research_author_brief,
             )
         elif target in {"", "longzu-32kb"}:
             result = agentic_service.run_longzu_32kb(
                 api_key=api_key or "",
                 runs_dir=self.repo_root / "runs" / "benchmarks",
+                enable_outline_research_loop=enable_outline_research_loop,
+                outline_research_author_brief=outline_research_author_brief,
+                use_real_outline_research_reviewer=outline_research_author_brief,
+            )
+        elif target == "longzu-240kb" and outline_research_author_brief:
+            result = agentic_service.run_from_source(
+                source_path=self.repo_root / "novel_agent" / "tests" / "longzu_240kb.txt",
+                api_key=api_key or "",
+                runs_dir=self.repo_root / "runs" / "benchmarks",
+                prefix_min_chars=120_000,
+                reference_min_chars=120_000,
+                max_read_kb=240,
+                max_close_batches=48,
+                enable_outline_research_loop=enable_outline_research_loop,
+                outline_research_author_brief=True,
+                use_real_outline_research_reviewer=True,
             )
         else:
             raise ValueError(f"未知 benchmark 目标：{target}")
         payload = result.to_dict()
-        payload["summary_text"] = (
-            f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
-            f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
-            f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
-            f"run_id：{result.run_id}\n"
-            f"产物目录：{result.run_dir}\n"
-            f"生成梗概：{result.generated_synopsis_path}\n"
-            f"原文梗概：{result.reference_synopsis_path}\n"
-            f"Writer 草稿：{result.draft_path}\n"
-            f"Reference truth：{result.reference_truth_path}\n"
-            f"生成字数：{result.generated_chars}\n"
-            f"reference truth 字数：{result.reference_truth_chars}"
-        )
+        if outline_research_author_brief:
+            payload["summary_text"] = (
+                f"OutlineResearchReviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+                f"flow_status：{result.outline_research_status}\n"
+                f"artifact_dir：{result.outline_research_artifact_dir}\n"
+                f"leakage_audit：{result.outline_research_leakage_audit_path}\n"
+                f"major_failures：{', '.join(result.outline_research_major_failures or []) or 'none'}\n"
+                f"next_steps：{'; '.join(result.outline_research_next_steps or [])}"
+            )
+        else:
+            payload["summary_text"] = (
+                f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
+                f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
+                f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+                f"run_id：{result.run_id}\n"
+                f"产物目录：{result.run_dir}\n"
+                f"生成梗概：{result.generated_synopsis_path}\n"
+                f"原文梗概：{result.reference_synopsis_path}\n"
+                f"Writer 草稿：{result.draft_path}\n"
+                f"Reference truth：{result.reference_truth_path}\n"
+                f"生成字数：{result.generated_chars}\n"
+                f"reference truth 字数：{result.reference_truth_chars}"
+            )
         self.event_stream.emit("系统", "端到端 Agentic smoke benchmark 已完成", payload=payload)
         return payload
 

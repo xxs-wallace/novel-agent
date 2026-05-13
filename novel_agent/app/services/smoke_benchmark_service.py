@@ -20,6 +20,7 @@ from ..repos.db import NovelAgentDB
 from ..repos.documents_repo import DocumentsRepo
 from ..runner import SingleSampleSmokeRunResult, SingleSampleSmokeRunner
 from .continuation_generation_service import ContinuationGenerationService
+from .outline_research_service import StoryDetailResolver
 from .smoke_sample_service import SmokeSampleService
 from .smoke_reviewer_service import SmokeReviewerService
 from ..utils.text_utils import split_sentences
@@ -537,6 +538,12 @@ class AgenticSmokeBenchmarkResult:
     reviewer_decision: str
     reviewer_score: float
     reviewer_summary: str
+    outline_research_artifact_dir: str = ""
+    outline_research_reviewer_report_path: str = ""
+    outline_research_leakage_audit_path: str = ""
+    outline_research_status: str = ""
+    outline_research_major_failures: list[str] | None = None
+    outline_research_next_steps: list[str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -567,6 +574,12 @@ class AgenticSmokeBenchmarkResult:
             "reviewer_decision": self.reviewer_decision,
             "reviewer_score": self.reviewer_score,
             "reviewer_summary": self.reviewer_summary,
+            "outline_research_artifact_dir": self.outline_research_artifact_dir,
+            "outline_research_reviewer_report_path": self.outline_research_reviewer_report_path,
+            "outline_research_leakage_audit_path": self.outline_research_leakage_audit_path,
+            "outline_research_status": self.outline_research_status,
+            "outline_research_major_failures": list(self.outline_research_major_failures or []),
+            "outline_research_next_steps": list(self.outline_research_next_steps or []),
         }
 
 
@@ -587,6 +600,209 @@ class AgenticModelingArtifacts:
     writer_planning_input_path: Path
     cache_dir: Path | None = None
     cache_hit: bool = False
+
+
+class OutlineResearchReviewer:
+    """Reviews author-brief outline reconstruction without feeding reference data back to Writer."""
+
+    CHECK_NAMES = (
+        "outline_similarity",
+        "plot_node_coverage",
+        "character_extraction",
+        "existing_character_resolution",
+        "new_character_detection",
+        "research_tool_usefulness",
+        "leakage_boundary",
+    )
+
+    def build_prompt(
+        self,
+        *,
+        prefix_story_outline: object,
+        user_story_overview: str,
+        outline_seed_packet: object,
+        outline_research_trace: object,
+        planning_notebook: object,
+        sufficiency_decision: object,
+        generated_outline: object,
+        reference_future_outline: object,
+        reference_character_set: object,
+        leakage_audit: object,
+    ) -> dict[str, object]:
+        return {
+            "system_prompt": (
+                "你是 OutlineResearchReviewer。只输出 JSON。你可以读取 reference-only 材料进行评估，"
+                "但这些材料不得反馈给 Writer。评估 generated_outline 与 reference_future_outline 的主要剧情节点、"
+                "人物抽取/解析、research tool 有效性、sufficiency decision 和 leakage 边界。"
+            ),
+            "user_payload": {
+                "prefix_story_outline": prefix_story_outline,
+                "user_story_overview": user_story_overview,
+                "outline_seed_packet": outline_seed_packet,
+                "outline_research_trace": outline_research_trace,
+                "planning_notebook": planning_notebook,
+                "sufficiency_decision": sufficiency_decision,
+                "generated_outline": generated_outline,
+                "reference_future_outline": reference_future_outline,
+                "reference_character_set": reference_character_set,
+                "leakage_audit": leakage_audit,
+                "required_output_schema": {
+                    "decision": "pass | borderline | fail",
+                    "score": 0.0,
+                    "summary": "string",
+                    "checks": {name: "pass | borderline | fail" for name in self.CHECK_NAMES},
+                    "scores": {
+                        "outline_similarity_score": 0,
+                        "plot_node_coverage_score": 0,
+                        "character_extraction_recall": 0,
+                        "existing_character_resolution_score": 0,
+                        "new_character_detection_score": 0,
+                        "research_tool_usefulness_score": 0,
+                    },
+                    "major_failures": [],
+                },
+            },
+        }
+
+    def fake_review(
+        self,
+        *,
+        prompt_payload: dict[str, object],
+    ) -> dict[str, object]:
+        payload = prompt_payload.get("user_payload")
+        data = payload if isinstance(payload, dict) else {}
+        leakage_audit = data.get("leakage_audit") if isinstance(data.get("leakage_audit"), dict) else {}
+        generated_outline = data.get("generated_outline")
+        reference_future_outline = data.get("reference_future_outline")
+        seed_packet = data.get("outline_seed_packet") if isinstance(data.get("outline_seed_packet"), dict) else {}
+        trace = data.get("outline_research_trace") if isinstance(data.get("outline_research_trace"), dict) else {}
+        sufficiency = data.get("sufficiency_decision") if isinstance(data.get("sufficiency_decision"), dict) else {}
+        reference_character_set = (
+            data.get("reference_character_set") if isinstance(data.get("reference_character_set"), dict) else {}
+        )
+
+        outline_text = json.dumps(generated_outline, ensure_ascii=False)
+        reference_beats = self._reference_beats(reference_future_outline)
+        covered_beats = [beat for beat in reference_beats if beat and beat in outline_text]
+        plot_score = len(covered_beats) / max(1, len(reference_beats)) if reference_beats else 0.5
+        outline_score = 0.75 if outline_text.strip() and sufficiency.get("status") in {"enough", "proceed_with_assumptions"} else 0.35
+        if plot_score:
+            outline_score = round((outline_score + plot_score) / 2, 4)
+
+        mentions = seed_packet.get("extracted_character_mentions") or []
+        mentioned_names = {
+            _normalize_text(item.get("text"))
+            for item in mentions
+            if isinstance(item, dict) and _normalize_text(item.get("text"))
+        }
+        reference_names = {
+            _normalize_text(item.get("name"))
+            for key in ("existing_characters", "new_characters")
+            for item in reference_character_set.get(key, [])
+            if isinstance(item, dict) and _normalize_text(item.get("name"))
+        }
+        character_recall = len(mentioned_names & reference_names) / max(1, len(reference_names)) if reference_names else 1.0
+        resolutions = seed_packet.get("character_resolutions") or []
+        existing = [
+            item
+            for item in reference_character_set.get("existing_characters", [])
+            if isinstance(item, dict) and _normalize_text(item.get("name"))
+        ]
+        resolved_names = {
+            _normalize_text(item.get("canonical_name") or item.get("mention_text"))
+            for item in resolutions
+            if isinstance(item, dict) and item.get("status") == "resolved"
+        }
+        existing_score = len(
+            {_normalize_text(item.get("name")) for item in existing} & resolved_names
+        ) / max(1, len(existing)) if existing else 1.0
+        new_chars = [
+            item
+            for item in reference_character_set.get("new_characters", [])
+            if isinstance(item, dict) and _normalize_text(item.get("name"))
+        ]
+        missing_names = {
+            _normalize_text(item.get("mention_text"))
+            for item in resolutions
+            if isinstance(item, dict) and item.get("status") in {"missing", "ambiguous"}
+        }
+        new_score = len(
+            {_normalize_text(item.get("name")) for item in new_chars} & missing_names
+        ) / max(1, len(new_chars)) if new_chars else 1.0
+        rounds = [item for item in (trace.get("rounds") or []) if isinstance(item, dict)]
+        useful_rounds = [
+            item
+            for item in rounds
+            if item.get("requests") and any(result.get("fact_status") != "missing" for result in item.get("results") or [] if isinstance(result, dict))
+        ]
+        research_score = len(useful_rounds) / max(1, len(rounds)) if rounds else 0.0
+        leakage_status = str(leakage_audit.get("status") or "pass")
+        leakage_score = 0.0 if leakage_status == "fail" else 1.0
+
+        scores = {
+            "outline_similarity_score": round(outline_score, 4),
+            "plot_node_coverage_score": round(plot_score, 4),
+            "character_extraction_recall": round(character_recall, 4),
+            "existing_character_resolution_score": round(existing_score, 4),
+            "new_character_detection_score": round(new_score, 4),
+            "research_tool_usefulness_score": round(research_score, 4),
+        }
+        checks = {
+            "outline_similarity": self._check(outline_score),
+            "plot_node_coverage": self._check(plot_score),
+            "character_extraction": self._check(character_recall),
+            "existing_character_resolution": self._check(existing_score),
+            "new_character_detection": self._check(new_score),
+            "research_tool_usefulness": self._check(research_score),
+            "leakage_boundary": "leaked" if leakage_status == "fail" else "pass",
+        }
+        major_failures = [
+            name
+            for name, value in checks.items()
+            if value in {"fail", "leaked"}
+        ]
+        aggregate = round(
+            (
+                scores["outline_similarity_score"]
+                + scores["plot_node_coverage_score"]
+                + scores["character_extraction_recall"]
+                + scores["existing_character_resolution_score"]
+                + scores["new_character_detection_score"]
+                + scores["research_tool_usefulness_score"]
+                + leakage_score
+            )
+            / 7,
+            4,
+        )
+        decision = "fail" if leakage_status == "fail" or aggregate < 0.45 else ("borderline" if aggregate < 0.7 else "pass")
+        return {
+            "decision": decision,
+            "score": aggregate,
+            "summary": f"Outline research author brief smoke {decision}; sufficiency={sufficiency.get('status', '')}.",
+            "checks": checks,
+            "scores": scores,
+            "major_failures": major_failures,
+        }
+
+    def _reference_beats(self, reference_future_outline: object) -> list[str]:
+        if not isinstance(reference_future_outline, dict):
+            return []
+        beats: list[str] = []
+        for key in ("plot_beats", "must_preserve"):
+            beats.extend(_normalize_string_list(reference_future_outline.get(key)))
+        for item in reference_future_outline.get("document_synopses", []) or []:
+            if isinstance(item, dict):
+                text = _normalize_text(item.get("summary"))
+                if text:
+                    beats.append(_safe_excerpt(text, 80))
+        return [item for item in dict.fromkeys(beats) if item]
+
+    def _check(self, score: float) -> str:
+        if score >= 0.7:
+            return "pass"
+        if score >= 0.45:
+            return "borderline"
+        return "fail"
 
 
 class AgenticSmokeBenchmarkService:
@@ -615,6 +831,9 @@ class AgenticSmokeBenchmarkService:
         max_close_batches: int = 12,
         segment_step_kb: int = 32,
         close_step_batches: int = 1,
+        enable_outline_research_loop: bool = False,
+        outline_research_author_brief: bool = False,
+        use_real_outline_research_reviewer: bool = False,
     ) -> AgenticSmokeBenchmarkResult:
         return self.run_from_source(
             source_path=source_path or self.sample_service.default_longzu_source_path(),
@@ -633,6 +852,9 @@ class AgenticSmokeBenchmarkService:
             max_close_batches=max_close_batches,
             segment_step_kb=segment_step_kb,
             close_step_batches=close_step_batches,
+            enable_outline_research_loop=enable_outline_research_loop,
+            outline_research_author_brief=outline_research_author_brief,
+            use_real_outline_research_reviewer=use_real_outline_research_reviewer,
         )
 
     def run_from_source(
@@ -654,6 +876,9 @@ class AgenticSmokeBenchmarkService:
         max_close_batches: int = 12,
         segment_step_kb: int = 32,
         close_step_batches: int = 1,
+        enable_outline_research_loop: bool = False,
+        outline_research_author_brief: bool = False,
+        use_real_outline_research_reviewer: bool = False,
     ) -> AgenticSmokeBenchmarkResult:
         from .. import run_interactive
 
@@ -690,6 +915,7 @@ class AgenticSmokeBenchmarkService:
             "max_close_batches": int(max_close_batches),
             "segment_step_kb": int(segment_step_kb),
             "close_step_batches": int(close_step_batches),
+            "author_brief_summarizer_prompt_version": "deterministic-close-read-v1",
         }
         cache_root = self._default_modeling_cache_root(runs_dir=root) if (
             benchmark_cache_dir is None and (reuse_modeling_cache or rebuild_modeling_cache or clear_modeling_cache)
@@ -892,6 +1118,27 @@ class AgenticSmokeBenchmarkService:
             reasoning_effort=None,
             include_reasoning_content=False,
         )
+        if outline_research_author_brief or enable_outline_research_loop:
+            return self._run_outline_research_author_brief_benchmark(
+                run_interactive=run_interactive,
+                db=db,
+                workflow=workflow,
+                run_id=run_id,
+                run_dir=run_dir,
+                book_id=book_id,
+                db_path=db_path,
+                writer_db_path=writer_db_path,
+                resolved_source=resolved_source,
+                prefix_source_path=prefix_source_path,
+                reference_truth_path=reference_truth_path,
+                reference_truth=reference_truth,
+                reference_context=reference_close_read,
+                reference_synopsis=reference_synopsis,
+                story_context=story_context,
+                story_outline=story_outline,
+                api_key=api_key,
+                use_real_reviewer=use_real_outline_research_reviewer,
+            )
         normalized_sequence_count = max(1, int(sequence_chapter_count))
         if normalized_sequence_count > 1:
             return self._run_sequence_benchmark(
@@ -1141,6 +1388,547 @@ class AgenticSmokeBenchmarkService:
         )
         summary_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return result
+
+    def _run_outline_research_author_brief_benchmark(
+        self,
+        *,
+        run_interactive: Any,
+        db: NovelAgentDB,
+        workflow: Any,
+        run_id: str,
+        run_dir: Path,
+        book_id: str,
+        db_path: Path,
+        writer_db_path: Path,
+        resolved_source: Path,
+        prefix_source_path: Path,
+        reference_truth_path: Path,
+        reference_truth: str,
+        reference_context: dict[str, object],
+        reference_synopsis: dict[str, object],
+        story_context: dict[str, object],
+        story_outline: dict[str, object],
+        api_key: str,
+        use_real_reviewer: bool,
+    ) -> AgenticSmokeBenchmarkResult:
+        artifact_dir = run_dir / "outline_research_author_brief"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "prefix_source.txt").write_text(
+            prefix_source_path.read_text(encoding="utf-8", errors="replace").rstrip() + "\n",
+            encoding="utf-8",
+        )
+        (artifact_dir / "future_source.txt").write_text(reference_truth.strip() + "\n", encoding="utf-8")
+
+        user_story_overview = self._build_user_story_overview(reference_context=reference_context)
+        user_story_overview_path = artifact_dir / "user_story_overview.txt"
+        user_story_overview_path.write_text(user_story_overview + "\n", encoding="utf-8")
+
+        prefix_modeling_snapshot = self._build_prefix_modeling_snapshot(
+            book_id=book_id,
+            db_path=db_path,
+            story_context=story_context,
+        )
+        (artifact_dir / "prefix_modeling_snapshot.json").write_text(
+            json.dumps(prefix_modeling_snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        chapter_summary_index, historical_event_index = self._build_outline_research_indexes(
+            db_path=db_path,
+            book_id=book_id,
+        )
+        (artifact_dir / "chapter_summary_index.json").write_text(
+            json.dumps(chapter_summary_index, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (artifact_dir / "historical_outline_event_index.json").write_text(
+            json.dumps(historical_event_index, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        reference_future_outline = self._build_reference_future_outline(
+            reference_context=reference_context,
+            reference_synopsis=reference_synopsis,
+            story_outline=story_outline,
+        )
+        reference_character_set = self._build_reference_character_set(
+            prefix_story_context=story_context,
+            reference_context=reference_context,
+        )
+        (artifact_dir / "reference_future_outline.json").write_text(
+            json.dumps(reference_future_outline, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (artifact_dir / "reference_character_set.json").write_text(
+            json.dumps(reference_character_set, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        intent_payload = self._build_author_brief_writer_intent_payload(
+            user_story_overview=user_story_overview,
+            prefix_modeling_snapshot=prefix_modeling_snapshot,
+            target_chars=len(reference_truth.strip()),
+        )
+        (artifact_dir / "writer_input.json").write_text(
+            json.dumps(
+                {
+                    "source": "author_brief_plus_prefix_modeling_snapshot",
+                    "intent_payload": intent_payload,
+                    "user_world_notes": "Author brief smoke: 只使用前缀建模快照与用户授权概述，不读取 reference-only 细节。",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        writer_run_dir = run_dir / "writer_runs" / run_id
+        with db.connect() as conn:
+            db.init_schema(conn)
+            init_creative_kb_schema(conn)
+            modeling_status = workflow.planner.check_modeling_status(conn, book_id=book_id)
+            workflow.run_writer.write_json(run_id, "modeling_status.json", modeling_status)
+            intent = workflow.planner.build_continuation_intent(intent_payload)
+            workflow.run_writer.write_json(run_id, "continuation_intent.json", intent)
+            if modeling_status.ready_for_continuation:
+                research = workflow.planner.prepare_outline_research(
+                    conn,
+                    run_id=run_id,
+                    book_id=book_id,
+                    intent=intent,
+                    intent_payload=intent_payload,
+                )
+                flow_status = research.sufficiency_decision.status
+                flow_reason = ""
+            else:
+                flow_status = "blocked"
+                flow_reason = "建模状态未满足续写要求: " + ", ".join(modeling_status.missing_modeling_steps)
+                workflow.run_writer.write_json(
+                    run_id,
+                    "sufficiency_decision.json",
+                    {
+                        "decision_id": f"{book_id}-modeling-blocked",
+                        "status": "blocked",
+                        "required_actions": list(modeling_status.missing_modeling_steps),
+                    },
+                )
+            conn.commit()
+
+        copied_artifacts = self._copy_outline_research_writer_artifacts(
+            writer_run_dir=writer_run_dir,
+            artifact_dir=artifact_dir,
+        )
+        outline_seed_packet = copied_artifacts.get("outline_seed_packet.json", {})
+        outline_research_trace = copied_artifacts.get("outline_research_trace.json", {})
+        planning_notebook = copied_artifacts.get("planning_notebook.json", {})
+        sufficiency_decision = copied_artifacts.get("sufficiency_decision.json", {})
+        generated_outline = copied_artifacts.get("generated_outline.json", {})
+        leakage_audit = self._build_leakage_audit(
+            writer_stage_payloads={
+                "writer_input": intent_payload,
+                "outline_seed_packet": outline_seed_packet,
+                "outline_research_trace": outline_research_trace,
+                "planning_notebook": planning_notebook,
+                "generated_outline": generated_outline,
+            },
+            authorized_user_input=user_story_overview,
+            reference_future_outline=reference_future_outline,
+            reference_character_set=reference_character_set,
+            future_raw_text=reference_truth,
+        )
+        leakage_audit_path = artifact_dir / "leakage_audit.json"
+        leakage_audit_path.write_text(json.dumps(leakage_audit, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        reviewer = OutlineResearchReviewer()
+        reviewer_prompt = reviewer.build_prompt(
+            prefix_story_outline=prefix_modeling_snapshot.get("story_outline_md", ""),
+            user_story_overview=user_story_overview,
+            outline_seed_packet=outline_seed_packet,
+            outline_research_trace=outline_research_trace,
+            planning_notebook=planning_notebook,
+            sufficiency_decision=sufficiency_decision,
+            generated_outline=generated_outline,
+            reference_future_outline=reference_future_outline,
+            reference_character_set=reference_character_set,
+            leakage_audit=leakage_audit,
+        )
+        reviewer_prompt_path = artifact_dir / "outline_research_reviewer_prompt.json"
+        reviewer_prompt_path.write_text(json.dumps(reviewer_prompt, ensure_ascii=False, indent=2), encoding="utf-8")
+        if use_real_reviewer:
+            reviewer_config = RunConfig(
+                prompt=None,
+                model_type="OpenAIModel",
+                model_id=run_interactive.DEFAULT_WRITER_MODEL_NAME,
+                provider=None,
+                api_base="https://api.deepseek.com",
+                api_key=api_key,
+                thinking="disabled",
+                reasoning_effort=None,
+                save_reasoning=False,
+                action_type="tool_calling",
+                tools=[],
+                imports=[],
+                verbosity_level=1,
+                dry_run=False,
+            )
+            reviewer_report = self._generate_json_with_model(
+                generation_service=ContinuationGenerationService(),
+                generation_config=reviewer_config,
+                prompt_payload=reviewer_prompt,
+            )
+        else:
+            reviewer_report = reviewer.fake_review(prompt_payload=reviewer_prompt)
+        reviewer_report_path = artifact_dir / "outline_research_reviewer_report.json"
+        reviewer_report_path.write_text(json.dumps(reviewer_report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if leakage_audit.get("status") == "fail":
+            reviewer_report["decision"] = "fail"
+            reviewer_report["major_failures"] = list(
+                dict.fromkeys([*list(reviewer_report.get("major_failures") or []), "leakage_boundary"])
+            )
+
+        summary_path = artifact_dir / "summary.json"
+        flow_status = _normalize_text(
+            sufficiency_decision.get("status") if isinstance(sufficiency_decision, dict) else flow_status
+        ) or flow_status
+        if flow_status in {"needs_user_input", "blocked"}:
+            blocking_reason = (
+                sufficiency_decision.get("blocking_gaps")
+                or sufficiency_decision.get("required_actions")
+                or flow_reason
+                if isinstance(sufficiency_decision, dict)
+                else flow_reason
+            )
+        else:
+            blocking_reason = ""
+        major_failures = [str(item) for item in (reviewer_report.get("major_failures") or [])]
+        next_steps = self._outline_research_next_steps(
+            flow_status=flow_status,
+            leakage_audit=leakage_audit,
+            reviewer_report=reviewer_report,
+        )
+        result = AgenticSmokeBenchmarkResult(
+            run_id=run_id,
+            run_dir=str(run_dir),
+            book_id=book_id,
+            source_path=str(resolved_source),
+            prefix_source_path=str(artifact_dir / "prefix_source.txt"),
+            db_path=str(db_path),
+            writer_run_dir=str(writer_run_dir),
+            draft_path="",
+            reference_truth_path=str(reference_truth_path),
+            generated_synopsis_path=str(artifact_dir / "generated_outline.json"),
+            reference_synopsis_path=str(artifact_dir / "reference_future_outline.json"),
+            synopsis_reviewer_report_path=str(reviewer_report_path),
+            expansion_prompt_path="",
+            expansion_reviewer_report_path="",
+            reviewer_report_path=str(reviewer_report_path),
+            summary_path=str(summary_path),
+            generated_chars=len(json.dumps(generated_outline, ensure_ascii=False)),
+            reference_truth_chars=len(reference_truth.strip()),
+            synopsis_decision=self._report_decision(reviewer_report),
+            synopsis_score=self._report_score(reviewer_report),
+            synopsis_summary=self._report_summary(reviewer_report),
+            expansion_decision="pass",
+            expansion_score=1.0,
+            expansion_summary="Outline research author brief smoke does not execute expansion layer.",
+            reviewer_decision=self._report_decision(reviewer_report),
+            reviewer_score=self._report_score(reviewer_report),
+            reviewer_summary=self._report_summary(reviewer_report),
+            outline_research_artifact_dir=str(artifact_dir),
+            outline_research_reviewer_report_path=str(reviewer_report_path),
+            outline_research_leakage_audit_path=str(leakage_audit_path),
+            outline_research_status=flow_status,
+            outline_research_major_failures=major_failures,
+            outline_research_next_steps=next_steps,
+        )
+        summary_payload = {
+            **result.to_dict(),
+            "flow_status": flow_status,
+            "blocking_reason": blocking_reason,
+            "artifact_dir": str(artifact_dir),
+            "reviewer": reviewer_report,
+            "leakage_audit": leakage_audit,
+            "major_failures": major_failures,
+            "next_steps": next_steps,
+        }
+        summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        if leakage_audit.get("status") == "fail":
+            raise RuntimeError(f"outline research leakage audit failed: {leakage_audit_path}")
+        return result
+
+    def _build_user_story_overview(self, *, reference_context: dict[str, object]) -> str:
+        summaries = [
+            item for item in reference_context.get("reference_chapter_summaries", [])
+            if isinstance(item, dict)
+        ]
+        parts = []
+        for item in summaries:
+            text = _normalize_text(item.get("summary_short")) or _safe_excerpt(item.get("summary_md"), 260)
+            if text:
+                parts.append(text)
+        overview = "；".join(parts)
+        if len(overview) < 500:
+            expanded = [
+                _normalize_text(item.get("summary_md")) or _normalize_text(item.get("summary_short"))
+                for item in summaries
+            ]
+            overview = "\n".join(item for item in expanded if item)
+        overview = re.sub(r"\s+", " ", overview).strip()
+        return _safe_excerpt(overview, 1000) if len(overview) > 1000 else overview
+
+    def _build_prefix_modeling_snapshot(
+        self,
+        *,
+        book_id: str,
+        db_path: Path,
+        story_context: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "book_id": book_id,
+            "db_path": str(db_path),
+            "input_boundary": "prefix_facts",
+            "recent_story_synopses": story_context.get("recent_story_synopses", []),
+            "character_docs": story_context.get("character_docs", []),
+            "story_outline_md": story_context.get("story_outline_md", ""),
+        }
+
+    def _build_outline_research_indexes(
+        self,
+        *,
+        db_path: Path,
+        book_id: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        resolver = StoryDetailResolver()
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            chapter_index = resolver.build_chapter_summary_index(conn, book_id=book_id)
+            event_index = resolver.build_historical_event_index(chapter_index)
+            return chapter_index.to_dict(), event_index.to_dict()
+        finally:
+            conn.close()
+
+    def _build_reference_future_outline(
+        self,
+        *,
+        reference_context: dict[str, object],
+        reference_synopsis: dict[str, object],
+        story_outline: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "input_boundary": "reference_only",
+            "source": "future_close_read",
+            "story_outline_md": reference_context.get("story_outline_md", ""),
+            "next_outline_node": story_outline.get("next_outline_node", ""),
+            "document_synopses": reference_synopsis.get("document_synopses", []),
+            "plot_beats": reference_synopsis.get("plot_beats", []),
+            "must_preserve": reference_synopsis.get("must_preserve", []),
+            "characters_used": reference_synopsis.get("characters_used", []),
+        }
+
+    def _build_reference_character_set(
+        self,
+        *,
+        prefix_story_context: dict[str, object],
+        reference_context: dict[str, object],
+    ) -> dict[str, object]:
+        prefix_names = {
+            _normalize_text(item.get("canonical_name"))
+            for item in prefix_story_context.get("character_docs", [])
+            if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
+        }
+        future_docs = [
+            item for item in reference_context.get("reference_character_docs", [])
+            if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
+        ]
+        existing = []
+        new = []
+        for item in future_docs:
+            name = _normalize_text(item.get("canonical_name"))
+            record = {
+                "name": name,
+                "prefix_evidence": [f"character_profile:{name}"] if name in prefix_names else [],
+                "future_evidence": [f"future_character_profile:{name}"],
+            }
+            if name in prefix_names:
+                existing.append(record)
+            else:
+                new.append(record)
+        return {
+            "input_boundary": "reference_only",
+            "existing_characters": existing,
+            "new_characters": new,
+        }
+
+    def _build_author_brief_writer_intent_payload(
+        self,
+        *,
+        user_story_overview: str,
+        prefix_modeling_snapshot: dict[str, object],
+        target_chars: int,
+    ) -> dict[str, object]:
+        prefix_character_names = [
+            _normalize_text(item.get("canonical_name"))
+            for item in prefix_modeling_snapshot.get("character_docs", [])
+            if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
+        ]
+        recent = [
+            _normalize_text(item.get("summary_short")) or _safe_excerpt(item.get("summary_md"), 120)
+            for item in prefix_modeling_snapshot.get("recent_story_synopses", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "allow_character_cast": False,
+            "user_story_overview": user_story_overview,
+            "major_characters": prefix_character_names[:12],
+            "desired_actions": [
+                "根据用户授权概述重建后续大纲，不读取后窗 reference-only 细节。",
+                user_story_overview,
+            ],
+            "avoidances": [
+                "不得读取或引用隐藏参考大纲、隐藏参考人物全集或后窗原文。",
+                "不得把未确认的新人物写成已有 Character Memory 中的人物。",
+                "如信息不足，返回 needs_user_input / blocked，不伪造用户答案。",
+            ],
+            "preferred_outcome": user_story_overview,
+            "story_scale": {
+                "target_chapter_count": 1,
+                "target_total_chars": int(target_chars),
+                "default_chapter_target_chars": int(target_chars),
+                "pacing_profile": "author_brief_reconstruction",
+            },
+            "notes": json.dumps(
+                {
+                    "prefix_modeling_snapshot": {
+                        "recent_story_synopses": recent[-5:],
+                        "character_names": prefix_character_names[:12],
+                        "story_outline_excerpt": _safe_excerpt(prefix_modeling_snapshot.get("story_outline_md"), 800),
+                    },
+                    "authorized_input_policy": "用户概述是授权输入；隐藏答案类参考材料禁止进入 Writer。",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        }
+
+    def _copy_outline_research_writer_artifacts(
+        self,
+        *,
+        writer_run_dir: Path,
+        artifact_dir: Path,
+    ) -> dict[str, dict[str, object]]:
+        copied: dict[str, dict[str, object]] = {}
+        for name in (
+            "outline_seed_packet.json",
+            "extracted_character_mentions.json",
+            "character_resolution.json",
+            "outline_research_trace.json",
+            "planning_notebook.json",
+            "sufficiency_decision.json",
+            "generated_outline.json",
+        ):
+            source = writer_run_dir / name
+            if not source.exists():
+                payload: dict[str, object] = {}
+            else:
+                payload = self._unwrap_run_data(json.loads(source.read_text(encoding="utf-8")))
+            (artifact_dir / name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            copied[name] = payload
+        return copied
+
+    def _build_leakage_audit(
+        self,
+        *,
+        writer_stage_payloads: dict[str, object],
+        authorized_user_input: str,
+        reference_future_outline: dict[str, object],
+        reference_character_set: dict[str, object],
+        future_raw_text: str,
+    ) -> dict[str, object]:
+        issues = []
+        serialized_payloads = {
+            name: json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            for name, payload in writer_stage_payloads.items()
+        }
+        forbidden_named_payloads = {
+            "reference_future_outline": reference_future_outline,
+            "reference_character_set": reference_character_set,
+        }
+        for label, payload in forbidden_named_payloads.items():
+            marker = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if marker and marker != "{}":
+                for name, serialized in serialized_payloads.items():
+                    if marker in serialized or label in serialized:
+                        issues.append(
+                            {
+                                "type": label,
+                                "writer_stage": name,
+                                "severity": "fatal",
+                                "message": f"{label} entered Writer-stage payload.",
+                            }
+                        )
+        future_snippets = self._future_raw_leakage_snippets(
+            future_raw_text=future_raw_text,
+            authorized_user_input=authorized_user_input,
+        )
+        for snippet in future_snippets:
+            for name, serialized in serialized_payloads.items():
+                if snippet in serialized:
+                    issues.append(
+                        {
+                            "type": "future_raw_text",
+                            "writer_stage": name,
+                            "severity": "fatal",
+                            "message": "future raw text excerpt entered Writer-stage payload.",
+                            "evidence": _safe_excerpt(snippet, 160),
+                        }
+                    )
+        return {
+            "status": "fail" if issues else "pass",
+            "input_boundaries": {
+                "prefix_facts": ["prefix_modeling_snapshot", "chapter_summary_index", "historical_outline_event_index"],
+                "authorized_user_input": ["user_story_overview"],
+                "reference_only": ["reference_future_outline", "reference_character_set", "future_source"],
+            },
+            "checked_writer_stage_payloads": list(writer_stage_payloads.keys()),
+            "issues": issues,
+        }
+
+    def _future_raw_leakage_snippets(
+        self,
+        *,
+        future_raw_text: str,
+        authorized_user_input: str,
+    ) -> list[str]:
+        compact_future = re.sub(r"\s+", " ", future_raw_text).strip()
+        compact_authorized = re.sub(r"\s+", " ", authorized_user_input).strip()
+        snippets: list[str] = []
+        for start in range(0, max(0, len(compact_future) - 180), 600):
+            snippet = compact_future[start : start + 180].strip()
+            if len(snippet) >= 120 and snippet not in compact_authorized:
+                snippets.append(snippet)
+            if len(snippets) >= 6:
+                break
+        return snippets
+
+    def _outline_research_next_steps(
+        self,
+        *,
+        flow_status: str,
+        leakage_audit: dict[str, object],
+        reviewer_report: dict[str, object],
+    ) -> list[str]:
+        steps: list[str] = []
+        if leakage_audit.get("status") == "fail":
+            steps.append("修复 Writer 输入边界，确保隐藏参考材料只进入 Reviewer 和 leakage audit。")
+        if flow_status == "needs_user_input":
+            steps.append("收集 sufficiency_decision.user_questions 的用户授权答案后继续 research loop。")
+        if flow_status == "blocked":
+            steps.append("补齐 prefix close-read / Memory / story outline 建模后重跑 author brief smoke。")
+        if self._report_decision(reviewer_report) != "pass":
+            steps.append("查看 outline_research_reviewer_report.json 的 major_failures 并调整 research 请求或解析器。")
+        if not steps:
+            steps.append("保留当前 artifacts，后续可用相同 modeling cache 重跑 Writer research loop。")
+        return steps
 
     def _run_sequence_benchmark(
         self,

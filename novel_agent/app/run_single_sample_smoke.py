@@ -70,6 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--segment-step-kb", type=int, default=32, help="Segmentation step size passed to pipeline")
     parser.add_argument("--close-step-batches", type=int, default=1, help="Close-read step size passed to pipeline")
     parser.add_argument(
+        "--enable-outline-research-loop",
+        action="store_true",
+        help="Run the Writer Outline Research Loop benchmark path",
+    )
+    parser.add_argument(
+        "--outline-research-author-brief",
+        action="store_true",
+        help="Run the author brief reconstruction smoke for Outline Research",
+    )
+    parser.add_argument(
         "--use-real-model",
         action="store_true",
         help="Required: enable real model generation and LLM reviewer scoring",
@@ -140,19 +150,32 @@ def main(argv: list[str] | None = None) -> int:
             max_close_batches=args.max_close_batches,
             segment_step_kb=args.segment_step_kb,
             close_step_batches=args.close_step_batches,
+            enable_outline_research_loop=bool(args.enable_outline_research_loop),
+            outline_research_author_brief=bool(args.outline_research_author_brief),
+            use_real_outline_research_reviewer=bool(args.outline_research_author_brief),
         )
         payload = result.to_dict()
-        payload["summary_text"] = (
-            f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
-            f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
-            f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
-            f"run_id：{result.run_id}\n"
-            f"产物目录：{result.run_dir}\n"
-            f"生成梗概：{result.generated_synopsis_path}\n"
-            f"原文梗概：{result.reference_synopsis_path}\n"
-            f"Writer 草稿：{result.draft_path}\n"
-            f"Reference truth：{result.reference_truth_path}"
-        )
+        if args.outline_research_author_brief:
+            payload["summary_text"] = (
+                f"OutlineResearchReviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+                f"flow_status：{result.outline_research_status}\n"
+                f"artifact_dir：{result.outline_research_artifact_dir}\n"
+                f"leakage_audit：{result.outline_research_leakage_audit_path}\n"
+                f"major_failures：{', '.join(result.outline_research_major_failures or []) or 'none'}\n"
+                f"next_steps：{'; '.join(result.outline_research_next_steps or [])}"
+            )
+        else:
+            payload["summary_text"] = (
+                f"梗概层 Reviewer：{result.synopsis_summary} ({result.synopsis_decision}, {result.synopsis_score:.2f})\n"
+                f"扩写层 Reviewer：{result.expansion_summary} ({result.expansion_decision}, {result.expansion_score:.2f})\n"
+                f"综合 Reviewer：{result.reviewer_summary} ({result.reviewer_decision}, {result.reviewer_score:.2f})\n"
+                f"run_id：{result.run_id}\n"
+                f"产物目录：{result.run_dir}\n"
+                f"生成梗概：{result.generated_synopsis_path}\n"
+                f"原文梗概：{result.reference_synopsis_path}\n"
+                f"Writer 草稿：{result.draft_path}\n"
+                f"Reference truth：{result.reference_truth_path}"
+            )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
     if not sample_path:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Sequence, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 
 from .context_assembly_schema import ContextAssemblyPayload
 from .creative_kb_schema import SceneBrief
@@ -63,6 +63,28 @@ GENERATION_REVIEW_CHECKPOINTS = {
     "halted",
 }
 CHAPTER_REPLAN_SCOPES = {"current_chapter"}
+FACT_STATUSES = {
+    "confirmed",
+    "candidate",
+    "assumption",
+    "user_authorized",
+    "missing",
+}
+RESEARCH_REQUEST_TYPES = {
+    "story_detail",
+    "character_profile",
+    "world_concept",
+    "structure_pattern",
+}
+RESEARCH_PRIORITIES = {"high", "medium", "low"}
+CHARACTER_MENTION_STATUSES = {"resolved", "ambiguous", "missing"}
+CHARACTER_MENTION_TYPES = {"name", "alias", "title", "new_character_hint"}
+SUFFICIENCY_STATUSES = {
+    "enough",
+    "needs_user_input",
+    "proceed_with_assumptions",
+    "blocked",
+}
 
 
 def _normalize_text(value: object) -> str:
@@ -112,6 +134,12 @@ GenerationReviewCheckpoint = Literal[
     "halted",
 ]
 ChapterReplanScope = Literal["current_chapter"]
+FactStatus = Literal["confirmed", "candidate", "assumption", "user_authorized", "missing"]
+ResearchRequestType = Literal["story_detail", "character_profile", "world_concept", "structure_pattern"]
+ResearchPriority = Literal["high", "medium", "low"]
+CharacterMentionStatus = Literal["resolved", "ambiguous", "missing"]
+CharacterMentionType = Literal["name", "alias", "title", "new_character_hint"]
+SufficiencyStatus = Literal["enough", "needs_user_input", "proceed_with_assumptions", "blocked"]
 
 
 @dataclass(slots=True)
@@ -134,6 +162,717 @@ class TraceableSource:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _normalize_fact_status(value: object) -> str:
+    normalized = _normalize_text(value).lower().replace("-", "_")
+    aliases = {
+        "confirmed_fact": "confirmed",
+        "fact": "confirmed",
+        "inferred": "candidate",
+        "inference": "candidate",
+        "user": "user_authorized",
+        "authorized": "user_authorized",
+        "user_authorised": "user_authorized",
+        "unknown": "missing",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _coerce_sources(items: Sequence[object] | None) -> list[TraceableSource]:
+    sources: list[TraceableSource] = []
+    for item in items or []:
+        if isinstance(item, TraceableSource):
+            sources.append(item)
+            continue
+        if isinstance(item, Mapping):
+            sources.append(
+                TraceableSource(
+                    type=str(item.get("type") or "unknown"),
+                    path=str(item.get("path") or ""),
+                    evidence_level=cast(EvidenceLevel, str(item.get("evidence_level") or "confirmed_analysis")),
+                    snippet=str(item.get("snippet") or ""),
+                    note=str(item.get("note") or ""),
+                )
+            )
+    return sources
+
+
+@dataclass(slots=True)
+class ExtractedCharacterMention:
+    text: str
+    mention_type: CharacterMentionType = "name"
+    source_text: str = ""
+    confidence: float = 0.5
+    possible_role_hint: str = ""
+
+    def __post_init__(self) -> None:
+        self.text = _normalize_text(self.text)
+        normalized_type = _normalize_text(self.mention_type).lower()
+        if normalized_type not in CHARACTER_MENTION_TYPES:
+            raise ValueError("mention_type must be name, alias, title, or new_character_hint")
+        self.mention_type = normalized_type  # type: ignore[assignment]
+        self.source_text = _normalize_text(self.source_text)
+        self.confidence = max(0.0, min(float(self.confidence or 0), 1.0))
+        self.possible_role_hint = _normalize_text(self.possible_role_hint)
+        if not self.text:
+            raise ValueError("character mention text is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ExtractedCharacterMention":
+        return cls(
+            text=str(data.get("text") or ""),
+            mention_type=cast(CharacterMentionType, str(data.get("mention_type") or "name")),
+            source_text=str(data.get("source_text") or ""),
+            confidence=float(data.get("confidence") or 0.5),
+            possible_role_hint=str(data.get("possible_role_hint") or ""),
+        )
+
+
+@dataclass(slots=True)
+class ExtractedCharacterMentions:
+    mentions: list[ExtractedCharacterMention] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"mentions": [item.to_dict() for item in self.mentions]}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ExtractedCharacterMentions":
+        return cls(
+            mentions=[
+                ExtractedCharacterMention.from_dict(item)
+                for item in (data.get("mentions") or [])
+                if isinstance(item, Mapping)
+            ]
+        )
+
+
+@dataclass(slots=True)
+class CharacterMentionResolution:
+    mention_text: str
+    status: CharacterMentionStatus
+    character_id: str = ""
+    canonical_name: str = ""
+    matched_by: list[str] = field(default_factory=list)
+    candidate_matches: list[dict[str, Any]] = field(default_factory=list)
+    user_question: str = ""
+    confirmed_new_character: bool = False
+
+    def __post_init__(self) -> None:
+        self.mention_text = _normalize_text(self.mention_text)
+        normalized_status = _normalize_text(self.status).lower()
+        if normalized_status not in CHARACTER_MENTION_STATUSES:
+            raise ValueError("status must be resolved, ambiguous, or missing")
+        self.status = normalized_status  # type: ignore[assignment]
+        self.character_id = _normalize_text(self.character_id)
+        self.canonical_name = _normalize_text(self.canonical_name)
+        self.matched_by = _normalize_string_list(self.matched_by)
+        self.candidate_matches = [
+            {str(key): value for key, value in item.items()}
+            for item in self.candidate_matches
+            if isinstance(item, Mapping)
+        ]
+        self.user_question = _normalize_text(self.user_question)
+        if self.status == "resolved" and not self.character_id:
+            raise ValueError("resolved character mention must include character_id")
+        if self.status == "ambiguous" and not self.candidate_matches:
+            raise ValueError("ambiguous character mention must include candidate_matches")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mention_text": self.mention_text,
+            "status": self.status,
+            "character_id": self.character_id,
+            "canonical_name": self.canonical_name,
+            "matched_by": list(self.matched_by),
+            "candidate_matches": [dict(item) for item in self.candidate_matches],
+            "user_question": self.user_question,
+            "confirmed_new_character": self.confirmed_new_character,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "CharacterMentionResolution":
+        return cls(
+            mention_text=str(data.get("mention_text") or data.get("text") or ""),
+            status=cast(CharacterMentionStatus, str(data.get("status") or "missing")),
+            character_id=str(data.get("character_id") or data.get("resolved_character_id") or ""),
+            canonical_name=str(data.get("canonical_name") or ""),
+            matched_by=[str(item) for item in (data.get("matched_by") or [])],
+            candidate_matches=[
+                dict(item) for item in (data.get("candidate_matches") or []) if isinstance(item, Mapping)
+            ],
+            user_question=str(data.get("user_question") or ""),
+            confirmed_new_character=bool(data.get("confirmed_new_character", False)),
+        )
+
+
+@dataclass(slots=True)
+class OutlineSeedPacket:
+    packet_id: str
+    book_id: str
+    user_intent: dict[str, Any]
+    story_scale: dict[str, Any] = field(default_factory=dict)
+    climax_input: dict[str, Any] = field(default_factory=dict)
+    extracted_character_mentions: list[ExtractedCharacterMention] = field(default_factory=list)
+    character_resolutions: list[CharacterMentionResolution] = field(default_factory=list)
+    character_index: list[dict[str, Any]] = field(default_factory=list)
+    world_overview: str = ""
+    world_concept_index: list[dict[str, Any]] = field(default_factory=list)
+    historical_story_overview: list[dict[str, Any]] = field(default_factory=list)
+    current_continuation_anchor: str = ""
+    optional_open_thread_index: list[dict[str, Any]] = field(default_factory=list)
+    source_arc_index: list[dict[str, Any]] = field(default_factory=list)
+    structure_pattern_index: list[dict[str, Any]] = field(default_factory=list)
+    sources: list[TraceableSource] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.packet_id = _normalize_text(self.packet_id)
+        self.book_id = _normalize_text(self.book_id)
+        if not self.packet_id or not self.book_id:
+            raise ValueError("packet_id and book_id are required")
+        self.user_intent = dict(self.user_intent)
+        self.story_scale = dict(self.story_scale)
+        self.climax_input = dict(self.climax_input)
+        self.character_index = self._normalize_index_list(self.character_index)
+        self.world_overview = _normalize_text(self.world_overview)
+        self.world_concept_index = self._normalize_index_list(self.world_concept_index)
+        self.historical_story_overview = self._normalize_index_list(self.historical_story_overview)
+        self.current_continuation_anchor = _normalize_text(self.current_continuation_anchor)
+        self.optional_open_thread_index = self._normalize_index_list(self.optional_open_thread_index)
+        self.source_arc_index = self._normalize_index_list(self.source_arc_index)
+        self.structure_pattern_index = self._normalize_index_list(self.structure_pattern_index)
+
+    @staticmethod
+    def _normalize_index_list(items: Sequence[object]) -> list[dict[str, Any]]:
+        return [
+            {str(key): value for key, value in item.items()}
+            for item in items
+            if isinstance(item, Mapping)
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "packet_id": self.packet_id,
+            "book_id": self.book_id,
+            "user_intent": dict(self.user_intent),
+            "story_scale": dict(self.story_scale),
+            "climax_input": dict(self.climax_input),
+            "extracted_character_mentions": [item.to_dict() for item in self.extracted_character_mentions],
+            "character_resolutions": [item.to_dict() for item in self.character_resolutions],
+            "character_index": [dict(item) for item in self.character_index],
+            "world_overview": self.world_overview,
+            "world_concept_index": [dict(item) for item in self.world_concept_index],
+            "historical_story_overview": [dict(item) for item in self.historical_story_overview],
+            "current_continuation_anchor": self.current_continuation_anchor,
+            "optional_open_thread_index": [dict(item) for item in self.optional_open_thread_index],
+            "source_arc_index": [dict(item) for item in self.source_arc_index],
+            "structure_pattern_index": [dict(item) for item in self.structure_pattern_index],
+            "sources": [item.to_dict() for item in self.sources],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutlineSeedPacket":
+        return cls(
+            packet_id=str(data.get("packet_id") or ""),
+            book_id=str(data.get("book_id") or ""),
+            user_intent=dict(data.get("user_intent") or {}),
+            story_scale=dict(data.get("story_scale") or {}),
+            climax_input=dict(data.get("climax_input") or {}),
+            extracted_character_mentions=[
+                ExtractedCharacterMention.from_dict(item)
+                for item in (data.get("extracted_character_mentions") or [])
+                if isinstance(item, Mapping)
+            ],
+            character_resolutions=[
+                CharacterMentionResolution.from_dict(item)
+                for item in (data.get("character_resolutions") or [])
+                if isinstance(item, Mapping)
+            ],
+            character_index=[dict(item) for item in (data.get("character_index") or []) if isinstance(item, Mapping)],
+            world_overview=str(data.get("world_overview") or ""),
+            world_concept_index=[
+                dict(item) for item in (data.get("world_concept_index") or []) if isinstance(item, Mapping)
+            ],
+            historical_story_overview=[
+                dict(item) for item in (data.get("historical_story_overview") or []) if isinstance(item, Mapping)
+            ],
+            current_continuation_anchor=str(data.get("current_continuation_anchor") or ""),
+            optional_open_thread_index=[
+                dict(item) for item in (data.get("optional_open_thread_index") or []) if isinstance(item, Mapping)
+            ],
+            source_arc_index=[dict(item) for item in (data.get("source_arc_index") or []) if isinstance(item, Mapping)],
+            structure_pattern_index=[
+                dict(item) for item in (data.get("structure_pattern_index") or []) if isinstance(item, Mapping)
+            ],
+            sources=_coerce_sources(cast(Sequence[object], data.get("sources") or [])),
+        )
+
+
+@dataclass(slots=True)
+class ResearchRequest:
+    request_id: str
+    request_type: ResearchRequestType
+    query: str
+    purpose: str = ""
+    priority: ResearchPriority = "medium"
+    name: str = ""
+    concept: str = ""
+    facets_needed: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.request_id = _normalize_text(self.request_id)
+        normalized_type = _normalize_text(self.request_type).lower()
+        if normalized_type not in RESEARCH_REQUEST_TYPES:
+            raise ValueError("request_type must be story_detail, character_profile, world_concept, or structure_pattern")
+        self.request_type = normalized_type  # type: ignore[assignment]
+        self.query = _normalize_text(self.query)
+        self.purpose = _normalize_text(self.purpose)
+        normalized_priority = _normalize_text(self.priority).lower() or "medium"
+        if normalized_priority not in RESEARCH_PRIORITIES:
+            raise ValueError("priority must be high, medium, or low")
+        self.priority = normalized_priority  # type: ignore[assignment]
+        self.name = _normalize_text(self.name)
+        self.concept = _normalize_text(self.concept)
+        self.facets_needed = _normalize_string_list(self.facets_needed)
+        if not self.request_id:
+            self.request_id = f"{self.request_type}:{self.query or self.name or self.concept}"
+        if not (self.query or self.name or self.concept):
+            raise ValueError("research request requires query, name, or concept")
+
+    @property
+    def dedupe_key(self) -> str:
+        target = self.name if self.request_type == "character_profile" else self.concept if self.request_type == "world_concept" else self.query
+        return f"{self.request_type}:{_normalize_text(target).lower()}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "request_type": self.request_type,
+            "query": self.query,
+            "purpose": self.purpose,
+            "priority": self.priority,
+            "name": self.name,
+            "concept": self.concept,
+            "facets_needed": list(self.facets_needed),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResearchRequest":
+        return cls(
+            request_id=str(data.get("request_id") or data.get("id") or ""),
+            request_type=cast(ResearchRequestType, str(data.get("request_type") or data.get("type") or "")),
+            query=str(data.get("query") or ""),
+            purpose=str(data.get("purpose") or ""),
+            priority=cast(ResearchPriority, str(data.get("priority") or "medium")),
+            name=str(data.get("name") or ""),
+            concept=str(data.get("concept") or ""),
+            facets_needed=[str(item) for item in (data.get("facets_needed") or [])],
+        )
+
+
+@dataclass(slots=True)
+class ResearchBudget:
+    max_rounds: int = 3
+    max_requests_per_round: int = 4
+    max_total_requests: int = 10
+    max_return_tokens_per_request: int = 700
+
+    def __post_init__(self) -> None:
+        self.max_rounds = max(1, int(self.max_rounds or 1))
+        self.max_requests_per_round = max(1, int(self.max_requests_per_round or 1))
+        self.max_total_requests = max(1, int(self.max_total_requests or 1))
+        self.max_return_tokens_per_request = max(64, int(self.max_return_tokens_per_request or 64))
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class StoryDetailResult:
+    request_id: str
+    matches: list[dict[str, Any]] = field(default_factory=list)
+    confidence: float = 0.0
+    covered_facets: list[str] = field(default_factory=list)
+    missing_facets: list[str] = field(default_factory=list)
+    fact_status: FactStatus = "candidate"
+    sources: list[TraceableSource] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.request_id = _normalize_text(self.request_id)
+        self.matches = [
+            {str(key): value for key, value in item.items()}
+            for item in self.matches
+            if isinstance(item, Mapping)
+        ]
+        self.confidence = max(0.0, min(float(self.confidence or 0), 1.0))
+        self.covered_facets = _normalize_string_list(self.covered_facets)
+        self.missing_facets = _normalize_string_list(self.missing_facets)
+        normalized_status = _normalize_fact_status(self.fact_status)
+        if normalized_status not in FACT_STATUSES:
+            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, or missing")
+        self.fact_status = normalized_status  # type: ignore[assignment]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "matches": [dict(item) for item in self.matches],
+            "confidence": self.confidence,
+            "covered_facets": list(self.covered_facets),
+            "missing_facets": list(self.missing_facets),
+            "fact_status": self.fact_status,
+            "sources": [item.to_dict() for item in self.sources],
+        }
+
+
+@dataclass(slots=True)
+class ResearchResult:
+    request_id: str
+    request_type: ResearchRequestType
+    query: str
+    results: list[dict[str, Any]] = field(default_factory=list)
+    fact_status: FactStatus = "candidate"
+    sources: list[TraceableSource] = field(default_factory=list)
+    confidence: float = 0.0
+    covered_facets: list[str] = field(default_factory=list)
+    missing_facets: list[str] = field(default_factory=list)
+    token_estimate: int = 0
+    summary_size: int = 0
+    downgraded: bool = False
+
+    def __post_init__(self) -> None:
+        self.request_id = _normalize_text(self.request_id)
+        normalized_type = _normalize_text(self.request_type).lower()
+        if normalized_type not in RESEARCH_REQUEST_TYPES:
+            raise ValueError("request_type must be a supported research request type")
+        self.request_type = normalized_type  # type: ignore[assignment]
+        self.query = _normalize_text(self.query)
+        self.results = [
+            {str(key): value for key, value in item.items()}
+            for item in self.results
+            if isinstance(item, Mapping)
+        ]
+        normalized_status = _normalize_fact_status(self.fact_status)
+        if normalized_status not in FACT_STATUSES:
+            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, or missing")
+        self.fact_status = normalized_status  # type: ignore[assignment]
+        self.confidence = max(0.0, min(float(self.confidence or 0), 1.0))
+        self.covered_facets = _normalize_string_list(self.covered_facets)
+        self.missing_facets = _normalize_string_list(self.missing_facets)
+        self.token_estimate = max(0, int(self.token_estimate or 0))
+        self.summary_size = max(0, int(self.summary_size or 0))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "request_type": self.request_type,
+            "query": self.query,
+            "results": [dict(item) for item in self.results],
+            "fact_status": self.fact_status,
+            "sources": [item.to_dict() for item in self.sources],
+            "confidence": self.confidence,
+            "covered_facets": list(self.covered_facets),
+            "missing_facets": list(self.missing_facets),
+            "token_estimate": self.token_estimate,
+            "summary_size": self.summary_size,
+            "downgraded": self.downgraded,
+        }
+
+    @classmethod
+    def from_story_detail(cls, detail: StoryDetailResult, *, request_type: ResearchRequestType, query: str) -> "ResearchResult":
+        return cls(
+            request_id=detail.request_id,
+            request_type=request_type,
+            query=query,
+            results=detail.matches,
+            fact_status=detail.fact_status,
+            sources=detail.sources,
+            confidence=detail.confidence,
+            covered_facets=detail.covered_facets,
+            missing_facets=detail.missing_facets,
+            summary_size=sum(len(str(item)) for item in detail.matches),
+        )
+
+
+@dataclass(slots=True)
+class PlanningFact:
+    claim: str
+    fact_status: FactStatus
+    sources: list[TraceableSource] = field(default_factory=list)
+    confidence: float = 0.0
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        self.claim = _normalize_text(self.claim)
+        normalized_status = _normalize_fact_status(self.fact_status)
+        if normalized_status not in FACT_STATUSES:
+            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, or missing")
+        self.fact_status = normalized_status  # type: ignore[assignment]
+        self.confidence = max(0.0, min(float(self.confidence or 0), 1.0))
+        self.note = _normalize_text(self.note)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "claim": self.claim,
+            "fact_status": self.fact_status,
+            "sources": [item.to_dict() for item in self.sources],
+            "confidence": self.confidence,
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PlanningFact":
+        return cls(
+            claim=str(data.get("claim") or ""),
+            fact_status=cast(FactStatus, str(data.get("fact_status") or "candidate")),
+            sources=_coerce_sources(cast(Sequence[object], data.get("sources") or [])),
+            confidence=float(data.get("confidence") or 0),
+            note=str(data.get("note") or ""),
+        )
+
+
+@dataclass(slots=True)
+class PlanningNotebook:
+    notebook_id: str
+    confirmed_facts: list[PlanningFact] = field(default_factory=list)
+    candidate_facts: list[PlanningFact] = field(default_factory=list)
+    constraints: list[PlanningFact] = field(default_factory=list)
+    candidate_plot_moves: list[PlanningFact] = field(default_factory=list)
+    blocked_plot_moves: list[PlanningFact] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    assumptions: list[PlanningFact] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.notebook_id = _normalize_text(self.notebook_id)
+        if not self.notebook_id:
+            raise ValueError("notebook_id is required")
+        self.open_questions = _normalize_string_list(self.open_questions)
+
+    def add_research_result(self, result: ResearchResult) -> None:
+        if result.fact_status == "missing":
+            for facet in result.missing_facets or [result.query]:
+                if facet and facet not in self.open_questions:
+                    self.open_questions.append(facet)
+            return
+        summary = "; ".join(str(item.get("summary") or item.get("claim") or item.get("title") or item) for item in result.results[:2])
+        fact = PlanningFact(
+            claim=summary or result.query,
+            fact_status=result.fact_status,
+            sources=result.sources,
+            confidence=result.confidence,
+            note=f"{result.request_type}:{result.request_id}",
+        )
+        if result.fact_status in {"confirmed", "user_authorized"}:
+            self.confirmed_facts.append(fact)
+            return
+        if result.fact_status == "assumption":
+            self.assumptions.append(fact)
+            return
+        self.candidate_facts.append(fact)
+
+    def add_user_answer(self, *, question: str, answer: str, source_path: str = "interactive:outline_research_answer") -> None:
+        question_text = _normalize_text(question)
+        answer_text = _normalize_text(answer)
+        if not answer_text:
+            return
+        self.confirmed_facts.append(
+            PlanningFact(
+                claim=f"{question_text}: {answer_text}" if question_text else answer_text,
+                fact_status="user_authorized",
+                sources=[
+                    TraceableSource(
+                        type="user_answer",
+                        path=source_path,
+                        evidence_level="structured_state",
+                        snippet=answer_text[:240],
+                    )
+                ],
+                confidence=1.0,
+            )
+        )
+        self.open_questions = [item for item in self.open_questions if item != question_text]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "notebook_id": self.notebook_id,
+            "confirmed_facts": [item.to_dict() for item in self.confirmed_facts],
+            "candidate_facts": [item.to_dict() for item in self.candidate_facts],
+            "constraints": [item.to_dict() for item in self.constraints],
+            "candidate_plot_moves": [item.to_dict() for item in self.candidate_plot_moves],
+            "blocked_plot_moves": [item.to_dict() for item in self.blocked_plot_moves],
+            "open_questions": list(self.open_questions),
+            "assumptions": [item.to_dict() for item in self.assumptions],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "PlanningNotebook":
+        return cls(
+            notebook_id=str(data.get("notebook_id") or "outline-research-notebook"),
+            confirmed_facts=[
+                PlanningFact.from_dict(item) for item in (data.get("confirmed_facts") or []) if isinstance(item, Mapping)
+            ],
+            candidate_facts=[
+                PlanningFact.from_dict(item) for item in (data.get("candidate_facts") or []) if isinstance(item, Mapping)
+            ],
+            constraints=[
+                PlanningFact.from_dict(item) for item in (data.get("constraints") or []) if isinstance(item, Mapping)
+            ],
+            candidate_plot_moves=[
+                PlanningFact.from_dict(item)
+                for item in (data.get("candidate_plot_moves") or [])
+                if isinstance(item, Mapping)
+            ],
+            blocked_plot_moves=[
+                PlanningFact.from_dict(item)
+                for item in (data.get("blocked_plot_moves") or [])
+                if isinstance(item, Mapping)
+            ],
+            open_questions=[str(item) for item in (data.get("open_questions") or [])],
+            assumptions=[
+                PlanningFact.from_dict(item) for item in (data.get("assumptions") or []) if isinstance(item, Mapping)
+            ],
+        )
+
+
+@dataclass(slots=True)
+class SufficiencyDecision:
+    decision_id: str
+    status: SufficiencyStatus
+    known_enough: list[str] = field(default_factory=list)
+    blocking_gaps: list[str] = field(default_factory=list)
+    optional_gaps: list[str] = field(default_factory=list)
+    user_questions: list[str] = field(default_factory=list)
+    assumptions: list[PlanningFact] = field(default_factory=list)
+    remaining_risks: list[str] = field(default_factory=list)
+    required_actions: list[str] = field(default_factory=list)
+    sources: list[TraceableSource] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.decision_id = _normalize_text(self.decision_id)
+        normalized_status = _normalize_text(self.status).lower()
+        if normalized_status not in SUFFICIENCY_STATUSES:
+            raise ValueError("status must be enough, needs_user_input, proceed_with_assumptions, or blocked")
+        self.status = normalized_status  # type: ignore[assignment]
+        self.known_enough = _normalize_string_list(self.known_enough)
+        self.blocking_gaps = _normalize_string_list(self.blocking_gaps)
+        self.optional_gaps = _normalize_string_list(self.optional_gaps)
+        self.user_questions = _normalize_string_list(self.user_questions)[:3]
+        self.remaining_risks = _normalize_string_list(self.remaining_risks)
+        self.required_actions = _normalize_string_list(self.required_actions)
+        if self.status == "needs_user_input" and not self.user_questions:
+            raise ValueError("needs_user_input decisions must include user_questions")
+        if self.status == "blocked" and not self.required_actions:
+            raise ValueError("blocked decisions must include required_actions")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "decision_id": self.decision_id,
+            "status": self.status,
+            "known_enough": list(self.known_enough),
+            "blocking_gaps": list(self.blocking_gaps),
+            "optional_gaps": list(self.optional_gaps),
+            "user_questions": list(self.user_questions),
+            "assumptions": [item.to_dict() for item in self.assumptions],
+            "remaining_risks": list(self.remaining_risks),
+            "required_actions": list(self.required_actions),
+            "sources": [item.to_dict() for item in self.sources],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "SufficiencyDecision":
+        return cls(
+            decision_id=str(data.get("decision_id") or ""),
+            status=cast(SufficiencyStatus, str(data.get("status") or "")),
+            known_enough=[str(item) for item in (data.get("known_enough") or [])],
+            blocking_gaps=[str(item) for item in (data.get("blocking_gaps") or [])],
+            optional_gaps=[str(item) for item in (data.get("optional_gaps") or [])],
+            user_questions=[str(item) for item in (data.get("user_questions") or [])],
+            assumptions=[
+                PlanningFact.from_dict(item) for item in (data.get("assumptions") or []) if isinstance(item, Mapping)
+            ],
+            remaining_risks=[str(item) for item in (data.get("remaining_risks") or [])],
+            required_actions=[str(item) for item in (data.get("required_actions") or [])],
+            sources=_coerce_sources(cast(Sequence[object], data.get("sources") or [])),
+        )
+
+
+@dataclass(slots=True)
+class ChapterSummaryIndexEntry:
+    chapter_id: str
+    document_title_index: int
+    title: str = ""
+    characters: list[str] = field(default_factory=list)
+    concepts: list[str] = field(default_factory=list)
+    event_summary: str = ""
+    outcome: str = ""
+    source_document: str = ""
+    source_segment: str = ""
+    summary_status: str = "provisional"
+
+    def __post_init__(self) -> None:
+        self.chapter_id = _normalize_text(self.chapter_id)
+        self.document_title_index = int(self.document_title_index or 0)
+        self.title = _normalize_text(self.title)
+        self.characters = _normalize_string_list(self.characters)
+        self.concepts = _normalize_string_list(self.concepts)
+        self.event_summary = _normalize_text(self.event_summary)
+        self.outcome = _normalize_text(self.outcome)
+        self.source_document = _normalize_text(self.source_document)
+        self.source_segment = _normalize_text(self.source_segment)
+        self.summary_status = _normalize_text(self.summary_status) or "provisional"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ChapterSummaryIndex:
+    entries: list[ChapterSummaryIndexEntry] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"entries": [item.to_dict() for item in self.entries]}
+
+
+@dataclass(slots=True)
+class HistoricalOutlineEventCard:
+    event_id: str
+    title: str
+    characters: list[str] = field(default_factory=list)
+    concepts: list[str] = field(default_factory=list)
+    event_intent: str = ""
+    outcome: str = ""
+    time_hint: str = ""
+    source_chapter_id: str = ""
+    source_path: str = ""
+    fact_status: FactStatus = "candidate"
+
+    def __post_init__(self) -> None:
+        self.event_id = _normalize_text(self.event_id)
+        self.title = _normalize_text(self.title)
+        self.characters = _normalize_string_list(self.characters)
+        self.concepts = _normalize_string_list(self.concepts)
+        self.event_intent = _normalize_text(self.event_intent)
+        self.outcome = _normalize_text(self.outcome)
+        self.time_hint = _normalize_text(self.time_hint)
+        self.source_chapter_id = _normalize_text(self.source_chapter_id)
+        self.source_path = _normalize_text(self.source_path)
+        normalized_status = _normalize_fact_status(self.fact_status)
+        if normalized_status not in FACT_STATUSES:
+            raise ValueError("fact_status must be a supported value")
+        self.fact_status = normalized_status  # type: ignore[assignment]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class HistoricalOutlineEventIndex:
+    events: list[HistoricalOutlineEventCard] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"events": [item.to_dict() for item in self.events]}
 
 
 @dataclass(slots=True)
@@ -243,6 +982,7 @@ class BookContinuationPlan:
     relationship_guardrails: list[str] = field(default_factory=list)
     must_preserve: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
+    assumptions: list[PlanningFact] = field(default_factory=list)
     evidence: list[EvidenceItem] = field(default_factory=list)
     sources: list[TraceableSource] = field(default_factory=list)
 
@@ -282,6 +1022,7 @@ class BookContinuationPlan:
             "relationship_guardrails": list(self.relationship_guardrails),
             "must_preserve": list(self.must_preserve),
             "open_questions": list(self.open_questions),
+            "assumptions": [item.to_dict() for item in self.assumptions],
             "evidence": [item.to_dict() for item in self.evidence],
             "sources": [item.to_dict() for item in self.sources],
         }

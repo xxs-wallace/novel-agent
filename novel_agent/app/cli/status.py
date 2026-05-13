@@ -59,6 +59,8 @@ class StatusPresenter:
         "needs_review": ("Writer 分层生成", "需要审阅", "审阅并确认后继续"),
         "blocked_by_modeling": ("Writer 分层生成", "前置建模未完成", "返回粗读、精读或知识库流程补齐材料"),
         "initialized": ("Writer 分层生成", "写作流程已初始化", "下一步生成全书续写规划"),
+        "outline_research_user_input": ("Writer 分层生成", "需要你补充几个关键问题", "回答后继续大纲研究"),
+        "outline_research_blocked": ("Writer 分层生成", "前置建模不足", "先补齐建模材料再继续"),
         "freeze_a_review": ("Writer 分层生成", "请审阅全书续写规划", "确认后生成本批剧情大纲"),
         "freeze_a": ("Writer 分层生成", "全书续写规划已确认", "下一步生成本批剧情大纲"),
         "batch_review": ("Writer 分层生成", "请审阅本批剧情大纲", "确认后生成章节标题与梗概"),
@@ -90,6 +92,8 @@ class StatusPresenter:
 
     _WRITER_STAGE_DESCRIPTIONS: dict[str, str] = {
         "artifact saved": "已保存文件内容；保存只是保留修改，不会自动确认当前审阅节点。",
+        "outline_research_user_input": "大纲研究发现少量阻塞问题；你的回答会作为用户授权证据进入 planning notebook，不会直接写入正式记忆。",
+        "outline_research_blocked": "大纲研究判断前置建模不足；系统不会生成正式全书规划。",
         "freeze_a_review": "系统已生成全书续写方向、世界观补全与人物补充材料。",
         "batch_review": "系统已生成本批剧情大纲；确认后才会据此生成章节标题与梗概。",
         "Freeze B pending": "系统已生成本批剧情大纲；确认后才会据此生成章节标题与梗概。",
@@ -107,6 +111,9 @@ class StatusPresenter:
             WriterStageAction("生成全书续写规划", "prepare_planning"),
         ),
         "initialized": (WriterStageAction("生成全书续写规划", "prepare_planning"),),
+        "outline_research_user_input": (
+            WriterStageAction("提交补充回答并继续大纲研究", "continue_after_outline_research_input"),
+        ),
         "freeze_a_review": (WriterStageAction("确认全书续写规划", "continue_after_planning_review"),),
         "freeze_a": (WriterStageAction("生成本批剧情大纲", "prepare_batch_plan"),),
         "batch_review": (WriterStageAction("确认本批剧情大纲", "continue_after_batch_review"),),

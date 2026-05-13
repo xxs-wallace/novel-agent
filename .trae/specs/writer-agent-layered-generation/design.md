@@ -10,9 +10,7 @@ Writer 设计文档收敛为两个核心文件：
 字段级约束、恢复规则和验收 contract 仍以这些 spec / contract 为准：
 
 - [`spec.md`](spec.md)
-- [`specs/writer-input.spec.md`](specs/writer-input.spec.md)
-- [`specs/workflow-and-recovery.spec.md`](specs/workflow-and-recovery.spec.md)
-- [`specs/review-and-writeback.spec.md`](specs/review-and-writeback.spec.md)
+- [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)
 - [`contracts.md`](contracts.md)
 
 历史上独立的 workflow、writer execution、review writeback design 已压缩进本文摘要。它们不再作为新的设计入口维护，避免 class / method 级历史细节和当前代码脱节。
@@ -44,7 +42,11 @@ Writer 的核心不是让一个万能 Agent 从用户一句话直接写正文，
 flowchart TD
     A["原作正文 / Memory / KB / 用户意图"] --> B["建模状态检查"]
     B --> C["故事规模与高潮输入"]
-    C --> D["Outline Seed Packet"]
+    C --> C1["从用户概述抽取人物提及"]
+    C1 --> C2["本地 Character Memory 对齐"]
+    C2 -->|存在未匹配人物| C3["询问是否新增人物并补档"]
+    C3 --> D["Outline Seed Packet"]
+    C2 -->|全部已匹配| D["Outline Seed Packet"]
     D --> E["Outline Research Loop"]
     E -->|信息不足| F["向用户询问关键缺口"]
     F --> E
@@ -73,7 +75,8 @@ flowchart TD
 初始输入称为 `OutlineSeedPacket`，只提供索引入口：
 
 - 用户续写意图、故事规模、节奏偏好和高潮约束
-- 全部人物姓名、别名和极短标签
+- 从用户概述中抽取并对齐后的重点人物
+- 可查询的人物姓名、别名和极短标签索引
 - 世界观精炼梗概
 - 世界观重要概念名词索引
 - 已有故事精炼总览：每部小说的大致内容、起止时间和当前续写起点
@@ -86,6 +89,22 @@ flowchart TD
 - `world_concept`：按概念名词请求规则、限制、代价、例外和禁止突破点。
 
 本地 `Context Broker` 负责把这些语义请求转换为可执行检索，并返回裁剪后的 evidence。模型每轮判断信息是否足够；若不足以靠本地资料解决，则向用户提出少量关键问题。
+
+当 research 达到 `ResearchBudget` 上限时，系统进入 `Sufficiency Gate`，不能直接硬写大纲，也不能只返回失败。模型必须整理：
+
+- 已经确认的信息
+- 尚不明确的信息
+- 阻塞大纲生成的缺口
+- 可以安全降级为假设的低风险缺口
+- 需要用户补充回答的具体问题
+
+预算耗尽后的出口只有三类：
+
+- `needs_user_input`：存在阻塞缺口，需要用户补充知识或授权边界。
+- `proceed_with_assumptions`：剩余缺口不阻塞大纲，可用明确假设继续生成草案。
+- `blocked`：建模基础不足，必须先补 Memory / 历史大纲 / 续写起点等前置材料。
+
+高风险事项，例如终局秘密、主要人物身份、关系跃迁、世界规则突破和新增人物是否成立，不得被模型静默假设。用户补充后的回答应作为 `user_authorized` evidence 进入 planning notebook，再继续一小轮 research 或直接生成大纲。
 
 详细请求格式、`Story Detail Resolver`、事件索引要求和 research budget 见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)。
 
@@ -120,7 +139,7 @@ flowchart TD
 
 世界观补全只补后续剧情真的需要的规则、组织、能力限制、地理与历史边界。
 
-人物补充先解析用户显式点名但 Memory 不存在的人物，再检查剧情结构中尚未被具体人物承接的功能位。计划人物以 `PlannedCharacterProfile` 存在，只有正文中首次登场、通过校验并完成回写后，才转入正式 Character Memory。
+人物补充不应要求用户先手工填写“涉及人物名称”。系统应从用户故事概述中抽取人物提及，交给本地 Agent 查询和对齐 Character Memory。只有未匹配到历史档案的人名，才询问用户是否确认新增人物，并要求补充最小人物档案。完成显式人物对齐后，再检查剧情结构中尚未被具体人物承接的功能位。计划人物以 `PlannedCharacterProfile` 存在，只有正文中首次登场、通过校验并完成回写后，才转入正式 Character Memory。
 
 ### Layer 2: 批次剧情规划
 
@@ -191,6 +210,7 @@ flowchart TD
 
 - `Outline Research Agent`：根据轻量索引多轮提出 research request，维护 planning notebook，并判断信息是否足够。
 - `Context Broker`：把语义请求转换为 SQLite / Markdown / Memory 查询，返回 evidence。
+- `Character Mention Extractor`：从用户故事概述中抽取人物姓名、称谓和疑似新角色，交给本地对齐。
 - `Book Planner`：生成全书续写规划和章节 slot。
 - `World Expansion Agent`：补最小设定约束。
 - `Character Casting Agent`：处理显式新角色和隐式角色缺位。
