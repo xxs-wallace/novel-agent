@@ -22,6 +22,7 @@ from ..schemas.prompt_io_schema import (
     SegmentedDocumentOutput,
 )
 from ..utils.text_utils import markdown_title
+from .chapter_boundary_detector import ChapterBoundaryCandidate, ChapterBoundaryDetector
 from .chinese_text_analyzer import ChineseTextAnalyzer
 from .chunk_reader_service import TextBatch
 
@@ -163,6 +164,7 @@ class BatchPromptSegment:
     start_index: int
     end_index: int
     text: str
+    boundary_candidate: ChapterBoundaryCandidate | None = None
 
     @property
     def byte_length(self) -> int:
@@ -173,6 +175,7 @@ class BatchPromptSegment:
             segment_id=self.segment_id,
             byte_length=self.byte_length,
             text=self.text,
+            boundary_candidate=self.boundary_candidate.to_dict() if self.boundary_candidate is not None else None,
         )
 
 
@@ -198,6 +201,7 @@ class DocumentIngestService:
 
         # Segmentation still uses lightweight tokenization for content-tag scoring.
         self.text_analyzer = ChineseTextAnalyzer()
+        self.boundary_detector = ChapterBoundaryDetector()
 
     def _emit_progress(self, event: dict[str, Any]) -> None:
         if self.progress_callback is not None:
@@ -249,7 +253,13 @@ class DocumentIngestService:
             index += 1
         return [(start, end) for start, end in merged]
 
-    def _segment_span_text(self, text: str) -> list[tuple[int, int]]:
+    def _segment_span_text(
+        self,
+        text: str,
+        *,
+        boundary_candidates: Sequence[ChapterBoundaryCandidate] | None = None,
+        span_start_offset: int = 0,
+    ) -> list[tuple[int, int]]:
         if not text:
             return []
         heading_starts = [
@@ -260,7 +270,12 @@ class DocumentIngestService:
         inline_heading_starts = [
             start for start in self._iter_parenthesized_chinese_heading_starts(text) if start > 0
         ]
-        section_starts = sorted({0, *heading_starts, *inline_heading_starts, len(text)})
+        detected_boundary_starts = {
+            max(0, candidate.start_offset - span_start_offset)
+            for candidate in (boundary_candidates or [])
+            if candidate.start_offset > span_start_offset
+        }
+        section_starts = sorted({0, *heading_starts, *inline_heading_starts, *detected_boundary_starts, len(text)})
         segmented_ranges: list[tuple[int, int]] = []
         for section_start, section_end in zip(section_starts, section_starts[1:]):
             raw_ranges: list[tuple[int, int]] = []
@@ -282,7 +297,20 @@ class DocumentIngestService:
         batch_cursor = 0
         next_segment_id = 1
         for span_index, span in enumerate(batch.spans):
-            for start, end in self._segment_span_text(span.text):
+            boundary_candidates = self.boundary_detector.detect(
+                text=span.text,
+                source_path=span.source_path,
+                base_offset=span.start_offset,
+                toc_markdown=self.toc_markdown,
+            )
+            boundary_by_local_start = {
+                candidate.start_offset - span.start_offset: candidate for candidate in boundary_candidates
+            }
+            for start, end in self._segment_span_text(
+                span.text,
+                boundary_candidates=boundary_candidates,
+                span_start_offset=span.start_offset,
+            ):
                 segment_text = span.text[start:end]
                 if not segment_text:
                     continue
@@ -293,6 +321,7 @@ class DocumentIngestService:
                         start_index=batch_cursor + start,
                         end_index=batch_cursor + end,
                         text=segment_text,
+                        boundary_candidate=boundary_by_local_start.get(start),
                     )
                 )
                 next_segment_id += 1
@@ -355,10 +384,26 @@ class DocumentIngestService:
             copied["content_chars"] = len(str(copied["content"]))
             copied["_batch_start_index"] = ordered_segments[0].start_index
             copied["_batch_end_index"] = ordered_segments[-1].end_index
+            self._apply_boundary_metadata(copied, ordered_segments[0])
             materialized.append(copied)
         if consumed_segment_ids != all_segment_ids:
             return []
         return materialized
+
+    def _apply_boundary_metadata(self, raw: dict[str, Any], first_segment: BatchPromptSegment) -> None:
+        candidate = first_segment.boundary_candidate
+        if candidate is None:
+            raw.setdefault("boundary_candidate_id", "")
+            raw.setdefault("raw_heading", "")
+            raw.setdefault("normalized_heading", "")
+            raw.setdefault("boundary_confidence", 0.0)
+            raw.setdefault("boundary_status", "uncertain")
+            return
+        raw["boundary_candidate_id"] = candidate.candidate_id
+        raw["raw_heading"] = candidate.raw_heading
+        raw["normalized_heading"] = candidate.normalized_heading
+        raw["boundary_confidence"] = candidate.confidence
+        raw["boundary_status"] = "confirmed" if candidate.is_high_confidence else "uncertain"
 
     def _split_materialized_documents_by_segment_titles(
         self,
@@ -388,7 +433,8 @@ class DocumentIngestService:
             current_group: list[int] = []
             for segment_id in segment_ids:
                 segment = segments_by_id[segment_id]
-                if current_group and self._extract_explicit_title(segment.text):
+                has_high_boundary = bool(segment.boundary_candidate and segment.boundary_candidate.is_high_confidence)
+                if current_group and (has_high_boundary or self._extract_explicit_title(segment.text)):
                     groups.append(current_group)
                     current_group = []
                 current_group.append(segment_id)
@@ -411,8 +457,12 @@ class DocumentIngestService:
                 copied["_batch_end_index"] = group_segments[-1].end_index
                 copied["document_title_index"] = base_title_index + group_offset
                 copied["inferred_chapter_no"] = None
+                self._apply_boundary_metadata(copied, group_segments[0])
                 explicit_title = self._extract_explicit_title(str(copied["content"]))
-                if explicit_title:
+                boundary_candidate = group_segments[0].boundary_candidate
+                if boundary_candidate is not None and boundary_candidate.is_high_confidence:
+                    copied["document_title"] = boundary_candidate.normalized_heading
+                elif explicit_title:
                     copied["document_title"] = explicit_title
                 reason = str(copied.get("segmentation_reason") or "").strip()
                 copied["segmentation_reason"] = (
@@ -975,6 +1025,9 @@ class DocumentIngestService:
             for raw in processed_doc_items:
                 content = str(raw.get("content", "")).lstrip()
                 explicit_title = self._extract_explicit_title(content)
+                if raw.get("boundary_status") == "confirmed" and str(raw.get("normalized_heading") or "").strip():
+                    raw["document_title"] = str(raw.get("normalized_heading")).strip()
+                    continue
                 if explicit_title:
                     raw["document_title"] = explicit_title
                     continue
@@ -1031,6 +1084,11 @@ class DocumentIngestService:
                         "character_keywords": [str(x) for x in raw.get("character_keywords", [])],
                         "content_tags": [str(x) for x in raw.get("content_tags", [])],
                         "segmentation_notes": raw.get("segmentation_reason"),
+                        "boundary_candidate_id": str(raw.get("boundary_candidate_id") or ""),
+                        "raw_heading": str(raw.get("raw_heading") or ""),
+                        "normalized_heading": str(raw.get("normalized_heading") or ""),
+                        "boundary_confidence": float(raw.get("boundary_confidence") or 0.0),
+                        "boundary_status": str(raw.get("boundary_status") or "uncertain"),
                         "ingestion_run_id": run_id,
                         "created_at": now,
                         "updated_at": now,

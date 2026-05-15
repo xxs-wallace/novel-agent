@@ -44,6 +44,7 @@ def build_segmentation_prompt(
         f"9. 如果长时间未发现章节名，且同一章节累计已超过约 {chapter_split_chars} 字符，同时连续内容在时间、地点、主行动、叙事视角或核心冲突上发生显著变化，可以开启新的“未命名章节-N”；否则继续沿用当前章节。\n"
         "10. 若提供了续传衔接上下文，它只用于帮助判断章节边界和句段延续，不要把其中已出现的文本重复映射到本批次 segment_ids。\n"
         "11. 你必须覆盖全部输入 segment；每个 segment 只能出现在一个 document 中；segment_ids 必须按原顺序递增。\n"
+        "12. 若 segment 带有 boundary_candidate：confidence >= 0.82 且 boundary_type 为 chapter/volume/part 的候选必须开启新 document；低置信候选只作为参考，必要时可标记为不切章。\n"
     )
     user_prompt = f"""
 输入批次说明：
@@ -53,6 +54,7 @@ def build_segmentation_prompt(
 - 同一章节的多个 document 必须共享同一个 document_title_index
 - 没有显式章节名时，优先沿用上一章节；不要把普通场景转场、心理变化、对话主题变化当作新章节
 - 极短且含数字的独立 segment 往往是章节标题；中文数字也算数字，例如“一、二、三、十、十五、二十”
+- segments 中的 boundary_candidate 是本地规则检测出的章节边界候选；高置信 chapter/volume/part 候选必须作为 document 起点，中低置信候选请结合上下文判断
 - 若同一章节累计超过约 {chapter_split_chars} 字符且内容发生显著断裂，可开启新的“未命名章节-N”
 - 每个 document 的 character_keywords 固定返回空数组，人物分析留给精读阶段
 - 每个 document 必须提炼 content_tags

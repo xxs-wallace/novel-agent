@@ -24,6 +24,11 @@ class DocumentRow:
     source_file_name: str
     source_start_offset: int
     source_end_offset: int
+    boundary_candidate_id: str = ""
+    raw_heading: str = ""
+    normalized_heading: str = ""
+    boundary_confidence: float = 0.0
+    boundary_status: str = "uncertain"
 
 
 class DocumentsRepo:
@@ -63,8 +68,9 @@ class DocumentsRepo:
                 source_path, source_file_name, source_start_offset, source_end_offset,
                 source_batch_no, document_title, document_title_index, inferred_chapter_no,
                 content_chars, character_keywords_json, content_tags_csv, segmentation_notes,
+                boundary_candidate_id, raw_heading, normalized_heading, boundary_confidence, boundary_status,
                 ingestion_run_id, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 payload.get('path', ''),
@@ -87,6 +93,11 @@ class DocumentsRepo:
                 json.dumps(payload.get('character_keywords', []), ensure_ascii=False),
                 ",".join([str(tag).strip() for tag in payload.get('content_tags', []) if str(tag).strip()]),
                 payload.get('segmentation_notes'),
+                payload.get('boundary_candidate_id', ''),
+                payload.get('raw_heading', ''),
+                payload.get('normalized_heading', ''),
+                float(payload.get('boundary_confidence', 0.0) or 0.0),
+                payload.get('boundary_status', 'uncertain'),
                 payload.get('ingestion_run_id', ''),
                 payload.get('created_at', ''),
                 payload.get('updated_at', ''),
@@ -182,4 +193,9 @@ class DocumentsRepo:
             source_file_name=str(row['source_file_name']),
             source_start_offset=int(row['source_start_offset']),
             source_end_offset=int(row['source_end_offset']),
+            boundary_candidate_id=str(row['boundary_candidate_id'] or '') if 'boundary_candidate_id' in row.keys() else '',
+            raw_heading=str(row['raw_heading'] or '') if 'raw_heading' in row.keys() else '',
+            normalized_heading=str(row['normalized_heading'] or '') if 'normalized_heading' in row.keys() else '',
+            boundary_confidence=float(row['boundary_confidence'] or 0.0) if 'boundary_confidence' in row.keys() else 0.0,
+            boundary_status=str(row['boundary_status'] or 'uncertain') if 'boundary_status' in row.keys() else 'uncertain',
         )

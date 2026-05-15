@@ -8,6 +8,7 @@ from novel_agent.app.llm import InvalidJSONResponseError, JsonModelClient, Model
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.repos.reading_progress_repo import ReadingProgressRepo
+from novel_agent.app.services.chapter_boundary_detector import ChapterBoundaryDetector
 from novel_agent.app.services.chunk_reader_service import ChunkFileSpan, TextBatch
 from novel_agent.app.services.document_ingest_service import DocumentIngestService
 
@@ -181,7 +182,34 @@ def test_build_batch_segments_keeps_parenthesized_chinese_headings_as_hard_bound
 
     assert any(segment.text.startswith("（九）") for segment in segments)
     assert any(segment.text.startswith("（十）") for segment in segments)
+    assert [segment.boundary_candidate.raw_heading for segment in segments if segment.boundary_candidate] == ["（九）", "（十）"]
     assert "".join(segment.text for segment in segments) == text
+
+
+def test_chapter_boundary_detector_returns_structured_candidates(tmp_path: Path) -> None:
+    source_path = (tmp_path / "novel.txt").as_posix()
+    text = (
+        "第一章 雨夜来信\n"
+        "他们在雨里等消息。\n\n"
+        "（二）\n"
+        "第二段正式开始。\n\n"
+        "2026年5月15日\n"
+        "这是一行日期，不应当被当作章节。\n"
+    )
+
+    candidates = ChapterBoundaryDetector().detect(
+        text=text,
+        source_path=source_path,
+        toc_markdown="目录\n第一章 雨夜来信\n（二）",
+    )
+
+    assert [candidate.raw_heading for candidate in candidates] == ["第一章 雨夜来信", "（二）"]
+    assert candidates[0].normalized_ordinal == 1
+    assert candidates[0].boundary_type == "chapter"
+    assert candidates[0].confidence >= 0.82
+    assert "toc_match" in candidates[0].evidence
+    assert candidates[0].start_offset == 0
+    assert "2026年5月15日" not in [candidate.raw_heading for candidate in candidates]
 
 
 class CaptureModelClient:
@@ -320,7 +348,8 @@ def test_ingest_batches_splits_model_grouped_parenthesized_chapter_titles(tmp_pa
         )
         rows = conn.execute(
             """
-            SELECT document_title, document_title_index, content, segmentation_notes
+            SELECT document_title, document_title_index, content, segmentation_notes,
+                   boundary_candidate_id, raw_heading, normalized_heading, boundary_confidence, boundary_status
             FROM documents
             WHERE book_id = 'parenthesized_chapters'
             ORDER BY doc_id
@@ -332,6 +361,11 @@ def test_ingest_batches_splits_model_grouped_parenthesized_chapter_titles(tmp_pa
     assert [row["document_title_index"] for row in rows] == [1, 2, 3]
     assert [row["content"].lstrip()[:3] for row in rows] == ["（八）", "（九）", "（十）"]
     assert all("deterministic_explicit_heading_split" in row["segmentation_notes"] for row in rows)
+    assert [row["raw_heading"] for row in rows] == ["（八）", "（九）", "（十）"]
+    assert [row["normalized_heading"] for row in rows] == ["（八）", "（九）", "（十）"]
+    assert all(row["boundary_confidence"] >= 0.82 for row in rows)
+    assert [row["boundary_status"] for row in rows] == ["confirmed", "confirmed", "confirmed"]
+    assert all(row["boundary_candidate_id"] for row in rows)
 
 
 def test_ingest_batches_includes_resume_context_and_trims_overlap(tmp_path: Path) -> None:

@@ -43,6 +43,11 @@ class NovelAgentDB:
                 character_keywords_json TEXT NOT NULL DEFAULT '[]',
                 content_tags_csv TEXT NOT NULL DEFAULT '',
                 segmentation_notes TEXT,
+                boundary_candidate_id TEXT NOT NULL DEFAULT '',
+                raw_heading TEXT NOT NULL DEFAULT '',
+                normalized_heading TEXT NOT NULL DEFAULT '',
+                boundary_confidence REAL NOT NULL DEFAULT 0,
+                boundary_status TEXT NOT NULL DEFAULT 'uncertain',
                 ingestion_run_id TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT ''
@@ -179,8 +184,17 @@ class NovelAgentDB:
 
     def _ensure_documents_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
-        if "content_tags_csv" not in columns:
-            conn.execute("ALTER TABLE documents ADD COLUMN content_tags_csv TEXT NOT NULL DEFAULT ''")
+        additions = {
+            "content_tags_csv": "TEXT NOT NULL DEFAULT ''",
+            "boundary_candidate_id": "TEXT NOT NULL DEFAULT ''",
+            "raw_heading": "TEXT NOT NULL DEFAULT ''",
+            "normalized_heading": "TEXT NOT NULL DEFAULT ''",
+            "boundary_confidence": "REAL NOT NULL DEFAULT 0",
+            "boundary_status": "TEXT NOT NULL DEFAULT 'uncertain'",
+        }
+        for column, ddl in additions.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE documents ADD COLUMN {column} {ddl}")
 
     def _ensure_book_assets_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(book_assets)").fetchall()}

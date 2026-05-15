@@ -37,6 +37,7 @@ class SegmentationInputSegment:
     segment_id: int
     byte_length: int
     text: str
+    boundary_candidate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

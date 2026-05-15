@@ -79,6 +79,19 @@ def _insert_document(
     )
 
 
+def _chapter_summary_md(plot: str) -> str:
+    return (
+        "## 剧情事件链\n"
+        f"- {plot}\n\n"
+        "## 人物状态/关系变化\n"
+        "- 路明非明确回应并进入学院，人物行动与关系变化被保留。\n\n"
+        "## 关键信息/设定\n"
+        "- 学院入口和同行关系成为后续记忆更新依据。\n\n"
+        "## 结构功能/节奏\n"
+        "- 本章承担入场推进与关系铺垫功能。\n"
+    )
+
+
 def test_character_evidence_batch_joins_consecutive_documents_without_chapter_binding() -> None:
     documents = [
         _doc(doc_id=1, title_index=1, title="第一章", content="路明非走进校园。"),
@@ -302,7 +315,7 @@ def test_close_read_runner_accepts_batch_level_character_evidence_and_filters_lo
         )
         conn.commit()
 
-    long_summary = "路明非明确回应并进入学院，人物行动与关系变化被保留。" * 8
+    long_summary = _chapter_summary_md("路明非明确回应并进入学院，随后与诺诺同行，张开地图造成的伪人物候选被过滤。")
 
     def fake_generate_json(
         self,
@@ -349,6 +362,8 @@ def test_close_read_runner_accepts_batch_level_character_evidence_and_filters_lo
                 "",
             )
         if "Memory Update Candidate Agent" in system_prompt:
+            return fallback_factory(), ""
+        if "Character Reduce Agent" in system_prompt:
             return fallback_factory(), ""
         return (
             {

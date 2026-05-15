@@ -161,13 +161,21 @@ def test_context_assembly_service_to_dict_matches_contract_shape(tmp_path: Path)
 
     assert set(payload_dict.keys()) == {
         "chapter_context",
+        "source_arc_context",
         "world_summary_md",
         "character_profiles",
         "story_outline_md",
+        "memory_status",
         "missing_context",
     }
     assert payload_dict["world_summary_md"].startswith("现代都市奇幻世界")
     assert payload_dict["story_outline_md"].startswith("主线围绕")
+    assert payload_dict["source_arc_context"] == []
+    assert payload_dict["memory_status"] == {
+        "chapter_context": "provisional",
+        "story_outline": "provisional",
+        "source_arc_context": "provisional",
+    }
     assert isinstance(payload_dict["missing_context"], list)
 
     chapter_context = payload_dict["chapter_context"]

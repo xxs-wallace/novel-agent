@@ -240,14 +240,17 @@ def test_fragment_card_builder_retries_on_schema_error_and_syncs_preferred_tags(
     with db.connect() as conn:
         db.init_schema(conn)
         init_creative_kb_schema(conn)
-        cards, stats = service.build_and_persist(conn, documents=[document])
+        results, stats = service.build_and_persist(conn, documents=[document])
         conn.commit()
 
         assert model_client.calls == 2
         assert stats.built_cards == 1
         assert stats.validation_retries == 1
-        assert len(cards) == 1
-        card = cards[0]
+        assert len(results) == 1
+        result = results[0]
+        assert result.status == "success"
+        assert result.fragment_card is not None
+        card = result.fragment_card
         assert card.doc_id == str(document.doc_id)
         assert card.preferred_tags == document.content_tags
         assert card.source_offsets == (document.source_start_offset, document.source_end_offset)
