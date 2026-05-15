@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +154,36 @@ def test_build_batch_segments_keeps_markdown_headings_as_hard_boundaries(tmp_pat
     assert "".join(segment.text for segment in segments) == text
 
 
+def test_build_batch_segments_keeps_parenthesized_chinese_headings_as_hard_boundaries(tmp_path: Path) -> None:
+    service = build_service()
+    text = (
+        "前一章的收束继续推进。" * 12
+        + "\n\n（九）\n"
+        + "新章节从等待消息开始。" * 12
+        + "\n\n（十）\n"
+        + "下一章继续进入新的冲突。" * 12
+    )
+    batch = TextBatch(
+        batch_no=1,
+        chars=len(text),
+        spans=[
+            ChunkFileSpan(
+                source_path=(tmp_path / "parenthesized.txt").as_posix(),
+                source_file_name="parenthesized.txt",
+                start_offset=0,
+                end_offset=len(text),
+                text=text,
+            )
+        ],
+    )
+
+    segments = service._build_batch_segments(batch)
+
+    assert any(segment.text.startswith("（九）") for segment in segments)
+    assert any(segment.text.startswith("（十）") for segment in segments)
+    assert "".join(segment.text for segment in segments) == text
+
+
 class CaptureModelClient:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = payload
@@ -170,6 +201,40 @@ class CaptureModelClient:
         _ = system_prompt, fallback_factory, use_fallback_on_error
         self.prompts.append(user_prompt)
         return self.payload, ""
+
+
+class GroupAllSegmentsModelClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory,
+        use_fallback_on_error: bool = False,
+    ):
+        _ = system_prompt, fallback_factory, use_fallback_on_error
+        self.prompts.append(user_prompt)
+        segment_ids = [int(match.group(1)) for match in re.finditer(r'"segment_id":\s*(\d+)', user_prompt)]
+        return {
+            "documents": [
+                {
+                    "document_local_id": 1,
+                    "document_title": "（八）",
+                    "document_title_index": 8,
+                    "inferred_chapter_no": 8,
+                    "segment_ids": segment_ids,
+                    "character_keywords": [],
+                    "content_tags": [],
+                    "segmentation_reason": "model_grouped_multiple_explicit_titles",
+                    "continuity_hint": "",
+                }
+            ],
+            "batch_summary": {"chapter_count": 1, "document_count": 1, "new_characters": []},
+        }, ""
 
 
 class RetryThenFallbackModelClient:
@@ -208,6 +273,65 @@ class EmptyDocumentsModelClient:
     ):
         _ = system_prompt, user_prompt, fallback_factory, use_fallback_on_error
         return {"documents": []}, ""
+
+
+def test_ingest_batches_splits_model_grouped_parenthesized_chapter_titles(tmp_path: Path) -> None:
+    db_path = tmp_path / "grouped_parenthesized_titles.db"
+    db = NovelAgentDB(db_path)
+    model_client = GroupAllSegmentsModelClient()
+    service = DocumentIngestService(
+        model_client=model_client,  # type: ignore[arg-type]
+        documents_repo=DocumentsRepo(),
+        progress_repo=ReadingProgressRepo(),
+        preferred_document_chars_min=800,
+        preferred_document_chars_max=1600,
+    )
+    text = (
+        "（八）\n"
+        + "第八章内容继续推进，人物在旧冲突中等待新的消息。" * 50
+        + "\n\n（九）\n"
+        + "第九章内容转入新的地点，人物关系也开始出现变化。" * 50
+        + "\n\n（十）\n"
+        + "第十章内容展开新的事件，前文伏笔被重新提到。" * 50
+    )
+    batch = TextBatch(
+        batch_no=1,
+        chars=len(text),
+        spans=[
+            ChunkFileSpan(
+                source_path=(tmp_path / "parenthesized_chapters.txt").as_posix(),
+                source_file_name="parenthesized_chapters.txt",
+                start_offset=0,
+                end_offset=len(text),
+                text=text,
+            )
+        ],
+    )
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = service.ingest_batches(
+            conn=conn,
+            repo_root=tmp_path,
+            book_id="parenthesized_chapters",
+            batches=[batch],
+            run_id="grouped-title-run",
+            reset_book=True,
+        )
+        rows = conn.execute(
+            """
+            SELECT document_title, document_title_index, content, segmentation_notes
+            FROM documents
+            WHERE book_id = 'parenthesized_chapters'
+            ORDER BY doc_id
+            """
+        ).fetchall()
+
+    assert result.inserted_documents == 3
+    assert [row["document_title"] for row in rows] == ["（八）", "（九）", "（十）"]
+    assert [row["document_title_index"] for row in rows] == [1, 2, 3]
+    assert [row["content"].lstrip()[:3] for row in rows] == ["（八）", "（九）", "（十）"]
+    assert all("deterministic_explicit_heading_split" in row["segmentation_notes"] for row in rows)
 
 
 def test_ingest_batches_includes_resume_context_and_trims_overlap(tmp_path: Path) -> None:

@@ -87,7 +87,7 @@ CONTENT_TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
     "山地": ("山", "山路", "山坡"),
     "河湖海": ("江", "河", "湖", "海", "水面"),
     "地下空间": ("地下", "隧道", "地窖", "井下"),
-    "遗迹古城": ("古城", "遗迹", "废墟"),
+    "遗迹古城": ("古城", "遗迹", "废墟", "白帝城"),
     "酒店餐馆": ("餐馆", "饭店", "酒店", "包厢"),
     "办公室": ("办公室", "会议室", "工位"),
     "实验室": ("实验室", "试剂", "仪器"),
@@ -118,6 +118,7 @@ RESUME_OVERLAP_MIN_CHARS = 20
 CHINESE_NUMBER_CHARS = "零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾"
 HEADING_NUMBER_PATTERN = re.compile(rf"[0-9{CHINESE_NUMBER_CHARS}]")
 HEADING_KEYWORD_PATTERN = re.compile(r"(第.{0,12}[章幕卷节回]|Chapter|Part|Episode|卷|章|幕|节|回)", re.IGNORECASE)
+PARENTHESIZED_CHINESE_HEADING_PATTERN = re.compile(rf"^[（(][{CHINESE_NUMBER_CHARS}]+[）)]$")
 
 SKIP_DOCUMENT_PATTERNS = [
     re.compile(pattern, re.IGNORECASE)
@@ -256,7 +257,10 @@ class DocumentIngestService:
             for match in re.finditer(r"(?m)^#{1,2}\s+\S.*$", text)
             if match.start() > 0
         ]
-        section_starts = [0, *heading_starts, len(text)]
+        inline_heading_starts = [
+            start for start in self._iter_parenthesized_chinese_heading_starts(text) if start > 0
+        ]
+        section_starts = sorted({0, *heading_starts, *inline_heading_starts, len(text)})
         segmented_ranges: list[tuple[int, int]] = []
         for section_start, section_end in zip(section_starts, section_starts[1:]):
             raw_ranges: list[tuple[int, int]] = []
@@ -294,6 +298,20 @@ class DocumentIngestService:
                 next_segment_id += 1
             batch_cursor += len(span.text)
         return segments
+
+    def _iter_parenthesized_chinese_heading_starts(self, text: str) -> list[int]:
+        starts: list[int] = []
+        for match in re.finditer(rf"[（(][{CHINESE_NUMBER_CHARS}]+[）)]", text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end == -1:
+                line_end = len(text)
+            line_prefix = text[line_start : match.start()].strip()
+            line_suffix = text[match.end() : line_end].strip()
+            if line_prefix or line_suffix:
+                continue
+            starts.append(match.start())
+        return starts
 
     def _materialize_segment_documents(
         self,
@@ -341,6 +359,69 @@ class DocumentIngestService:
         if consumed_segment_ids != all_segment_ids:
             return []
         return materialized
+
+    def _split_materialized_documents_by_segment_titles(
+        self,
+        *,
+        batch_segments: list[BatchPromptSegment],
+        doc_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        segments_by_id = {segment.segment_id: segment for segment in batch_segments}
+        split_items: list[dict[str, Any]] = []
+        for raw in doc_items:
+            raw_segment_ids = raw.get("segment_ids")
+            if not isinstance(raw_segment_ids, list):
+                split_items.append(raw)
+                continue
+            segment_ids: list[int] = []
+            for item in raw_segment_ids:
+                try:
+                    segment_id = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if segment_id in segments_by_id:
+                    segment_ids.append(segment_id)
+            if not segment_ids:
+                split_items.append(raw)
+                continue
+            groups: list[list[int]] = []
+            current_group: list[int] = []
+            for segment_id in segment_ids:
+                segment = segments_by_id[segment_id]
+                if current_group and self._extract_explicit_title(segment.text):
+                    groups.append(current_group)
+                    current_group = []
+                current_group.append(segment_id)
+            if current_group:
+                groups.append(current_group)
+            if len(groups) <= 1:
+                split_items.append(raw)
+                continue
+            try:
+                base_title_index = int(raw.get("document_title_index", 0))
+            except (TypeError, ValueError):
+                base_title_index = 0
+            for group_offset, group in enumerate(groups):
+                group_segments = [segments_by_id[segment_id] for segment_id in group]
+                copied = dict(raw)
+                copied["segment_ids"] = group
+                copied["content"] = "".join(segment.text for segment in group_segments)
+                copied["content_chars"] = len(str(copied["content"]))
+                copied["_batch_start_index"] = group_segments[0].start_index
+                copied["_batch_end_index"] = group_segments[-1].end_index
+                copied["document_title_index"] = base_title_index + group_offset
+                copied["inferred_chapter_no"] = None
+                explicit_title = self._extract_explicit_title(str(copied["content"]))
+                if explicit_title:
+                    copied["document_title"] = explicit_title
+                reason = str(copied.get("segmentation_reason") or "").strip()
+                copied["segmentation_reason"] = (
+                    f"{reason}; deterministic_explicit_heading_split"
+                    if reason
+                    else "deterministic_explicit_heading_split"
+                )
+                split_items.append(copied)
+        return split_items
 
     def _find_batch_split_index(self, text: str) -> int | None:
         if len(text) < 2:
@@ -489,6 +570,8 @@ class DocumentIngestService:
         if HEADING_KEYWORD_PATTERN.search(line):
             return True
         compact = re.sub(r"\s+", "", line)
+        if PARENTHESIZED_CHINESE_HEADING_PATTERN.fullmatch(compact):
+            return True
         if re.fullmatch(rf"[0-9{CHINESE_NUMBER_CHARS}]+", compact):
             return True
         return bool(re.match(rf"^[0-9{CHINESE_NUMBER_CHARS}]+[\s._\-、]+.+$", line))
@@ -858,6 +941,10 @@ class DocumentIngestService:
                 batch_segments=batch_segments,
                 doc_items=doc_items,
             )
+            raw_doc_items = self._split_materialized_documents_by_segment_titles(
+                batch_segments=batch_segments,
+                doc_items=raw_doc_items,
+            )
             if not raw_doc_items and not self.model_client.settings.dry_run:
                 payload = self._safe_fallback_segmentation(batch, batch_segments)
                 fallback_items = payload.get("documents")
@@ -865,6 +952,10 @@ class DocumentIngestService:
                 raw_doc_items = self._materialize_segment_documents(
                     batch_segments=batch_segments,
                     doc_items=fallback_doc_items,
+                )
+                raw_doc_items = self._split_materialized_documents_by_segment_titles(
+                    batch_segments=batch_segments,
+                    doc_items=raw_doc_items,
                 )
             if pending_overlap_source and raw_doc_items:
                 first_content = str(raw_doc_items[0].get("content", ""))

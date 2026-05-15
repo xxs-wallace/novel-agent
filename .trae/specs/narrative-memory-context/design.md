@@ -32,6 +32,8 @@
 - 所有 Memory 更新尽量基于章节级精读输出，而不是零散片段直写。
 - 续写主 Agent 优先消费结构化长期上下文，而不是回读整本原文。
 - Memory 层必须允许“已实现的简化版”和“目标设计的增强版”并存一段时间。
+- 粗读入库阶段需要先识别章节边界候选，再把候选交给 segmenter、模型和 validator；本地规则负责候选与置信度，不负责用少数硬编码格式替代模型的语义分组。
+- 高置信章节边界必须保护 source offset、segment boundary 和后续 `document_title_index`，否则 close-read、人物档案、故事大纲和 SourceArcMap 都会继承错误章节索引。
 - Chapter Summary Agent 的目标粒度保持章节级，继续按 `document_title_index` 或超长章节拆批处理。
 - Character Evidence Agent 可以使用独立 batch 粒度，把多个连续 `documents` 拼接后做人物抽取、发言判断、行动状态与关系线索提取。
 - Character Evidence Agent 的目标不是做原文 offset 标注，而是为 Memory Candidate Agent 提供更可靠的人物更新输入。
@@ -40,6 +42,53 @@
 - 章节摘要和故事大纲应区分 `provisional` 与 `committed` 状态：顺序 close-read 产生的即时梗概和大纲增量默认是暂定结果；结合后续窗口或 `SourceArcMap` 复核后，才能作为稳定结构判断被 Writer 优先消费。
 
 ## 3. Memory 层数据范围
+
+### 3.0 Ingest Boundary Metadata
+
+粗读入库产出的 `documents` 是后续 Memory 的 leaf node。章节边界一旦在这一层被吞入上一 document，精读、人物档案、故事大纲与 SourceArcMap 都只能消费错误索引。因此粗读阶段需要显式维护章节边界候选与校验结果。
+
+推荐的边界候选结构：
+
+```json
+{
+  "candidate_id": "boundary-couple-txt-0009",
+  "source_path": "couple.txt",
+  "start_offset": 123456,
+  "end_offset": 123460,
+  "raw_heading": "（九）",
+  "normalized_heading": "（九）",
+  "normalized_ordinal": 9,
+  "boundary_type": "chapter",
+  "confidence": 0.96,
+  "format_family": "parenthesized_chinese_ordinal",
+  "evidence": [
+    "standalone_short_line",
+    "ordinal_sequence",
+    "repeated_book_pattern"
+  ]
+}
+```
+
+推荐在 document 或可重建的 sidecar 中保存：
+
+- `boundary_candidate_id`
+- `raw_heading`
+- `normalized_heading`
+- `boundary_confidence`
+- `boundary_status`
+- `source_start_offset`
+- `source_end_offset`
+
+`boundary_status` 推荐至少区分：
+
+- `confirmed`
+  - 高置信边界，且模型分组和 validator 均未发现冲突
+- `model_inferred`
+  - 模型判定为章节边界，但本地候选置信度不高
+- `uncertain`
+  - 边界候选存在冲突、缺序、跳序或格式不稳定
+- `corrected`
+  - validator 发现模型吞并多个高置信边界后做过拆分或重跑
 
 ### 3.1 Character Memory
 
@@ -394,6 +443,53 @@ original_query
 这条 trace 是可审计解释链：它说明系统为什么从 root page 最终回源到某些 document。Writer 只消费最终必要上下文；调试和 reviewer 可以读取完整 trace。
 
 ## 4. 当前已实现代码总览
+
+### 4.0 粗读入库与章节边界识别
+
+当前粗读入口的核心实现位于：
+
+- `novel_agent/app/services/document_ingest_service.py`
+
+当前链路是：
+
+```text
+source text
+  -> 本地切成 byte-bounded segments
+  -> segmentation prompt
+  -> 模型返回 documents + segment_ids
+  -> 本地校验 segment 连续覆盖
+  -> documents 入库
+```
+
+已实现能力：
+
+- 按文本预算切 segment，保证字符不丢失
+- Markdown 标题作为 hard boundary
+- 独占一行的中文括号章号，例如 `（九）`，作为 hard boundary
+- `_extract_explicit_title()` 识别短章节标题
+- 如果模型把多个显式章节标题合成同一个 document，入库前会按 segment 标题拆开
+- 模型输出必须覆盖连续 `segment_ids`，否则使用安全 fallback 或报错
+
+当前限制：
+
+- 章节边界识别仍散落在 `DocumentIngestService` 的 segment、title extraction 和 postprocess 中
+- 还没有独立 `ChapterBoundaryDetector` 数据结构保存候选、置信度、证据和格式族
+- 还没有基于同一本书动态学习 `format_family` 与 ordinal sequence 的机制
+- `documents` 表尚未显式保存 `boundary_candidate_id`、`boundary_confidence`、`boundary_status`
+- 当已有任务的 `documents` 表已经把多个章节写成同一个 `document_title_index` 时，单独重跑 close-read 不能修复章节边界，必须重跑粗读入库或重建受影响的 documents
+
+目标重构后，粗读链路应变为：
+
+```text
+source text + toc/bookmarks
+  -> ChapterBoundaryDetector: candidates + confidence
+  -> SegmentBuilder: high-confidence boundaries become hard boundaries
+  -> Segmentation Agent: model groups segment_ids into documents
+  -> SegmentationValidator: coverage + high-confidence boundary checks
+  -> DocumentIngestService: persist documents + boundary metadata
+```
+
+`ChapterBoundaryDetector` 不应是额外的用户可见任务，也不应替代模型分组。它是粗读流程内部的边界候选器，负责把规则、目录、编号序列和同书格式学习统一成可解释的候选输入。
 
 ### 4.1 精读主流程
 
@@ -791,6 +887,10 @@ original_query
 
 ### 9.2 已部分落地
 
+- 粗读章节边界保护
+  - 当前已能保护 Markdown 标题和独占一行的中文括号章号
+  - 当前已能在模型吞并多个显式章节标题时做入库前拆分
+  - 但尚未抽象为独立 `ChapterBoundaryDetector` / `SegmentationValidator`
 - 章节相关性评分
   - 表已支持
   - 但当前模型输出和后处理仍较弱
@@ -811,6 +911,7 @@ original_query
 ### 9.3 尚未正式独立成模块
 
 - 独立的 Memory Update Agent
+- 独立的 `ChapterBoundaryDetector` 与 boundary metadata 持久化
 - 独立的 Character Evidence Agent
 - 独立的 Memory Candidate Agent
 - 独立的 Source Arc Mapping Agent / Service
@@ -822,6 +923,68 @@ original_query
 - close-read 完成后的 `SourceArcMap` 文件或表级载体
 
 ## 10. 推荐的 Memory 层目标结构
+
+### 10.0 ChapterBoundaryDetector
+
+推荐新增 `ChapterBoundaryDetector`，但它属于粗读入库流程内部组件，不是新的用户可见 Agent。它的职责是发现候选、标注置信度和提供可审计证据；最终 document 分组仍由 Segmentation Agent 的模型输出和本地 validator 共同决定。
+
+建议接口：
+
+```python
+@dataclass(frozen=True)
+class ChapterBoundaryCandidate:
+    candidate_id: str
+    source_path: str
+    start_offset: int
+    end_offset: int
+    raw_heading: str
+    normalized_heading: str
+    normalized_ordinal: int | None
+    boundary_type: Literal["chapter", "volume", "part", "scene", "unknown"]
+    confidence: float
+    format_family: str
+    evidence: tuple[str, ...]
+
+
+class ChapterBoundaryDetector:
+    def detect(
+        self,
+        text: str,
+        *,
+        source_path: str,
+        source_start_offset: int,
+        toc_entries: Sequence[TocEntry] = (),
+        book_profile: ChapterBoundaryProfile | None = None,
+    ) -> list[ChapterBoundaryCandidate]: ...
+```
+
+候选来源：
+
+- 目录 / PDF bookmark / 文件名中的章节序号
+- 独立短行标题
+- 连续编号序列
+- `第N章`、`第N回`、`卷N`、`幕N`
+- `Chapter N`、`Part N`
+- 中文数字、阿拉伯数字、罗马数字
+- 括号编号，例如 `（九）`
+- 同一本书内反复出现的标题格式
+
+Detector 的输出进入两个地方：
+
+- `SegmentBuilder`
+  - 高置信 `chapter` / `volume` / `part` 候选必须成为 hard boundary
+  - 中低置信候选可作为 prompt hint，不强制切分
+- `SegmentationValidator`
+  - 如果模型返回的单个 document 含多个高置信章节边界，validator 必须拆分或重跑该 batch
+  - 如果模型跳过候选、跳序或把低置信候选提升为章节，validator 应记录 `boundary_status`
+
+建议逐步迁移路径：
+
+1. 先把当前 `DocumentIngestService._segment_span_text()`、`_extract_explicit_title()` 和 `_split_materialized_documents_by_segment_titles()` 中的章节判断抽到 Detector / Validator。
+2. 保存候选到内存 sidecar，并在 debug export 中输出，便于解释粗读为什么切章。
+3. 为 `documents` 增加可选 boundary metadata 字段或独立 sidecar 表。
+4. 引入 `ChapterBoundaryProfile`，根据一本书前若干章动态学习 format family 与 ordinal sequence。
+5. 当 close-read 或 SourceArcMap 发现章节边界错误时，提供“重建粗读 documents + 级联重跑受影响 close-read”的修复入口。
 
 ### 10.1 Reading Agent
 
@@ -1082,9 +1245,14 @@ Memory 层只提供事实输入与可选定位上下文；pattern 的存储、�
   - 从 append-only 升级为 section-aware merge
 - `OutlineService.apply_update()`
   - 从 append-only 升级为主线优先压缩
+- `DocumentIngestService`
+  - 把章节边界候选、segment hard boundary、模型分组校验拆成 `ChapterBoundaryDetector`、`SegmentBuilder` 和 `SegmentationValidator`
 
 ### 11.3 建议新增
 
+- `ChapterBoundaryDetector`
+- `ChapterBoundaryProfile`
+- `SegmentationValidator`
 - `ContextAssemblyService`
 - `PlotSummaryUnitCompressionService`
 - `SourceArcMappingService`
@@ -1100,20 +1268,24 @@ Memory 层只提供事实输入与可选定位上下文；pattern 的存储、�
 ## 12. 推荐实现顺序
 
 1. 将当前精读与 Memory 逻辑文档化并保持可运行
-2. 为章节摘要和故事大纲 schema 增加 `provisional / committed` 状态、`evidence_window` 与 `target_range`
-3. 拆出 Character Evidence Agent 的 batch 输入与 batch-level 输出 contract
-4. 新增 Memory Candidate Agent，汇合章节摘要和人物证据结果，输出默认 `provisional` 的大纲更新候选
-5. 新增 Source Arc Mapping 后处理，基于完整章节摘要和大纲生成 `SourceArcMap`；若章节梗概超过预算，先通过重叠窗口压缩为 `plot_summary_units`
-6. 新增窗口级摘要 / 大纲定稿流程，用较大的 `evidence_window` 复核较小的 `target_range`，并把结果升级为 `committed`
-7. 新增 `ContextAssemblyService`，先打通续写主 Agent 的事实上下文输入，并能在必要时输出相关 `SourceArcMap` 片段和 memory 状态
-8. 拆分 `_persist_batch()` 为多个 update service
-9. 强化人物档案 merge 策略
-10. 强化世界观 section 合并
-11. 强化大纲压缩与章节关联
+2. 抽出 `ChapterBoundaryDetector` / `SegmentationValidator`，保护粗读入库的高置信章节边界，并为错误边界提供重建入口
+3. 为章节摘要和故事大纲 schema 增加 `provisional / committed` 状态、`evidence_window` 与 `target_range`
+4. 拆出 Character Evidence Agent 的 batch 输入与 batch-level 输出 contract
+5. 新增 Memory Candidate Agent，汇合章节摘要和人物证据结果，输出默认 `provisional` 的大纲更新候选
+6. 新增 Source Arc Mapping 后处理，基于完整章节摘要和大纲生成 `SourceArcMap`；若章节梗概超过预算，先通过重叠窗口压缩为 `plot_summary_units`
+7. 新增窗口级摘要 / 大纲定稿流程，用较大的 `evidence_window` 复核较小的 `target_range`，并把结果升级为 `committed`
+8. 新增 `ContextAssemblyService`，先打通续写主 Agent 的事实上下文输入，并能在必要时输出相关 `SourceArcMap` 片段和 memory 状态
+9. 拆分 `_persist_batch()` 为多个 update service
+10. 强化人物档案 merge 策略
+11. 强化世界观 section 合并
+12. 强化大纲压缩与章节关联
 
 ## 13. 最小测试清单
 
 - 精读阶段可从 `reading_progress` 继续
+- 粗读分段时高置信章节边界不会被合并进前一个 segment
+- 模型把多个高置信章节边界合入同一个 document 时，validator 会拆分或重跑
+- `boundary_status = uncertain` 的 document 不会被当作稳定章节结构输入 Writer
 - `document_character_mentions` 证据过滤可拦截伪人名
 - Character Evidence Agent 可把多个 document 拼接为同一个 batch
 - Character Evidence Agent 输出不依赖逐 `doc_id`、原文连续子串或 offset

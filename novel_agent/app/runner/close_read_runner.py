@@ -59,6 +59,7 @@ CHAPTER_SUMMARY_SECTION_ORDER = (
     "关键信息/设定",
     "结构功能/节奏",
 )
+CHAPTER_SUMMARY_MAX_CHARS = 6000
 CHAPTER_SUMMARY_SECTION_ALIASES = {
     "摘要元信息": "摘要元信息",
     "批次元信息": "摘要元信息",
@@ -1543,7 +1544,9 @@ class CloseReadRunner:
                 summaries_by_index[title_index] = item
         persistable: list[tuple[ChapterBatch, dict[str, Any]]] = []
         for title_index in batch.title_indexes:
-            sub_batch = batch.as_single_title_batch(title_index)
+            sub_batch = batch
+            if batch.is_multi_chapter:
+                sub_batch = batch.as_single_title_batch(title_index)
             sub_payload = self._payload_for_title_index(
                 sub_batch=sub_batch,
                 payload=payload,
@@ -1927,8 +1930,19 @@ class CloseReadRunner:
         world_service: WorldStateService,
         outline_service: OutlineService,
     ) -> int:
-        existing = chapters_repo.get(conn, book_id=self.config.book_id, document_title_index=batch.document_title_index)
-        summary_intermediate = list(json.loads(existing["summary_intermediate_json"])) if existing and existing["summary_intermediate_json"] else []
+        existing = chapters_repo.get(
+            conn,
+            book_id=self.config.book_id,
+            document_title_index=batch.document_title_index,
+        )
+        existing_summary_md = str(existing["summary_md"] or "") if existing else ""
+        summary_intermediate = self._load_json_list(existing["summary_intermediate_json"]) if existing else []
+        if self._should_seed_existing_summary_intermediate(
+            existing=existing,
+            batch=batch,
+            summary_intermediate=summary_intermediate,
+        ):
+            summary_intermediate.append(existing_summary_md)
         current_summary = self._normalize_chapter_summary(
             summary_md=str(payload.get("chapter_summary_md", "")).strip(),
             batch=batch,
@@ -1936,12 +1950,22 @@ class CloseReadRunner:
         )
         if current_summary:
             summary_intermediate.append(current_summary)
+        (
+            source_doc_start_id,
+            source_doc_end_id,
+            source_doc_count,
+            effective_source_total_chars,
+        ) = self._processed_chapter_source_stats(
+            conn=conn,
+            documents_repo=documents_repo,
+            batch=batch,
+        )
         final_summary = ""
         if batch.is_complete_chapter:
             final_summary = self._merge_intermediate_summaries(
                 summaries=summary_intermediate or ([current_summary] if current_summary else []),
                 batch=batch,
-                source_total_chars=int(existing["source_total_chars"]) + batch.total_chars if existing else batch.total_chars,
+                source_total_chars=batch.chapter_total_chars or effective_source_total_chars,
             )
         summary_short = str(payload.get("chapter_summary_short", "")).strip()
         if batch.is_complete_chapter:
@@ -1976,12 +2000,15 @@ class CloseReadRunner:
             if current_importance_score >= existing_importance_score
             else existing_importance_reason
         )
-        effective_source_total_chars = int(existing["source_total_chars"] or 0) + batch.total_chars if existing else batch.total_chars
-        outline_update = self._enrich_outline_update_with_sources(
+        current_outline_update = self._enrich_outline_update_with_sources(
             batch=batch,
             outline_update=payload.get("outline_update", {}),
             summary_short=summary_short,
             fallback_participants=mentioned_characters,
+        )
+        outline_update = self._merge_outline_updates(
+            existing=self._load_json_dict(existing["outline_update_json"]) if existing else {},
+            current=current_outline_update,
         )
         chapter_id = chapters_repo.upsert(
             conn,
@@ -1989,12 +2016,12 @@ class CloseReadRunner:
                 "book_id": self.config.book_id,
                 "document_title_index": batch.document_title_index,
                 "chapter_title": batch.chapter_title,
-                "source_doc_start_id": int(existing["source_doc_start_id"]) if existing else batch.documents[0].doc_id,
-                "source_doc_end_id": batch.documents[-1].doc_id,
-                "source_doc_count": int(existing["source_doc_count"] or 0) + len(batch.documents) if existing else len(batch.documents),
+                "source_doc_start_id": source_doc_start_id,
+                "source_doc_end_id": source_doc_end_id,
+                "source_doc_count": source_doc_count,
                 "source_total_chars": effective_source_total_chars,
-                "summary_intermediate": summary_intermediate if not batch.is_complete_chapter else [],
-                "summary_md": final_summary if batch.is_complete_chapter else "",
+                "summary_intermediate": summary_intermediate,
+                "summary_md": final_summary if batch.is_complete_chapter else existing_summary_md,
                 "summary_short": summary_short,
                 "summary_status": "provisional",
                 "summary_evidence_window": f"{batch.document_title_index}-{batch.document_title_index}",
@@ -2034,7 +2061,7 @@ class CloseReadRunner:
             updates=raw_character_updates,
             mentioned_doc_ids_by_name=self._invert_mentions(document_mentions),
             speaking_doc_ids_by_name=self._invert_mentions(speaking_mentions),
-            story_events_by_name=self._story_events_by_character(outline_update),
+            story_events_by_name=self._story_events_by_character(current_outline_update),
         )
         world_service.apply_update(book_id=self.config.book_id, world_update=payload.get("world_update", {}))
         if isinstance(outline_update, dict):
@@ -2083,6 +2110,7 @@ class CloseReadRunner:
                 order=index,
                 label=label,
                 summary=summary,
+                source_doc_range=doc_range,
             )
             enriched_events.append(
                 {
@@ -2114,7 +2142,9 @@ class CloseReadRunner:
         for event in outline_update.get("timeline_events", []) or []:
             if not isinstance(event, dict):
                 continue
-            for name in self.character_mention_service.clean_names(event.get("participants", []) if isinstance(event.get("participants"), list) else []):
+            raw_participants = event.get("participants", [])
+            participants = raw_participants if isinstance(raw_participants, list) else []
+            for name in self.character_mention_service.clean_names(participants):
                 grouped.setdefault(name, []).append(
                     {
                         "event_id": event.get("event_id", ""),
@@ -2130,9 +2160,113 @@ class CloseReadRunner:
                 )
         return grouped
 
-    def _outline_event_id(self, *, document_title_index: int, order: int, label: str, summary: str) -> str:
+    def _merge_outline_updates(self, *, existing: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        if not existing:
+            return dict(current)
+        if not current:
+            return dict(existing)
+
+        merged = dict(existing)
+        for key, value in current.items():
+            if key in {
+                "timeline_events",
+                "source_doc_ids",
+                "source_title_indexes",
+                "source_doc_range",
+                "event_summary",
+            }:
+                continue
+            if value not in (None, "", [], {}):
+                merged[key] = value
+
+        timeline_events: list[dict[str, Any]] = []
+        by_key: dict[str, dict[str, Any]] = {}
+        raw_events = [*(existing.get("timeline_events") if isinstance(existing.get("timeline_events"), list) else [])]
+        raw_events.extend(current.get("timeline_events") if isinstance(current.get("timeline_events"), list) else [])
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                continue
+            event = dict(raw_event)
+            doc_ids = sorted(set(self._safe_int_list(event.get("source_doc_ids"))))
+            if doc_ids:
+                event["source_doc_ids"] = doc_ids
+                event["source_doc_range"] = self._doc_range_text(doc_ids)
+            key = self._outline_event_key(event)
+            if key in by_key:
+                by_key[key].update(
+                    {
+                        item_key: item_value
+                        for item_key, item_value in event.items()
+                        if item_value not in (None, "", [], {})
+                    }
+                )
+                continue
+            by_key[key] = event
+            timeline_events.append(event)
+
+        source_doc_ids = sorted(
+            {
+                doc_id
+                for source in (existing, current)
+                for doc_id in self._safe_int_list(source.get("source_doc_ids"))
+            }
+        )
+        if not source_doc_ids:
+            for event in timeline_events:
+                source_doc_ids.extend(self._safe_int_list(event.get("source_doc_ids")))
+            source_doc_ids = sorted(set(source_doc_ids))
+
+        source_title_indexes = sorted(
+            {
+                title_index
+                for source in (existing, current)
+                for title_index in self._safe_int_list(source.get("source_title_indexes"))
+            }
+        )
+        merged["timeline_events"] = timeline_events
+        merged["source_doc_ids"] = source_doc_ids
+        merged["source_doc_range"] = self._doc_range_text(source_doc_ids)
+        merged["source_title_indexes"] = source_title_indexes
+        merged["event_summary"] = self._outline_event_summary(
+            timeline_events,
+            fallback=str(current.get("event_summary") or existing.get("event_summary") or ""),
+        )
+        return merged
+
+    def _outline_event_key(self, event: dict[str, Any]) -> str:
+        doc_ids = self._safe_int_list(event.get("source_doc_ids"))
+        doc_key = str(event.get("source_doc_range") or "").strip()
+        if not doc_key:
+            doc_key = ",".join(str(item) for item in sorted(set(doc_ids)))
+        label = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(event.get("label") or "")).lower()
+        summary = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(event.get("summary") or "")).lower()
+        raw_participants = event.get("participants", [])
+        participants = (
+            ",".join(sorted(str(item).strip() for item in raw_participants if str(item).strip()))
+            if isinstance(raw_participants, list)
+            else ""
+        )
+        if doc_key:
+            return "docs||" + "||".join([label or summary, participants, doc_key])
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id:
+            return f"event||{event_id}"
+        return "text||" + "||".join([label or summary, participants])
+
+    def _outline_event_id(
+        self,
+        *,
+        document_title_index: int,
+        order: int,
+        label: str,
+        summary: str,
+        source_doc_range: str = "",
+    ) -> str:
         base = re.sub(r"[^\w\u4e00-\u9fff]+", "-", label or summary[:24]).strip("-").lower()
         suffix = base[:32] or f"event-{order:02d}"
+        source_suffix = re.sub(r"[^\w\u4e00-\u9fff]+", "-", source_doc_range).strip("-").lower()
+        if source_suffix:
+            return f"chapter-{document_title_index}:event-{order:02d}-{suffix}-docs-{source_suffix}"
         return f"chapter-{document_title_index}:event-{order:02d}-{suffix}"
 
     def _outline_event_summary(self, events: list[dict[str, Any]], *, fallback: str) -> str:
@@ -2144,6 +2278,53 @@ class CloseReadRunner:
         if not doc_ids:
             return ""
         return str(doc_ids[0]) if len(doc_ids) == 1 else f"{doc_ids[0]}-{doc_ids[-1]}"
+
+    def _should_seed_existing_summary_intermediate(
+        self,
+        *,
+        existing: Any,
+        batch: ChapterBatch,
+        summary_intermediate: list[Any],
+    ) -> bool:
+        if not existing or summary_intermediate:
+            return False
+        if not str(existing["summary_md"] or "").strip():
+            return False
+        if not batch.documents:
+            return False
+        existing_start_id = self._safe_int(existing["source_doc_start_id"]) or 0
+        existing_end_id = self._safe_int(existing["source_doc_end_id"]) or 0
+        first_batch_doc_id = batch.documents[0].doc_id
+        last_batch_doc_id = batch.documents[-1].doc_id
+        return 0 < existing_start_id < first_batch_doc_id and existing_end_id < last_batch_doc_id
+
+    def _processed_chapter_source_stats(
+        self,
+        *,
+        conn,
+        documents_repo: DocumentsRepo,
+        batch: ChapterBatch,
+    ) -> tuple[int, int, int, int]:
+        chapter_docs = documents_repo.fetch_by_title_index(
+            conn,
+            book_id=self.config.book_id,
+            document_title_index=batch.document_title_index,
+        )
+        if not chapter_docs:
+            return (
+                batch.documents[0].doc_id,
+                batch.documents[-1].doc_id,
+                len(batch.documents),
+                batch.total_chars,
+            )
+        source_doc_end_id = chapter_docs[-1].doc_id if batch.is_complete_chapter else batch.documents[-1].doc_id
+        processed_docs = [doc for doc in chapter_docs if doc.doc_id <= source_doc_end_id]
+        return (
+            chapter_docs[0].doc_id,
+            source_doc_end_id,
+            len(processed_docs),
+            sum(doc.content_chars for doc in processed_docs),
+        )
 
     def _normalize_chapter_summary(self, *, summary_md: str, batch: ChapterBatch, source_total_chars: int) -> str:
         sections = self._parse_summary_sections(summary_md)
@@ -2169,7 +2350,7 @@ class CloseReadRunner:
             raise InvalidChapterSynopsisError("normalized chapter summary has no structure/pacing section", review_path=review_path)
         sections["摘要元信息"] = self._build_summary_meta_lines(batch=batch, source_total_chars=source_total_chars)
         rendered = self._render_summary_sections(sections)
-        return clamp_text(rendered, 6000)
+        return clamp_text(rendered, CHAPTER_SUMMARY_MAX_CHARS)
 
     def _normalize_low_signal_summary_sections(self, summary_md: str) -> dict[str, list[str]]:
         text = str(summary_md or "").strip() or "模型判断该批次为低信号文本，缺少可概括剧情。"
@@ -2210,7 +2391,7 @@ class CloseReadRunner:
             source_total_chars=source_total_chars,
             merged_batches=len(summaries),
         )
-        return clamp_text(self._render_summary_sections(merged_sections), 6000)
+        return self._render_summary_sections(merged_sections)
 
     def _build_summary_meta_lines(
         self,
@@ -2333,6 +2514,15 @@ class CloseReadRunner:
         except json.JSONDecodeError:
             return []
         return value if isinstance(value, list) else []
+
+    def _load_json_dict(self, raw_value: object) -> dict[str, Any]:
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
 
     def _load_character_profiles_with_budget(
         self,

@@ -32,6 +32,7 @@
 ### 模块边界
 
 - 本 spec 负责：
+  - 粗读入库时的章节边界候选、章节标题元数据与 document/chapter 对齐约束
   - 人物档案
   - 世界观文档
   - 章节摘要
@@ -52,6 +53,8 @@
 - 续写主 Agent 读取 Memory 时优先取结构化结果，不直接回读全书原文。
 - Memory 的目标是“持续一致”，不是“文学代表性”。
 - Chapter Summary Agent 的处理粒度 SHALL 保持章节级，即继续围绕 `document_title_index` 或超长章节拆批生成章节摘要。
+- 粗读入库阶段 SHALL 在构造 segmentation prompt 前识别章节边界候选；本地规则只产生候选与置信度，不应把少数硬编码格式当作唯一章节切分真相。
+- 高置信章节边界 SHALL 作为 segment hard boundary，粗读模型不得把它吞入上一章节 document；中低置信边界 SHOULD 作为模型判定参考，而不是强制切分。
 - Character Evidence Agent 的处理粒度 MAY 独立于章节摘要，将多个 `documents` 拼接为一个 evidence batch，用于降低人物抽取与人物性判断的 prompt/JSON 维度。
 - Character Evidence Agent 的目标是为 Memory Candidate Agent 提供人物抽取、发言判断、行动状态与关系变化线索；它不是原文 offset 标注或可审计语料回源系统。
 - Source Arc Mapping SHOULD 在 close-read 完成后执行，而不是在顺序精读过程中即时决定；该阶段基于完整章节摘要、故事大纲、人物线和世界观，从全局视角记录源作品中相对独立的故事篇章、转折点与功能段落。
@@ -59,6 +62,68 @@
 - 章节摘要和故事大纲中依赖后文判断的内容 SHOULD 区分 `provisional` 与 `committed` 状态；顺序 close-read 产生的即时判断默认是暂定结果，只有在结合后续窗口或全局篇章地图复核后才可标记为已定稿。
 
 ## Memory Layers
+
+### Requirement: Chapter Boundary Detection for Ingest
+系统 SHALL 在粗读入库阶段引入 `ChapterBoundaryDetector` 或等价组件，用于发现章节边界候选并保护后续 Memory 的章节级索引。
+
+#### Scenario: Boundary Candidate 输出
+- **WHEN** 粗读流程读取原始小说文本、目录或 PDF 书签
+- **THEN** `ChapterBoundaryDetector` SHOULD 输出结构化边界候选：
+  - `candidate_id`
+  - `source_path`
+  - `start_offset`
+  - `end_offset`
+  - `raw_heading`
+  - `normalized_heading`
+  - `normalized_ordinal`
+  - `boundary_type`：例如 `chapter` / `volume` / `part` / `scene`
+  - `confidence`
+  - `evidence`：例如 `standalone_short_line`、`toc_match`、`ordinal_sequence`、`repeated_book_pattern`
+  - `format_family`：例如 `第N章`、`（N）`、`Chapter N`、`roman_numeral`
+- **AND** Detector MUST 保留 source offset，供粗读 document 和后续章节摘要回源
+- **AND** Detector SHOULD 以“候选 + 置信度”表达判断，不应只返回布尔值
+
+#### Scenario: 粗读 segmenter 集成
+- **WHEN** 粗读流程把原文切成 prompt segments
+- **THEN** segmenter SHALL 调用 `ChapterBoundaryDetector`
+- **AND** 高置信 `chapter` / `volume` / `part` 边界 MUST 成为 segment hard boundary
+- **AND** segmenter 不得把高置信章节标题合并进前一个 segment
+- **AND** 中低置信候选 MAY 进入 segmentation prompt，交由模型结合上下文决定是否形成新 document/chapter
+- **AND** segmenter 的职责仍是控制文本预算、保持字符不丢失和 source offset 连续；章节语义判断由 Detector 候选、模型输出和 validator 共同完成
+
+#### Scenario: 模型分组与 validator
+- **WHEN** Segmentation Agent 根据 segments 返回 documents
+- **THEN** 模型 SHOULD 返回覆盖连续 `segment_ids` 的 document 分组和章节标题判断
+- **AND** Agent MUST 校验所有 segment 是否被连续、无重复、无遗漏地覆盖
+- **AND** 如果一个模型返回的 document 内部包含多个高置信章节边界，Agent MUST 拆分该 document 或重跑该 batch
+- **AND** 如果章节边界识别不可靠，Agent SHOULD 显式标记该 document/chapter 为 `boundary_status = uncertain` 或等价字段
+- **AND** 前端、Writer 和 close-read 不应把 `boundary_status = uncertain` 的章节边界当作已定稿结构事实
+
+#### Scenario: 不同小说格式适配
+- **WHEN** 一本书使用非 Markdown 标题或非常规章节格式
+- **THEN** Detector SHOULD 结合多种信号发现候选，包括：
+  - 目录、PDF 书签或文件名
+  - 独立短行
+  - 连续编号序列
+  - `第N章` / `第N回` / `卷N` / `幕N`
+  - `Chapter N` / `Part N`
+  - 中文数字、阿拉伯数字、罗马数字与括号编号
+  - 同一本书内重复出现的标题格式
+- **AND** 对同一本书，Detector SHOULD 动态学习已出现的 `format_family` 和 ordinal sequence；连续出现的格式可提高后续候选置信度
+- **AND** 低置信候选不得单独触发强制切章，避免把正文中的编号、日期、对话或列表误判为章节
+
+#### Scenario: Boundary 元数据进入 Memory
+- **WHEN** 粗读入库生成 `documents`
+- **THEN** 每个 document SHOULD 保存或可重建：
+  - `boundary_candidate_id`
+  - `raw_heading`
+  - `normalized_heading`
+  - `boundary_confidence`
+  - `boundary_status`
+  - `source_start_offset`
+  - `source_end_offset`
+- **AND** Chapter Summary、Story Outline、SourceArcMap 与 BTree Page SHOULD 优先使用已校验的章节边界元数据
+- **AND** 如果后续 close-read 或 SourceArcMap 发现边界错误，系统 SHOULD 能标记并重建受影响的 document/chapter Memory，而不是只在章节摘要层修补标题
 
 ### Requirement: BTree-like Narrative Memory
 close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分层 Page 数据结构，而不是一组彼此孤立的摘要文件。

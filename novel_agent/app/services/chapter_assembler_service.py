@@ -60,15 +60,21 @@ class ChapterBatch:
         docs = self.documents_for_title_index(document_title_index)
         if not docs:
             raise ValueError(f"No documents for title index {document_title_index}")
+        is_already_single_title = len(self.title_indexes) == 1
+        split_reason = self.split_reason
+        if not is_already_single_title and self.is_complete_chapter:
+            split_reason = SPLIT_REASON_FULL_CHAPTER
         return ChapterBatch(
             document_title_index=document_title_index,
             chapter_title=docs[0].document_title,
             documents=docs,
             is_complete_chapter=self.is_complete_chapter,
-            chapter_doc_count=len(docs),
-            chapter_total_chars=sum(doc.content_chars for doc in docs),
-            batch_doc_start_index=1,
-            split_reason=SPLIT_REASON_FULL_CHAPTER if self.is_complete_chapter else self.split_reason,
+            chapter_doc_count=self.chapter_doc_count if is_already_single_title else len(docs),
+            chapter_total_chars=(
+                self.chapter_total_chars if is_already_single_title else sum(doc.content_chars for doc in docs)
+            ),
+            batch_doc_start_index=self.batch_doc_start_index if is_already_single_title else 1,
+            split_reason=split_reason,
         )
 
 
