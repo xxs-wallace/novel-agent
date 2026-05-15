@@ -28,7 +28,9 @@ from novel_agent.app.schemas.orchestration_schema import (
     SufficiencyDecision,
     TraceableSource,
 )
+from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget
 from novel_agent.app.services.outline_research_service import (
+    CharacterMentionExtractor,
     CharacterMentionResolver,
     OutlineResearchContextBroker,
     OutlineResearchLoopController,
@@ -36,6 +38,7 @@ from novel_agent.app.services.outline_research_service import (
     OutlineSeedPacketBuilder,
     StoryDetailResolver,
 )
+from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
@@ -109,7 +112,19 @@ def _seed_chapter(
             "related_chapters": [],
             "mentioned_characters": mentioned,
             "world_update": {"灵脉封禁": "不能无代价突破"},
-            "outline_update": {"outcome": "事件结束后两人只达成有限合作。"},
+            "outline_update": {
+                "outcome": "事件结束后两人只达成有限合作。",
+                "timeline_events": [
+                    {
+                        "event_id": f"chapter-{index}:event-01-trust-conflict",
+                        "label": "旧案证据信任冲突",
+                        "summary": summary,
+                        "participants": mentioned,
+                        "source_doc_ids": [1],
+                        "source_doc_range": "1",
+                    }
+                ],
+            },
             "outline_status": status,
             "outline_evidence_window": f"{index}-{index}",
             "outline_target_range": f"{index}-{index}",
@@ -412,7 +427,109 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
     assert world_result.sources
     assert all(item.summary_size <= 360 for item in results)
     assert source_result.results
+    assert source_result.results[0]["source_doc_ids"] == [1]
+    assert source_result.results[0]["source_doc_range"] == "1"
     assert outcome_result.results[0]["outcome"]
+
+
+def test_narrative_memory_query_btree_drills_to_documents_and_trace(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-memory-query"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_chapter(
+            conn,
+            book_id=book_id,
+            index=11,
+            title="第十一章 信任裂缝",
+            summary="沈青和顾迟因为旧案证据来源爆发最近一次信任冲突，结束后只保持有限合作。",
+            mentioned=["沈青", "顾迟"],
+        )
+        conn.commit()
+
+        service = NarrativeMemoryQueryService(repo_root=orchestrator.repo_root)
+        root = service.root_scan(
+            conn,
+            book_id=book_id,
+            query="信任冲突的经过和后果",
+            budget=MemoryQueryBudget(max_root_candidates=4, max_child_candidates=4),
+        )
+        events = service.drill_down(
+            conn,
+            book_id=book_id,
+            state=root,
+            selected_ids=[root.current_candidates[0]["id"]],
+            query_suffix="确认相关事件",
+            selection_reason="root summary covers the conflict",
+            confidence=0.8,
+        )
+        chapters = service.drill_down(
+            conn,
+            book_id=book_id,
+            state=events,
+            selected_ids=[events.current_candidates[0]["id"]],
+            query_suffix="展开章节摘要",
+            selection_reason="event mentions trust conflict",
+            confidence=0.8,
+        )
+        documents = service.drill_down(
+            conn,
+            book_id=book_id,
+            state=chapters,
+            selected_ids=[chapters.current_candidates[0]["id"]],
+            query_suffix="查看原始片段",
+            selection_reason="chapter has source doc range",
+            confidence=0.8,
+        )
+        bundle = service.resolve_document_refs(conn, book_id=book_id, doc_ids=[1], excerpt_budget=120)
+
+    assert root.current_level == "event_summary"
+    assert root.current_candidates[0]["start_event_id"]
+    assert events.current_level == "event"
+    assert events.current_candidates[0]["event_id"].startswith("chapter-11:event")
+    assert chapters.current_level == "chapter"
+    assert documents.current_level == "document"
+    assert bundle.excerpts[0]["doc_id"] == 1
+    assert any(item["operation"] == "drill_down" for item in documents.trace)
+
+
+def test_character_mention_extractor_ignores_notes_and_avoidances_for_person_detection() -> None:
+    extractor = CharacterMentionExtractor()
+
+    mentions = extractor.extract(
+        {
+            "major_characters": ["沈青"],
+            "desired_actions": ["沈青追查旧案"],
+            "avoidances": ["不要把隐藏新人物写成已有角色"],
+            "notes": "prefix snapshot includes 顾迟 and 冯施耐德 for debugging only",
+        }
+    )
+
+    names = [item.text for item in mentions.mentions]
+    assert "沈青" in names
+    assert "顾迟" not in names
+    assert "冯施耐德" not in names
+    assert "隐藏新人物" not in names
+
+
+def test_character_mention_extractor_filters_common_event_nouns_from_author_brief() -> None:
+    extractor = CharacterMentionExtractor()
+
+    mentions = extractor.extract(
+        {
+            "desired_actions": [
+                "路明非经历危机后，学院教授暂时搁置报告，导师继续观察。"
+            ]
+        }
+    )
+
+    names = [item.text for item in mentions.mentions]
+    assert "路明非" in names
+    assert "经历" not in names
+    assert "危机" not in names
+    assert "时搁置" not in names
 
 
 def test_outline_research_loop_multi_round_budget_assumptions_and_blocked(tmp_path: Path) -> None:

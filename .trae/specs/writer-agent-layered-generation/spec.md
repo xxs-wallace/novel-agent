@@ -122,10 +122,29 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - 模型 SHALL 通过语义请求向本地 Agent 查询更多信息，而不是直接编写 SQL 或读取任意文件
 - 语义请求至少 SHOULD 支持 `story_detail`、`character_profile`、`world_concept`
 - 本地 Agent SHALL 将语义请求转换为 SQLite / Markdown / Memory / KB 可理解的查询，并返回带来源的 evidence
+- 对 `story_detail`，本地 Agent SHOULD 优先调用 Memory 层提供的 BTree descent / page query 接口，而不是由 Writer 直接读取 SQLite、扫描 Markdown 或拼接原文
+- Writer 模型 SHALL 负责在每层 Memory candidates 中选择需要继续展开的节点，并返回 `selected_ids`、`query_suffix`、`reason`、`confidence`；Memory 层 SHALL 负责确定性展开 selected ids 到下一层 Page 或 document
+- Writer 层不得重定义 Memory Page schema、event summary 压缩规则、chapter summary 回源规则或 document excerpt 裁剪规则
 - 模型 MAY 发起多轮请求，但必须受 `ResearchBudget` 限制
 - 每轮 research 必须维护或更新 `planning_notebook`
 - 若达到预算上限仍缺少关键授权边界，系统 SHALL 向用户提出少量阻塞问题，而不是静默假设高风险剧情
 - `SufficiencyDecision` SHALL 明确区分模型可生成内容、需要用户补充的知识、可安全假设的低风险缺口和必须先补建模的阻塞项
+
+#### Memory / Writer 分工
+
+- Memory 层负责：
+  - 构建并维护 `event_summary -> event -> chapter -> document` 的 Page 索引
+  - 提供 root scan、drill down、event/chapter/document resolver 和 evidence bundle
+  - 对候选节点做预算裁剪、状态标注和回源 trace
+  - 保证不把 reference-only 或未授权未来信息泄漏给 Writer
+- Writer 层负责：
+  - 将续写目标、用户反馈、reviewer feedback 或重试原因转化为 research request
+  - 调用模型在 Memory candidates 中做选择
+  - 维护 `query_suffix_chain`、`path_context` 和 `planning_notebook`
+  - 判断信息是否足够，并生成 `BookContinuationPlan` / `BatchPlan` / `ChapterPackage`
+  - 不直接写 Memory，不直接把 candidate fact 升级为 confirmed fact
+- `OutlineResearchContextBroker` 可以作为 Writer 调用 Memory 的 facade，但不应逐步演变成新的 Memory 存储层或并行检索系统
+- Memory Query 的触发源不只限于首次用户输入。Writer Prompt Loop 在收到用户反馈、reviewer 要求调整或生成失败后的 retry instruction 时，也可以像 Code Agent tool call 一样发起 `story_detail` / `character_profile` / `world_concept` 查询；所有查询都必须进入同一套预算、trace、leakage audit 和 sufficiency gate。
 
 ### Layer 1: 全书续写规划层
 
@@ -649,6 +668,8 @@ Writer 层主要产物：
 
 - `outline_seed_packet.json`
 - `outline_research_trace.json`
+- `memory_query_trace.json`（来自 BTree descent / Memory page query，可嵌入或引用在 `outline_research_trace.json` 中）
+- `memory_query_decision_log.json`（Writer 模型对 Memory candidates 的结构化选择记录，可选独立落盘）
 - `planning_notebook.json`
 - `sufficiency_decision.json`
 - `historical_outline_event_index.json`（来自 Memory / 大纲索引层，可选引用）

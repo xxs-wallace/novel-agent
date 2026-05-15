@@ -175,6 +175,31 @@
   - [x] 若真实模型返回 needs_user_input / blocked，也应算作流程可观测完成，但 summary 必须标记不能生成正式大纲的原因。
   - [x] 最终报告展示 artifact_dir、Reviewer summary、主要失败项和下一步建议。
 
+- [ ] Task OR-11: 将 Author Brief smoke 升级为 BTree Memory Query 多轮研究
+  - `来源`: [`design.md`](design.md) 的 `Multi-round Memory Query`、[`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只读`: [`design.md`](design.md), [`../narrative-memory-context/design.md`](../narrative-memory-context/design.md), [`../writer-agent-layered-generation/tasks.md`](../writer-agent-layered-generation/tasks.md)
+  - `建议只关注代码文件`: `novel_agent/app/benchmarks/`, `novel_agent/app/run_single_sample_smoke.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/tests/test_smoke_benchmark_service.py`
+  - [ ] Author Brief smoke 继续遮住后 120KB reference window，不改变评分目标
+  - [ ] Writer 输入仍只来自 `user_story_overview.txt`、prefix modeling snapshot 和授权 prefix Memory
+  - [ ] Outline Research Loop MUST 通过 `NarrativeMemoryQueryService` 多轮查询 prefix Memory
+  - [ ] benchmark artifacts MUST 保存 `memory_query_trace.json`、`memory_query_decision_log.json`、`model_reasoning_debug.json`
+  - [ ] `leakage_audit.json` MUST 验证 future raw text、reference future outline、reference character set 没有进入 Writer / Context Broker / Memory resolver
+  - [ ] summary MUST 标记流程状态、Memory Query 轮数、最终 evidence ids、Reviewer score 和主要失败项
+  - [ ] 默认测试使用 fake facade；fake 只能模拟结构化协议，不能作为最终质量验收
+
+- [ ] Task OR-12: 真实模型 API smoke benchmark 作为最终完成标准
+  - `来源`: [`design.md`](design.md) 的 `Entrypoints` 与 `Reasoning / Decision Debug Logs`
+  - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/tasks.md`](../writer-agent-layered-generation/tasks.md), [`../narrative-memory-context/tasks.md`](../narrative-memory-context/tasks.md)
+  - `建议只关注代码文件`: `novel_agent/app/run_single_sample_smoke.py`, `novel_agent/app/benchmarks/`, `novel_agent/tests/test_smoke_benchmark_service.py`
+  - [ ] 真实 smoke 必须显式使用 `--use-real-model` 和真实 API key；默认单元测试不得触发真实 LLM
+  - [ ] 真实 smoke MUST 真实调用 Writer model 与 Reviewer model，不得读取、硬编码或伪造模型返回
+  - [ ] 若 provider 返回可见 reasoning/debug 字段，保存到 `model_reasoning_debug.json`
+  - [ ] 若 provider 不返回可见 reasoning/debug 字段，保存结构化决策轨迹，不得伪造隐藏思维链
+  - [ ] 真实 smoke 通过标准包括：流程完成、leakage audit 通过、Reviewer 可读、Memory Query trace 可审计、生成大纲质量达到可接受阈值或失败原因明确
+  - [ ] 最终验收命令：
+    `PYTHONUNBUFFERED=1 .venv/bin/python -m novel_agent.app.run_single_sample_smoke --source novel_agent/tests/longzu_240kb.txt --runs-dir runs/benchmarks/outline_research_longzu_240kb --use-real-model --api-key "$DEEPSEEK_API_KEY" --prefix-min-chars 120000 --reference-min-chars 120000 --max-read-kb 240 --max-close-batches 48 --enable-outline-research-loop --outline-research-author-brief --reuse-modeling-cache`
+  - [ ] 开发 Agent 最终报告必须列出 artifact_dir、summary.json、Reviewer summary、leakage audit 结果、Memory Query trace 摘要和真实 API 调用证据
+
 ## Next Verification
 
 - [x] 运行单元测试：`novel_agent/tests/test_smoke_benchmark_service.py`。
@@ -184,3 +209,4 @@
 - [ ] 每隔数次回归用 `--clear-modeling-cache` 或 `--rebuild-modeling-cache` 重新验证 close-read / Creative KB。
 - [ ] 第一次运行 240KB author brief smoke 时用 `--outline-research-author-brief --rebuild-modeling-cache` 建立 prefix / future reference cache。
 - [ ] 后续 Outline Research Loop 回归用 `--outline-research-author-brief --reuse-modeling-cache`，但每次都真实重跑 Writer research loop 和 Reviewer。
+- [ ] BTree Memory Query 开发完成后，运行 OR-12 的真实模型 API smoke 命令作为最终验收；fake facade 通过只能说明协议测试通过，不能说明任务彻底完成。

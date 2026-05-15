@@ -647,3 +647,63 @@
 - Task 52 depends on Task 47, Task 50, Task 51
 - Task 53 depends on Task 52
 - Task 54 depends on Task 48, Task 52, Task 53
+
+## Group J: Outline Research Loop BTree Memory Query 升级
+
+- [ ] Task 55: 将 Story Detail Resolver 升级为 BTree Memory Query facade
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [`../narrative-memory-context/design.md`](.trae/specs/narrative-memory-context/design.md), [`../narrative-memory-context/tasks.md`](.trae/specs/narrative-memory-context/tasks.md)
+  - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/repos/`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] `story_detail` 不再用一次性 historical outline rerank 作为主路径，而是调用 `NarrativeMemoryQueryService`
+  - [ ] Context Broker 只做 facade、预算、去重和 evidence 归一化，不保存新的 canon Memory
+  - [ ] 支持 event_summary -> event -> chapter -> document 的逐层候选返回
+  - [ ] 返回 `StoryDetailResult` 时包含最终 evidence、source ids、status、`memory_query_trace`
+  - [ ] 保留旧 resolver 作为缺少 BTree index 的兼容 fallback，并在 trace 中标记 fallback reason
+
+- [ ] Task 56: 实现 Writer 模型驱动的 Memory candidate selection
+  - `来源`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md) 的 `BTree descent chain`
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] 给 Outline Research 模型新增 selection prompt，输入 `original_query`、`query_suffix_chain`、`path_context`、`current_level`、`current_candidates`
+  - [ ] 模型结构化输出 `need_drill_down`、`selected_ids`、`query_suffix`、`reason`、`confidence`、`need_sibling_scan`
+  - [ ] Agent 只根据 selected ids 调用 Memory 下钻，不替模型伪造选择理由
+  - [ ] 累积 `query_suffix_chain`，并保证 suffix 只能基于当前层候选内容产生
+  - [ ] 支持用户初次输入、用户反馈、reviewer feedback、retry instruction 都触发 Memory Query
+  - [ ] 增加测试覆盖多层选择、query suffix 累积、feedback-triggered query、sibling scan 和预算耗尽
+
+- [ ] Task 57: 扩展 Outline Research Loop artifacts 与 debug trace
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [`../agentic-benchmark/design.md`](.trae/specs/agentic-benchmark/design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [`../agentic-benchmark/design.md`](.trae/specs/agentic-benchmark/design.md)
+  - `建议只关注代码文件`: `novel_agent/runs/writer.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] 落盘 `memory_query_trace.json`
+  - [ ] 落盘 `memory_query_decision_log.json`
+  - [ ] 如果真实模型 API 返回可见 reasoning/debug 字段，落盘到 `model_reasoning_debug.json`
+  - [ ] 如果 API 不返回可见 reasoning，不得伪造隐藏思维链；改为保存结构化决策轨迹
+  - [ ] trace 仅用于 debug/reviewer，不得作为下一轮 Writer prompt 的隐藏知识注入
+  - [ ] 测试覆盖 fake facade 的 trace 字段与真实模型字段缺失时的 fallback
+
+- [ ] Task 58: 重构 Sufficiency Gate 与 feedback loop 集成
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_outline_research.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] `needs_user_input` / `blocked` 不伪造用户答案
+  - [ ] `proceed_with_assumptions` 必须把 assumptions 传给 Reviewer 和最终大纲 sources
+  - [ ] 用户反馈进入下一轮 prompt loop 时，可触发新的 Memory Query
+  - [ ] reviewer feedback 进入 retry 时，可触发新的 Memory Query
+  - [ ] planning notebook 必须记录每轮查询理由、证据、缺口和未解决风险
+
+- [ ] Task 59: Writer Outline Research Loop BTree 升级验收
+  - `来源`: [tasks.md](.trae/specs/writer-agent-layered-generation/tasks.md), [`../agentic-benchmark/tasks.md`](.trae/specs/agentic-benchmark/tasks.md)
+  - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [`../agentic-benchmark/design.md`](.trae/specs/agentic-benchmark/design.md)
+  - `建议只关注代码文件`: `novel_agent/tests/test_writer_outline_research.py`, `novel_agent/tests/test_smoke_benchmark_service.py`, `novel_agent/app/run_single_sample_smoke.py`
+  - [ ] 默认单元测试使用 fake model / fake reviewer，不触发真实 LLM
+  - [ ] 单元测试覆盖 BTree Memory Query 正常完成、needs_user_input、blocked、proceed_with_assumptions
+  - [ ] 单元测试覆盖 leakage audit 阻止 reference future outline、reference character set、future raw text 进入 Writer
+  - [ ] 最终验收必须运行真实模型 API 的 author brief smoke benchmark
+  - [ ] 真实 smoke 的 generated outline、planning notebook、memory query trace、reviewer summary 必须能证明流程没有依赖伪造模型返回
+
+- Task 55 depends on Narrative Memory Task 15
+- Task 56 depends on Task 55
+- Task 57 depends on Task 56
+- Task 58 depends on Task 56, Task 57
+- Task 59 depends on Task 55, Task 56, Task 57, Task 58 and Agentic Benchmark OR-11 / OR-12

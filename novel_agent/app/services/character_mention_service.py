@@ -40,6 +40,16 @@ CHARACTER_NAME_STOPWORDS = {
     "消息",
     "电话",
     "短信",
+    "成为",
+    "成交",
+    "成后",
+    "经历",
+    "危机",
+    "时搁置",
+    "支付",
+    "时施压",
+    "和精准",
+    "华列车",
 }
 
 KNOWN_CHARACTER_NAMES: set[str] = set()
@@ -69,7 +79,7 @@ class CharacterMentionService:
             return False
         if not re.fullmatch(r"[\u4e00-\u9fffA-Za-z·]{2,12}", normalized):
             return False
-        if normalized.endswith(("学院", "公司", "目录", "信息", "数据", "手机", "通知")):
+        if normalized.endswith(("学院", "公司", "目录", "信息", "数据", "手机", "通知", "列车", "精准")):
             return False
         if len(normalized) <= 4 and normalized[0] in COMMON_NAME_PREFIXES:
             return True

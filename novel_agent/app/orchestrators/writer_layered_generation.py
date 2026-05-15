@@ -47,6 +47,7 @@ from ..services.outline_research_service import (
     CharacterMentionExtractor,
     CharacterMentionResolver,
     HeuristicOutlineResearchModelAdapter,
+    ModelOutlineResearchModelAdapter,
     OutlineResearchContextBroker,
     OutlineResearchLoopController,
     OutlineResearchModelAdapter,
@@ -153,7 +154,8 @@ class WriterLayeredGenerationOrchestrator:
                 assets_repo=self.assets_repo,
                 character_profiles_repo=self.character_profiles_repo,
             ),
-            model_adapter=outline_research_adapter or HeuristicOutlineResearchModelAdapter(),
+            model_adapter=outline_research_adapter
+            or (ModelOutlineResearchModelAdapter(model_client=model_client) if model_client is not None else HeuristicOutlineResearchModelAdapter()),
         )
 
     def check_modeling_status(self, conn: sqlite3.Connection, *, book_id: str) -> ModelingStatus:
@@ -327,13 +329,16 @@ class WriterLayeredGenerationOrchestrator:
             [
                 *raw_major_characters,
                 *[str(item) for item in (payload.get("desired_actions") or [])],
-                *[str(item) for item in (payload.get("avoidances") or [])],
                 str(payload.get("preferred_outcome") or ""),
-                str(payload.get("notes") or ""),
             ]
         )
         extracted = self.mention_service.extract_local_candidates(raw_text, limit=16)
-        major_characters = self.mention_service.clean_names([*raw_major_characters, *extracted])
+        character_candidates = self.mention_service.clean_names([*raw_major_characters, *extracted])
+        major_characters: list[str] = []
+        for _, candidate in sorted(enumerate(character_candidates), key=lambda item: (-len(item[1]), item[0])):
+            if any(len(existing) > len(candidate) and candidate in existing for existing in major_characters):
+                continue
+            major_characters.append(candidate)
         return ContinuationIntent(
             major_characters=major_characters,
             desired_actions=[str(item) for item in (payload.get("desired_actions") or [])],
@@ -786,6 +791,9 @@ class WriterLayeredGenerationOrchestrator:
             {"resolutions": [item.to_dict() for item in result.seed_packet.character_resolutions]},
         )
         self.run_writer.write_json(run_id, "outline_research_trace.json", result.trace)
+        self.run_writer.write_json(run_id, "memory_query_trace.json", {"items": result.memory_query_trace})
+        self.run_writer.write_json(run_id, "memory_query_decision_log.json", {"items": result.memory_query_decision_log})
+        self.run_writer.write_json(run_id, "model_reasoning_debug.json", {"items": result.model_reasoning_debug})
         self.run_writer.write_json(run_id, "planning_notebook.json", result.planning_notebook)
         self.run_writer.write_json(run_id, "sufficiency_decision.json", result.sufficiency_decision)
         self.run_writer.write_json(run_id, "generated_outline.json", dict(result.generated_outline))

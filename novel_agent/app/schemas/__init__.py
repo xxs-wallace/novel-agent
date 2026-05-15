@@ -3,6 +3,7 @@ from .character_profile_schema import (
     CharacterAgeItem,
     CharacterProfileSnapshot,
     CharacterRelationshipItem,
+    CharacterStoryEventItem,
     ProfileAttributeItem,
 )
 from .context_assembly_schema import (
@@ -39,6 +40,14 @@ from .orchestration_schema import (
     WriterInputBundle,
     WriterSource,
 )
+from .narrative_memory_schema import (
+    MemoryCandidateSelection,
+    MemoryEvidenceBundle,
+    MemoryQueryBudget,
+    MemoryQueryPathItem,
+    MemoryQueryState,
+    NarrativeMemoryPage,
+)
 from .paragraph_benchmark_schema import (
     ParagraphBenchmarkIssue,
     ParagraphBenchmarkReviewerReport,
@@ -61,6 +70,7 @@ __all__ = [
     "CharacterAgeItem",
     "CharacterProfileSnapshot",
     "CharacterRelationshipItem",
+    "CharacterStoryEventItem",
     "ChapterContextItem",
     "ChapterLengthBudget",
     "ChapterLengthPlan",
@@ -79,6 +89,12 @@ __all__ = [
     "KBBenchmarkCase",
     "MemoryAssemblyBudget",
     "MemoryAssemblyInput",
+    "MemoryCandidateSelection",
+    "MemoryEvidenceBundle",
+    "MemoryQueryBudget",
+    "MemoryQueryPathItem",
+    "MemoryQueryState",
+    "NarrativeMemoryPage",
     "ParagraphBenchmarkIssue",
     "ParagraphBenchmarkReviewerReport",
     "ParagraphBenchmarkRunResult",

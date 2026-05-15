@@ -56,6 +56,9 @@ class OutlineTimelineEntry:
     label: str
     participants: list[str] = field(default_factory=list)
     summary: str = ""
+    event_id: str = ""
+    source_doc_range: str = ""
+    source_doc_ids: list[int] = field(default_factory=list)
 
     @property
     def dedupe_key(self) -> str:
@@ -69,7 +72,13 @@ class OutlineTimelineEntry:
     def render(self, *, compact: bool = False) -> str:
         summary = safe_excerpt(self.summary, 72) if compact else self.summary
         participant_text = ",".join(self.participants)
-        return f"- {self.label} | 人物：{participant_text} | {summary}".rstrip()
+        source_parts = []
+        if self.event_id:
+            source_parts.append(f"事件：{self.event_id}")
+        if self.source_doc_range:
+            source_parts.append(f"documents：{self.source_doc_range}")
+        source_text = f" | {' | '.join(source_parts)}" if source_parts else ""
+        return f"- {self.label} | 人物：{participant_text} | {summary}{source_text}".rstrip()
 
     @staticmethod
     def _normalize_match_text(text: str) -> str:
@@ -204,15 +213,30 @@ class OutlineService:
         label = normalize_whitespace(parts[0])
         participants: list[str] = []
         summary = ""
+        event_id = ""
+        source_doc_range = ""
         for part in parts[1:]:
             if part.startswith("人物："):
                 raw_participants = part.split("：", 1)[1]
                 participants = self._clean_participants(raw_participants.split(","))
                 continue
+            if part.startswith("事件："):
+                event_id = normalize_whitespace(part.split("：", 1)[1])
+                continue
+            if part.startswith("documents："):
+                source_doc_range = normalize_whitespace(part.split("：", 1)[1])
+                continue
             summary = normalize_whitespace(part)
         if not label and not summary:
             return None
-        return OutlineTimelineEntry(label=label or "未命名事件", participants=participants, summary=summary)
+        return OutlineTimelineEntry(
+            label=label or "未命名事件",
+            participants=participants,
+            summary=summary,
+            event_id=event_id,
+            source_doc_range=source_doc_range,
+            source_doc_ids=self._doc_ids_from_range(source_doc_range),
+        )
 
     def _upsert_chapter_entry(
         self,
@@ -261,6 +285,11 @@ class OutlineService:
                 continue
             label = normalize_whitespace(str(event.get("label", "")))
             summary = normalize_whitespace(str(event.get("summary", "")))
+            event_id = normalize_whitespace(str(event.get("event_id", "")))
+            source_doc_ids = self._safe_int_list(event.get("source_doc_ids"))
+            source_doc_range = normalize_whitespace(str(event.get("source_doc_range", "")))
+            if not source_doc_range and source_doc_ids:
+                source_doc_range = self._doc_range_text(source_doc_ids)
             participants_raw = event.get("participants", [])
             participants = self._clean_participants(participants_raw if isinstance(participants_raw, list) else [])
             if not label and not summary:
@@ -270,6 +299,9 @@ class OutlineService:
                     label=label or safe_excerpt(summary, 16),
                     participants=participants,
                     summary=summary,
+                    event_id=event_id,
+                    source_doc_range=source_doc_range,
+                    source_doc_ids=source_doc_ids,
                 )
             )
         return normalized_entries
@@ -291,11 +323,19 @@ class OutlineService:
                     current.summary = entry.summary
                 if len(entry.label) > len(current.label):
                     current.label = entry.label
+                if entry.event_id and not current.event_id:
+                    current.event_id = entry.event_id
+                current.source_doc_ids = sorted({*current.source_doc_ids, *entry.source_doc_ids})
+                if entry.source_doc_range and not current.source_doc_range:
+                    current.source_doc_range = entry.source_doc_range
                 continue
             by_key[key] = OutlineTimelineEntry(
                 label=entry.label,
                 participants=list(entry.participants),
                 summary=entry.summary,
+                event_id=entry.event_id,
+                source_doc_range=entry.source_doc_range,
+                source_doc_ids=list(entry.source_doc_ids),
             )
             merged.append(by_key[key])
         return merged
@@ -305,7 +345,14 @@ class OutlineService:
             mainline_overview_lines=list(document.mainline_overview_lines),
             chapter_entries=list(document.chapter_entries),
             timeline_entries=[
-                OutlineTimelineEntry(label=item.label, participants=list(item.participants), summary=item.summary)
+                OutlineTimelineEntry(
+                    label=item.label,
+                    participants=list(item.participants),
+                    summary=item.summary,
+                    event_id=item.event_id,
+                    source_doc_range=item.source_doc_range,
+                    source_doc_ids=list(item.source_doc_ids),
+                )
                 for item in document.timeline_entries
             ],
             unresolved_lines=list(document.unresolved_lines),
@@ -362,7 +409,14 @@ class OutlineService:
                     mainline_overview_lines=list(document.mainline_overview_lines),
                     chapter_entries=retained,
                     timeline_entries=[
-                        OutlineTimelineEntry(label=item.label, participants=list(item.participants), summary=item.summary)
+                        OutlineTimelineEntry(
+                            label=item.label,
+                            participants=list(item.participants),
+                            summary=item.summary,
+                            event_id=item.event_id,
+                            source_doc_range=item.source_doc_range,
+                            source_doc_ids=list(item.source_doc_ids),
+                        )
                         for item in document.timeline_entries
                     ],
                     unresolved_lines=list(document.unresolved_lines),
@@ -412,6 +466,34 @@ class OutlineService:
         if importance_score is None:
             return None
         return max(0, min(100, int(importance_score)))
+
+    def _safe_int_list(self, value: object) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        cleaned: list[int] = []
+        for item in value:
+            try:
+                cleaned.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return sorted(set(cleaned))
+
+    def _doc_range_text(self, doc_ids: list[int]) -> str:
+        if not doc_ids:
+            return ""
+        return str(doc_ids[0]) if len(doc_ids) == 1 else f"{doc_ids[0]}-{doc_ids[-1]}"
+
+    def _doc_ids_from_range(self, source_doc_range: str) -> list[int]:
+        match = re.fullmatch(r"\s*(\d+)(?:-(\d+))?\s*", source_doc_range)
+        if match is None:
+            return []
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if end < start:
+            return [start]
+        if end - start > 512:
+            return [start, end]
+        return list(range(start, end + 1))
 
     def _normalize_for_match(self, text: str) -> str:
         return re.sub(r"[^\w\u4e00-\u9fff]+", "", normalize_whitespace(text)).lower()

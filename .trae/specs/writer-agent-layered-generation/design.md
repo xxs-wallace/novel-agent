@@ -90,6 +90,33 @@ flowchart TD
 
 本地 `Context Broker` 负责把这些语义请求转换为可执行检索，并返回裁剪后的 evidence。模型每轮判断信息是否足够；若不足以靠本地资料解决，则向用户提出少量关键问题。
 
+Memory Query 属于 Writer Prompt Loop 的工具调用能力，而不是只在首次输入阶段运行。触发源可以是：
+
+- 初次用户输入，例如要求续写某个角色线或某段剧情后的大纲
+- 用户反馈，例如要求修改大纲方向、补足某个角色动机、检查某个设定是否冲突
+- reviewer feedback，例如指出 outline 缺少因果证据、角色状态不明或 world rule 可能被突破
+- retry instruction，例如上一轮 blocked / needs_user_input / low confidence 后重新规划
+
+这些触发源都会被 Writer 归一化为 `ResearchRequest`，再由 Context Broker 调用 Memory facade。Memory 只负责候选、展开、证据和 trace；是否因为反馈而继续查资料、查询哪些层级，仍由 Writer 模型在 prompt loop 中决定。
+
+对 `story_detail` 请求，Writer 不应自己理解 SQLite 表、Markdown 文件或 document 切片。推荐分工如下：
+
+- Memory 层提供 `NarrativeMemoryQueryService` 或等价接口：
+  - `root_scan(query)`：返回 `event_summary` root Page 候选
+  - `drill_down(state, selected_ids)`：从当前层展开到下一层候选
+  - `resolve_event_ids(event_ids)`：确定性展开 event 到 chapter/doc refs
+  - `resolve_chapter_refs(chapter_refs)`：确定性展开 chapter 到 summary/doc refs
+  - `resolve_document_refs(doc_ids, excerpt_budget)`：返回原文摘录或全文片段
+- Writer 层提供模型选择：
+  - 把 `original_query`、`query_suffix_chain`、`path_context` 和当前层 candidates 交给 Outline Research 模型
+  - 要求模型返回 `need_drill_down`、`selected_ids`、`query_suffix`、`reason`、`confidence`、`need_sibling_scan`
+  - 将选择结果写入 `outline_research_trace.json` / `memory_query_trace.json`
+- Context Broker 是桥接 facade：
+  - 它可以合并重复查询、处理预算和 evidence 归一化
+  - 但不保存新的 canon Memory，不生成续写规划，也不绕过 Writer 模型替它决定剧情需要哪些事实
+
+这使得大纲研究从“一轮大 prompt”变为多轮 Memory page 查询：模型先看 root page，选中剧情大范围后再看 event list，再决定是否展开 chapter summary 或 document。
+
 当 research 达到 `ResearchBudget` 上限时，系统进入 `Sufficiency Gate`，不能直接硬写大纲，也不能只返回失败。模型必须整理：
 
 - 已经确认的信息
@@ -238,6 +265,8 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 
 - `outline_seed_packet.json`
 - `outline_research_trace.json`
+- `memory_query_trace.json`
+- `memory_query_decision_log.json`
 - `planning_notebook.json`
 - `book_continuation_plan.json`
 - `world_expansion_pack.json`

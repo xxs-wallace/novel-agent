@@ -60,6 +60,51 @@
 
 ## Memory Layers
 
+### Requirement: BTree-like Narrative Memory
+close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分层 Page 数据结构，而不是一组彼此孤立的摘要文件。
+
+#### Scenario: Memory Page 节点不变量
+- **WHEN** 系统将 close-read 结果写入 Memory
+- **THEN** 每一层 Memory Page 节点 SHALL 保存：
+  - `page_id`
+  - `page_type`
+  - `child_refs`：指向下一层 Page 或原始 document/event 的索引
+  - `source_doc_range` 或等价的 `source_doc_ids`
+  - `summary`：对下一层节点的压缩概括
+  - `status`：例如 `provisional` / `committed`
+  - `updated_at`
+- **AND** Page 的 `summary` MUST 只压缩下一层节点已经表达的信息，不应引入未被下层索引支撑的新事实
+- **AND** Page 的 `child_refs` MUST 足以让系统从上层摘要确定性回溯到下一层节点
+- **AND** Page SHOULD 支持多个同层 sibling；对几百万字的超长篇小说，根部以下 MAY 存在多个 event-summary Page，而不是强行压缩成单个全书摘要
+
+#### Scenario: Memory BTree 层级
+- **WHEN** 系统完成 close-read Memory 写回
+- **THEN** 推荐的事实压缩链路 SHOULD 是：
+  - `document` leaf：粗读入库的原始文本片段，保存原文、source offset、`doc_id`
+  - `chapter` Page：多个连续 `document` 的章节级摘要
+  - `event` Page：多个 `chapter.summary_md` 的剧情事件概括
+  - `event_summary` Page：多个 `event` 的高层连续摘要
+- **AND** 多个 `document` SHOULD 对应一个真实 chapter；如果章节边界识别不可靠，系统 SHOULD 显式标记该 chapter Page 为派生的 `document_title_index` 聚合桶
+- **AND** 多个 chapter summary SHOULD 汇聚为一个 event
+- **AND** 当信息密度较高时，event 覆盖的原始范围 MAY 退化到单个 chapter，甚至单个 document
+- **AND** event summary SHOULD 汇总多个 event，而不是直接跳过 event list 汇总原始 documents
+
+#### Scenario: BTree 压缩比例
+- **WHEN** 系统生成 chapter 级 `summary_md`
+- **THEN** `summary_md` SHOULD 不超过其覆盖原始文字内容的 1/10
+- **AND** 如果源文本信息密度过高导致摘要超过 1/10，系统 SHOULD 将 chapter Page 拆分为更小的 Page 或标记 `compression_warning`
+- **WHEN** 系统生成 `event_summary` Page
+- **THEN** 单个 `event_summary.summary` SHOULD 不超过约 200 个中文字符
+- **AND** 单个 `event_summary` Page SHOULD 目标覆盖约 10 万到 20 万字原始小说文档
+- **AND** `event_summary` Page SHOULD 只记录其覆盖的 event id 起止范围，例如 `start_event_id`、`end_event_id` 或等价的连续 `event_id_range`
+- **AND** 若 event id 不连续或发生重排，系统 MAY 附加 `event_ids` 列表作为校验索引，但常规 Writer 输入 SHOULD 优先使用起止范围
+
+#### Scenario: 超长篇多 Page 根结构
+- **WHEN** 小说原始长度达到数百万字
+- **THEN** 系统 SHOULD 允许存在多个 sibling `event_summary` Page
+- **AND** 上层 Writer Context SHOULD 按续写位置、用户意图、人物线和相关 event id 范围选择需要展开的 Page
+- **AND** 系统不应为了得到唯一总摘要而把多个 event summary 继续压缩到丢失回源能力
+
 ### Requirement: Character Memory
 系统 SHALL 为重要角色维护持续更新的人物档案。
 
@@ -79,11 +124,28 @@
   - `speaking_character_status`
   - `personhood_evidence_summary`
   - `evidence_level`
+  - `story_events`
 
 #### Scenario: Character Profile 只保存事实型信息
 - **WHEN** 系统更新人物档案
 - **THEN** 应优先写入可支持续写一致性的事实、状态与关系变化
 - **AND** 不应将桥段写法偏好存入人物档案
+
+#### Scenario: Character Profile 分层表达
+- **WHEN** 系统维护人物档案
+- **THEN** 人物档案 SHOULD 分为至少两层：
+  - 基础属性层：姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、基础人际关系、能力和特长
+  - 人物剧情时间线层：以该人物为维度过滤出的 `story_events`
+- **AND** 基础属性层 SHOULD 足够压缩，服务于 Writer 快速理解人物稳定状态
+- **AND** 人物剧情时间线层 SHOULD 保留关键事件、关系推进、状态转折与行动结果
+- **AND** 每个 `story_event` MUST 带有可回源索引，例如 `event_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
+- **AND** `mentioned_doc_ids` / `speaking_doc_ids` 仍可作为底层索引保存，但不应作为模型筛选人物过往的唯一入口
+
+#### Scenario: Character Event List 与原文回源
+- **WHEN** 模型需要确认某人物的过往经历
+- **THEN** 系统 SHOULD 先返回该人物的人物剧情时间线，而不是直接返回庞大的 mentioned doc id 列表
+- **AND** 模型 MAY 选择其中一个或多个 `event_id` / `source_doc_ids` 请求进一步展开原文证据
+- **AND** 系统 SHOULD 通过该事件携带的 `source_doc_ids` 或 `source_doc_range` 返回对应原始 `documents` 的摘录或全文片段
 
 ### Requirement: Character Evidence Batch
 系统 SHALL 为 Character Evidence Agent 引入独立于 Chapter Summary Agent 的轻量 batch 工作单元。
@@ -195,6 +257,52 @@
   - `timeline_notes`
   - `main_character_threads`
   - `updated_at`
+
+#### Scenario: Story Outline 四层结构
+- **WHEN** 系统完成 close-read Memory 写回
+- **THEN** 叙事事实链 SHOULD 形成四层结构：
+  - `document`：粗读入库的原始文档片段，保存原文与 source offset
+  - `chapter summary`：close-read 后的章节 Page 概要，压缩多个 document
+  - `event list`：从多个 chapter summary 中抽取的结构化关键事件 Page 列表
+  - `event summary`：对多个 event Page 的连续自然语言压缩
+- **AND** 上层不应丢失下层索引；`summary`、`event list` 和 `event summary` SHOULD 能回到其覆盖的 `source_doc_ids` 或 `source_doc_range`
+- **AND** 该四层结构 SHOULD 满足 BTree-like Memory Page 的不变量：每一层 Page 都保存对下一层节点的索引与压缩概括
+
+#### Scenario: Outline Event List 字段
+- **WHEN** 系统保存 close-read 产生的大纲事件
+- **THEN** 每个事件 SHOULD 至少包含：
+  - `event_id`
+  - `label`
+  - `summary`
+  - `document_title_index`
+  - `participants`
+  - `source_title_indexes`
+  - `source_doc_ids`
+  - `source_doc_start_id`
+  - `source_doc_end_id`
+  - `source_doc_range`
+  - `event_summary_level`
+- **AND** `event_id` SHOULD 在同一书籍内稳定，可用于后续模型请求精确展开该事件
+- **AND** `summary` SHOULD 是多个 document/chapter 剧情的浓缩概括，而不是逐段复述
+- **AND** `participants` SHOULD 支持反向构建人物维度 event list
+
+#### Scenario: Event Summary
+- **WHEN** 系统维护整书或章节范围的大纲
+- **THEN** 系统 SHOULD 保存 `event_summary` 或等价字段，作为 event list 的自然语言连续摘要
+- **AND** `event_summary` SHOULD 保留事件顺序、因果衔接和主要人物状态变化
+- **AND** `event_summary` SHOULD 同样携带或继承覆盖范围的 `source_doc_ids` / `source_doc_range`
+- **AND** 单个 `event_summary` SHOULD 是面向 Writer 快速定位历史上下文的 Page 摘要，不超过约 200 个中文字符
+- **AND** 单个 `event_summary` SHOULD 目标覆盖约 10 万到 20 万字原始小说文档
+- **AND** 常规情况下 `event_summary` 只需要记录对应 event id 的起止范围；系统通过 event id 范围再展开到 event list、chapter summary 和 document
+
+#### Scenario: Event Summary 滚动压缩
+- **GIVEN** close-read 已积累 N 个尚未被上层摘要覆盖的 outline events
+- **WHEN** N 达到压缩阈值
+- **THEN** Agent SHOULD 把这些未压缩 events 按时间顺序发送给模型
+- **AND** 模型 SHOULD 判断前部哪些 events 关联性足够强，可以压缩为一个连续 `event_summary`
+- **AND** 模型 MUST 返回尾部不相关、太新或需要等待后续上下文的 `event` index
+- **AND** Agent MUST 只把非尾部 events 标记为已压缩，尾部 events 继续保留为 pending
+- **AND** 任何 `event_summary` MUST 保存其覆盖的 `event_ids`、`source_doc_ids`、`source_doc_range`，以便从摘要回源到 event list 和原始 document
 
 #### Scenario: Outline 长度约束
 - **WHEN** 大纲超过约 10KB
@@ -314,6 +422,88 @@
 - **THEN** 本 spec 提供事实型上下文
 - **AND** `creative-knowledge-base/spec.md` 提供桥段型参考
 - **AND** 两者在装配层合流，但不在存储层混合
+
+### Requirement: BTree Descent + Model-guided Pruning 查询链路
+系统 SHALL 支持从上层 Memory Page 逐层向下定位原文证据的查询链路，并允许模型在每一层选择是否继续展开。
+
+#### Scenario: 查询层级下降
+- **WHEN** Writer 或 Outline Research Loop 发起故事细节查询
+- **THEN** 系统 SHOULD 按如下顺序执行 BTree descent：
+  1. `event_summary` root Page：定位剧情大范围
+  2. `event list`：展开被选中 event summary 覆盖的 event range
+  3. `chapter summary`：展开被选中 event 覆盖的 chapter range
+  4. `document`：展开被选中 chapter 覆盖的 document range 或摘录
+- **AND** 每一层都 SHOULD 返回当前层候选节点的完整必要信息，例如 id、summary、范围、人物、状态和下层索引
+- **AND** 每一层模型决策 MUST 使用结构化输出，至少包含 `need_drill_down`、`selected_ids`、`query_suffix`、`reason` 和 `confidence`
+- **AND** 如果模型判断当前层信息已足够回答问题，系统 MAY 停止下降并返回当前层证据
+
+#### Scenario: query_suffix 累积设计
+- **WHEN** 模型在某一层选择需要继续查询下层节点
+- **THEN** 模型 SHOULD 返回 `query_suffix`，用来描述本层筛选后新增的约束、关注点或歧义
+- **AND** Agent MUST 将 `query_suffix` 追加到原始查询尾部，而不是替换原始查询
+- **AND** 下一层 prompt MUST 同时包含 `original_query` 与累计 `query_suffix_chain`
+- **AND** `query_suffix` SHOULD 简短、可审计，不应包含未由当前层候选支撑的新事实
+
+#### Scenario: Path Context 裁剪策略
+- **WHEN** 查询进入下一层 Page
+- **THEN** 系统 SHOULD 裁剪掉上一层未被选中的 sibling candidates
+- **AND** 系统 MUST 保留：
+  - `original_query`
+  - 累计 `query_suffix_chain`
+  - `path_context`：已选中的上层 Page id、摘要、选择理由、置信度和范围
+  - 当前层完整候选节点
+- **AND** 上一层的全量候选 sibling 不应继续进入 prompt，除非模型显式返回低置信、空选择或 `need_sibling_scan = true`
+- **AND** 该策略的目标是让 token 使用随查询深度近似线性增长，而不是把每一层的全部候选重复携带到下一层
+
+#### Scenario: 查询 prompt 结构
+- **WHEN** Agent 调用模型进行某一层节点选择
+- **THEN** prompt payload SHOULD 使用如下结构或等价结构：
+  - `original_query`
+  - `query_suffix_chain`
+  - `path_context`
+  - `current_level`
+  - `current_candidates`
+  - `selection_task`
+  - `output_schema`
+- **AND** `current_candidates` MUST 使用稳定 id，例如 `event_summary_id`、`event_id`、`chapter_id` 或 `doc_id`
+- **AND** 模型输出 MUST 可以被 Agent 直接用于下一层确定性查询，不应只返回自然语言描述
+
+#### Scenario: 低置信与相邻 sibling 回退
+- **WHEN** 某层模型返回空选择、低置信或 `need_sibling_scan = true`
+- **THEN** Agent SHOULD 回到上一层，扩展到相邻 sibling Page 或扩大候选范围
+- **AND** Agent SHOULD 记录该回退动作、输入候选 id、最终 selected ids 与原因
+- **AND** 如果多次回退仍无法定位，系统 SHOULD 返回 `insufficient_memory_context`，并说明缺失的层级或索引
+
+#### Scenario: 查询可审计轨迹
+- **WHEN** BTree descent 查询完成
+- **THEN** 系统 SHOULD 保存查询轨迹，至少包含：
+  - 每层输入候选 ids
+  - 每层 selected ids
+  - 每层 `query_suffix`
+  - 每层选择理由和置信度
+  - 最终返回的 document ids 或摘要节点 ids
+- **AND** 该轨迹可用于解释为什么最终回源到某些 document
+
+#### Scenario: Memory 层接口边界
+- **WHEN** Writer 或 benchmark 需要查询历史剧情事实
+- **THEN** Memory 层 SHOULD 提供稳定接口或等价 facade：
+  - `root_scan(query)`：返回 `event_summary` root Page 候选
+  - `drill_down(state, selected_ids)`：从当前层展开到下一层候选
+  - `resolve_event_ids(event_ids)`：确定性展开 event 到 chapter / document refs
+  - `resolve_chapter_refs(chapter_refs)`：确定性展开 chapter summary 与 document refs
+  - `resolve_document_refs(doc_ids, excerpt_budget)`：返回 document 原文或裁剪摘录
+- **AND** Memory 层 SHALL 负责预算裁剪、状态标注、回源索引和泄漏边界
+- **AND** Writer 层 SHALL 负责提出查询意图、选择候选、维护 `query_suffix_chain` 与判断信息是否足够
+- **AND** Writer 层不应直接扫描 Memory SQLite / Markdown 来绕过该接口
+
+#### Scenario: 用户反馈触发 Memory Query
+
+- **WHEN** Writer Prompt Loop 收到用户反馈、reviewer feedback 或 retry instruction
+- **AND** 当前上下文不足以判断反馈是否应当修改大纲、人物状态或设定边界
+- **THEN** Writer SHOULD 将该反馈归一化为新的 `ResearchRequest`
+- **AND** 该请求 MAY 触发 `story_detail`、`character_profile` 或 `world_concept` Memory Query
+- **AND** Memory Query SHALL 复用与初次用户输入相同的 `NarrativeMemoryQueryService`、预算限制、trace 结构和泄漏审计
+- **AND** Memory 层不区分“初始输入”与“用户反馈”的优先级语义；它只接收查询意图、返回候选与证据，是否继续查询由 Writer Prompt Loop 决定
 
 ## Agent Boundaries
 

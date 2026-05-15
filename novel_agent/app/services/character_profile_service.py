@@ -11,6 +11,7 @@ from ..schemas.character_profile_schema import (
     CharacterAgeItem,
     CharacterProfileSnapshot,
     CharacterRelationshipItem,
+    CharacterStoryEventItem,
     ProfileAttributeItem,
 )
 
@@ -102,6 +103,7 @@ class CharacterProfileService:
         updates: list[dict[str, object]],
         mentioned_doc_ids_by_name: dict[str, list[int]] | None = None,
         speaking_doc_ids_by_name: dict[str, list[int]] | None = None,
+        story_events_by_name: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         first_doc_id = min(doc_ids) if doc_ids else None
         last_doc_id = max(doc_ids) if doc_ids else None
@@ -129,6 +131,10 @@ class CharacterProfileService:
             )
             speaking_doc_ids_for_update = self._doc_ids_for_names(
                 speaking_doc_ids_by_name or {},
+                [incoming_name, *update_aliases],
+            )
+            story_events_for_update = self._events_for_names(
+                story_events_by_name or {},
                 [incoming_name, *update_aliases],
             )
             mentioned_doc_ids = self._merge_chapter_indexes(
@@ -199,6 +205,12 @@ class CharacterProfileService:
                 chapter_index=chapter_index,
                 doc_ids=doc_ids,
             )
+            story_events = self._merge_story_events(
+                base_profile["story_events"],
+                story_events_for_update,
+                chapter_index=chapter_index,
+                doc_ids=doc_ids,
+            )
             speaking_character_status = self._merge_speaking_character_status(
                 base_profile["speaking_character_status"],
                 update=update,
@@ -243,6 +255,10 @@ class CharacterProfileService:
                     CharacterRelationshipItem(**item)
                     for item in relationships
                 ],
+                story_events=[
+                    CharacterStoryEventItem(**item)
+                    for item in story_events
+                ],
                 chapter_indexes=chapter_indexes,
             )
             snapshot.profile_summary_md = self._append_document_presence_summary(
@@ -255,6 +271,7 @@ class CharacterProfileService:
                 {
                     "book_id": book_id,
                     **snapshot.to_dict(),
+                    "story_events": story_events,
                     "mentioned_doc_ids": mentioned_doc_ids,
                     "speaking_doc_ids": speaking_doc_ids,
                     "first_seen_doc_id": self._min_int(base_profile["first_seen_doc_id"], first_doc_id),
@@ -314,6 +331,15 @@ class CharacterProfileService:
             doc_ids.extend(mapping.get(normalized, []))
         return self._merge_chapter_indexes([], doc_ids)
 
+    def _events_for_names(self, mapping: dict[str, list[dict[str, Any]]], names: list[str]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for name in names:
+            normalized = self._normalize_name(name)
+            if not normalized:
+                continue
+            events.extend(item for item in mapping.get(normalized, []) if isinstance(item, dict))
+        return events
+
     def _merge_existing_rows(self, rows: list[Any]) -> dict[str, Any]:
         merged: dict[str, Any] = {
             "aliases": [],
@@ -323,6 +349,7 @@ class CharacterProfileService:
             "abilities": [],
             "recent_activity": [],
             "relationships": [],
+            "story_events": [],
             "chapter_indexes": [],
             "mentioned_doc_ids": [],
             "speaking_doc_ids": [],
@@ -386,6 +413,12 @@ class CharacterProfileService:
                 chapter_index=0,
                 doc_ids=[],
                 known_name_map={},
+            )
+            merged["story_events"] = self._merge_story_events(
+                merged["story_events"],
+                self._load_json_field(row, "story_events_json"),
+                chapter_index=0,
+                doc_ids=[],
             )
             merged["chapter_indexes"] = self._merge_chapter_indexes(
                 merged["chapter_indexes"],
@@ -469,6 +502,74 @@ class CharacterProfileService:
                 continue
             values.add(value)
         return sorted(values)
+
+    def _merge_story_events(
+        self,
+        base_events: list[Any],
+        new_events: object,
+        *,
+        chapter_index: int,
+        doc_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for raw_event in [*base_events, *self._as_list(new_events)]:
+            if not isinstance(raw_event, dict):
+                continue
+            label = str(raw_event.get("label") or "").strip()
+            summary = str(raw_event.get("summary") or "").strip()
+            event_id = str(raw_event.get("event_id") or "").strip()
+            if not event_id:
+                event_id = self._story_event_id(
+                    chapter_indexes=self._merge_chapter_indexes([], raw_event.get("source_chapter_indexes") or [chapter_index]),
+                    label=label,
+                    summary=summary,
+                )
+            if not (event_id and (label or summary)):
+                continue
+            existing = merged.get(event_id, {})
+            item = {
+                "event_id": event_id,
+                "label": label or existing.get("label") or summary[:24],
+                "summary": summary if len(summary) >= len(str(existing.get("summary") or "")) else str(existing.get("summary") or ""),
+                "source_chapter_indexes": self._merge_chapter_indexes(
+                    self._as_list(existing.get("source_chapter_indexes")),
+                    self._as_list(raw_event.get("source_chapter_indexes") or [chapter_index]),
+                ),
+                "source_doc_ids": self._merge_chapter_indexes(
+                    self._as_list(existing.get("source_doc_ids")),
+                    self._as_list(raw_event.get("source_doc_ids") or doc_ids),
+                ),
+                "source_doc_range": str(raw_event.get("source_doc_range") or existing.get("source_doc_range") or ""),
+                "participants": self._merge_aliases(
+                    self._as_list(existing.get("participants")),
+                    self._as_list(raw_event.get("participants")),
+                    canonical_name="",
+                ),
+            }
+            if not item["source_doc_range"] and item["source_doc_ids"]:
+                item["source_doc_range"] = self._doc_range_text(item["source_doc_ids"])
+            merged[event_id] = item
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                max(item.get("source_chapter_indexes") or [0]),
+                max(item.get("source_doc_ids") or [0]),
+                str(item.get("event_id") or ""),
+            ),
+        )[-24:]
+
+    def _story_event_id(self, *, chapter_indexes: list[int], label: str, summary: str) -> str:
+        chapter = chapter_indexes[-1] if chapter_indexes else 0
+        key = re.sub(r"[^\w\u4e00-\u9fff]+", "-", f"{label or summary[:24]}").strip("-").lower()
+        return f"chapter-{chapter}:event-{key[:32] or 'unknown'}"
+
+    def _doc_range_text(self, doc_ids: list[int]) -> str:
+        cleaned = self._merge_chapter_indexes([], doc_ids)
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return str(cleaned[0])
+        return f"{cleaned[0]}-{cleaned[-1]}"
 
     def _merge_attribute_items(
         self,
@@ -899,24 +1000,25 @@ class CharacterProfileService:
         parts.append(f"- 发言状态：{snapshot.speaking_character_status}")
         if snapshot.personhood_evidence_summary:
             parts.append(f"- 人物性证据：{snapshot.personhood_evidence_summary}")
-        parts.extend(["", "## 已确认事实"])
+        parts.extend(["", "## 基本属性/关系/能力"])
         fact_lines: list[str] = []
         fact_lines.extend(self._format_attribute_lines("职业", snapshot.occupations, limit=3))
-        fact_lines.extend(self._format_attribute_lines("近期活动", snapshot.recent_activity, limit=3))
         fact_lines.extend(self._format_ability_lines(snapshot.abilities, limit=3))
         fact_lines.extend(self._format_relationship_lines(snapshot.relationships, limit=4))
+        fact_lines.extend(self._format_attribute_lines("性格", snapshot.personality, limit=4))
+        fact_lines.extend(self._format_age_lines(snapshot.age_timeline, limit=3))
         if fact_lines:
             parts.extend(fact_lines)
         else:
-            parts.append("- 暂无已确认事实更新。")
-        parts.extend(["", "## 审慎推断"])
-        inference_lines: list[str] = []
-        inference_lines.extend(self._format_attribute_lines("性格", snapshot.personality, limit=4))
-        inference_lines.extend(self._format_age_lines(snapshot.age_timeline, limit=3))
-        if inference_lines:
-            parts.extend(inference_lines)
+            parts.append("- 暂无稳定基础属性。")
+        parts.extend(["", "## 剧情时间线"])
+        event_lines = self._format_story_event_lines(snapshot.story_events, limit=8)
+        if event_lines:
+            parts.extend(event_lines)
+        elif snapshot.recent_activity:
+            parts.extend(self._format_attribute_lines("近期活动", snapshot.recent_activity, limit=4))
         else:
-            parts.append("- 暂无审慎推断。")
+            parts.append("- 暂无可索引剧情事件。")
         return "\n".join(parts).strip() + "\n"
 
     def _append_document_presence_summary(
@@ -1034,6 +1136,23 @@ class CharacterProfileService:
         recent = ", ".join(str(item) for item in chapter_indexes[-3:])
         return f"（章节：{recent}）"
 
+    def _format_story_event_lines(self, events: list[CharacterStoryEventItem], *, limit: int) -> list[str]:
+        lines: list[str] = []
+        for item in sorted(
+            events,
+            key=lambda event: (
+                max(event.source_chapter_indexes or [0]),
+                max(event.source_doc_ids or [0]),
+                event.event_id,
+            ),
+        )[-limit:]:
+            chapters = ",".join(str(value) for value in item.source_chapter_indexes) or "?"
+            docs = item.source_doc_range or self._doc_range_text(item.source_doc_ids) or "?"
+            label = item.label or item.event_id
+            summary = item.summary or label
+            lines.append(f"- [{item.event_id}] {label}：{summary}（章节：{chapters}；documents：{docs}）")
+        return lines
+
     def _merge_sources(self, target: dict[str, Any], source: dict[str, Any]) -> None:
         target["source_chapter_indexes"] = self._merge_chapter_indexes(
             self._as_list(target.get("source_chapter_indexes")),
@@ -1100,6 +1219,8 @@ class CharacterProfileService:
         )
 
     def _load_json_field(self, row: Any, field_name: str) -> list[Any]:
+        if hasattr(row, "keys") and field_name not in row.keys():
+            return []
         raw_value = row[field_name]
         if not raw_value:
             return []

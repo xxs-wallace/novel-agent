@@ -65,6 +65,20 @@ class CharacterRelationshipItem:
 
 
 @dataclass(slots=True)
+class CharacterStoryEventItem:
+    event_id: str
+    label: str
+    summary: str
+    source_chapter_indexes: list[int] = field(default_factory=list)
+    source_doc_ids: list[int] = field(default_factory=list)
+    source_doc_range: str = ""
+    participants: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class CharacterProfileSnapshot:
     canonical_name: str
     aliases: list[str] = field(default_factory=list)
@@ -78,6 +92,7 @@ class CharacterProfileSnapshot:
     abilities: list[CharacterAbilityItem] = field(default_factory=list)
     recent_activity: list[ProfileAttributeItem] = field(default_factory=list)
     relationships: list[CharacterRelationshipItem] = field(default_factory=list)
+    story_events: list[CharacterStoryEventItem] = field(default_factory=list)
     chapter_indexes: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,5 +109,6 @@ class CharacterProfileSnapshot:
             "abilities": [item.to_dict() for item in self.abilities],
             "recent_activity": [item.to_dict() for item in self.recent_activity],
             "relationships": [item.to_dict() for item in self.relationships],
+            "story_events": [item.to_dict() for item in self.story_events],
             "chapter_indexes": list(self.chapter_indexes),
         }

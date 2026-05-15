@@ -102,6 +102,7 @@ class NovelAgentDB:
                 abilities_json TEXT NOT NULL DEFAULT '[]',
                 recent_activity_json TEXT NOT NULL DEFAULT '[]',
                 relationships_json TEXT NOT NULL DEFAULT '[]',
+                story_events_json TEXT NOT NULL DEFAULT '[]',
                 chapter_indexes_json TEXT NOT NULL DEFAULT '[]',
                 first_seen_doc_id INTEGER,
                 last_seen_doc_id INTEGER,
@@ -151,6 +152,22 @@ class NovelAgentDB:
             )
             '''
         )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS narrative_memory_pages (
+                page_id TEXT PRIMARY KEY,
+                book_id TEXT NOT NULL,
+                page_type TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
+                child_refs_json TEXT NOT NULL DEFAULT '[]',
+                source_doc_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_doc_range TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'provisional',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            '''
+        )
         self._ensure_book_assets_columns(conn)
         self._ensure_character_profiles_columns(conn)
         conn.execute('CREATE INDEX IF NOT EXISTS idx_documents_book_title_index ON documents(book_id, document_title_index, doc_id)')
@@ -158,6 +175,7 @@ class NovelAgentDB:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_chapters_book_title_index ON chapters(book_id, document_title_index)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_character_profiles_book_name ON character_profiles(book_id, canonical_name)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_reading_progress_stage ON reading_progress(book_id, agent_stage)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_narrative_memory_pages_book_type ON narrative_memory_pages(book_id, page_type)')
 
     def _ensure_documents_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
@@ -197,6 +215,8 @@ class NovelAgentDB:
             conn.execute("ALTER TABLE character_profiles ADD COLUMN personhood_evidence_summary TEXT NOT NULL DEFAULT ''")
         if "evidence_level" not in columns:
             conn.execute("ALTER TABLE character_profiles ADD COLUMN evidence_level TEXT NOT NULL DEFAULT 'inferred'")
+        if "story_events_json" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN story_events_json TEXT NOT NULL DEFAULT '[]'")
 
     def _ensure_documents_fts(self, conn: sqlite3.Connection) -> None:
         table_exists = conn.execute(

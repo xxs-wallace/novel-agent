@@ -32,6 +32,7 @@ class CharacterProfilesRepo:
             'abilities_json': json.dumps(payload.get('abilities', []), ensure_ascii=False),
             'recent_activity_json': json.dumps(payload.get('recent_activity', []), ensure_ascii=False),
             'relationships_json': json.dumps(payload.get('relationships', []), ensure_ascii=False),
+            'story_events_json': json.dumps(payload.get('story_events', []), ensure_ascii=False),
             'chapter_indexes_json': json.dumps(payload.get('chapter_indexes', []), ensure_ascii=False),
             'mentioned_doc_ids_json': json.dumps(payload.get('mentioned_doc_ids', []), ensure_ascii=False),
             'speaking_doc_ids_json': json.dumps(payload.get('speaking_doc_ids', []), ensure_ascii=False),
@@ -44,7 +45,7 @@ class CharacterProfilesRepo:
                     speaking_character_status = ?, personhood_evidence_summary = ?, evidence_level = ?,
                     personality_json = ?, occupations_json = ?,
                     age_timeline_json = ?, abilities_json = ?, recent_activity_json = ?, relationships_json = ?,
-                    chapter_indexes_json = ?, mentioned_doc_ids_json = ?, speaking_doc_ids_json = ?,
+                    story_events_json = ?, chapter_indexes_json = ?, mentioned_doc_ids_json = ?, speaking_doc_ids_json = ?,
                     first_seen_doc_id = ?, last_seen_doc_id = ?,
                     first_seen_title_index = ?, last_seen_title_index = ?, importance_score = ?,
                     profile_version = ?, updated_at = ?
@@ -62,6 +63,7 @@ class CharacterProfilesRepo:
                     json_fields['abilities_json'],
                     json_fields['recent_activity_json'],
                     json_fields['relationships_json'],
+                    json_fields['story_events_json'],
                     json_fields['chapter_indexes_json'],
                     json_fields['mentioned_doc_ids_json'],
                     json_fields['speaking_doc_ids_json'],
@@ -84,11 +86,11 @@ class CharacterProfilesRepo:
                 book_id, canonical_name, aliases_json, profile_summary_md,
                 speaking_character_status, personhood_evidence_summary, evidence_level, personality_json,
                 occupations_json, age_timeline_json, abilities_json, recent_activity_json,
-                relationships_json, chapter_indexes_json, mentioned_doc_ids_json, speaking_doc_ids_json,
+                relationships_json, story_events_json, chapter_indexes_json, mentioned_doc_ids_json, speaking_doc_ids_json,
                 first_seen_doc_id, last_seen_doc_id,
                 first_seen_title_index, last_seen_title_index, importance_score, profile_version,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 payload['book_id'],
@@ -104,6 +106,7 @@ class CharacterProfilesRepo:
                 json_fields['abilities_json'],
                 json_fields['recent_activity_json'],
                 json_fields['relationships_json'],
+                json_fields['story_events_json'],
                 json_fields['chapter_indexes_json'],
                 json_fields['mentioned_doc_ids_json'],
                 json_fields['speaking_doc_ids_json'],

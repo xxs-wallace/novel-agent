@@ -261,8 +261,13 @@ Writer smoke
   -> user_story_overview + prefix modeling snapshot
   -> ExtractedCharacterMentions
   -> CharacterMentionResolution through tool call / resolver
-  -> Outline Research Loop
+  -> Outline Research Loop with BTree descent Memory queries
+      -> event_summary root page scan
+      -> event list drill-down
+      -> chapter summary drill-down
+      -> optional document excerpt drill-down
   -> generated_outline.json
+  -> optional small expansion draft through formal Writer execution
   -> OutlineResearchReviewer
 ```
 
@@ -275,6 +280,37 @@ Author brief smoke 仍必须遵守防泄漏边界，但它和 blind continuation
 - `reference_only`: 后 120KB 的详细 close-read 分章梗概、reference outline、reference character set 和原文，只能进入 Reviewer、泄漏审计和人工复核，不能进入 Writer prompt、Context Broker 或 tool call resolver。
 
 因此，后 120KB 的浓缩概述不是泄漏，它是用户授权输入；后 120KB 的详细 outline 和人物全集才是隐藏答案。
+
+#### Multi-round Memory Query
+
+Author brief smoke 应验证新 Memory 架构，而不是退回一轮固定输入：
+
+- Writer 初始输入只包含 `user_story_overview`、prefix modeling snapshot 和轻量索引。
+- Writer 通过 Outline Research Loop 主动提出 `story_detail`、`character_profile`、`world_concept` 和 `structure_pattern` 请求。
+- 对 `story_detail`，Context Broker 触发 Memory BTree descent：
+  - 先让模型看 `event_summary` root pages，选择目标剧情范围
+  - 再展开该范围的 event list，让模型选择相关 event ids
+  - 再展开相关 chapter summary，让模型选择是否需要某些章节的详细 summary
+  - 最后按需展开到 document excerpt
+- `query_suffix_chain` 和 `memory_query_trace` 必须落盘，证明查询是逐层收窄的，而不是一次性把 prefix Memory 全量塞给 Writer。
+- 该多轮流程只改变 Writer 获取 prefix facts 的方式，不改变最终 Reviewer 的评分目标。
+
+#### Reasoning / Decision Debug Logs
+
+为了判断多轮 research 是否真正有效，benchmark 框架应将“模型可见的推理调试信息”纳入测试日志：
+
+- 如果模型 API 返回 `reasoning_content`、`reasoning` 或等价可见 debug 字段，benchmark 将其原样保存到 `model_reasoning_debug.json`。
+- 如果模型 API 不返回可见 reasoning 字段，benchmark 不得伪造思维链，而是保存结构化决策轨迹：
+  - prompt id / request id
+  - 当前层候选 ids
+  - selected ids
+  - `query_suffix`
+  - reason
+  - confidence
+  - budget state
+  - final evidence ids
+- reasoning/debug trace 只用于 benchmark debug、Reviewer 与人工复核，不得回流到 Writer 下一轮输入。
+- 默认单元测试使用 fake facade 时可以断言 trace 字段存在，但不得伪造真实模型返回。
 
 #### Modeling Cache
 
@@ -411,6 +447,9 @@ runs/benchmarks/<run_id>/outline_research_author_brief/
   extracted_character_mentions.json
   character_resolution.json
   outline_research_trace.json
+  memory_query_trace.json
+  memory_query_decision_log.json
+  model_reasoning_debug.json
   planning_notebook.json
   sufficiency_decision.json
   generated_outline.json
@@ -457,6 +496,8 @@ AgenticSmokeBenchmarkService
   - run real rough read / close read / Creative KB
   - run real Writer planning workflow
   - run real Outline Research Loop when enabled
+  - collect model reasoning/debug fields when returned by the model API
+  - collect structured Memory query decision trace when reasoning/debug fields are unavailable
   - build or locate target story outline for the benchmark window
   - extract generated story synopsis from Writer ChapterPackage / ChapterBrief
   - build reference story synopsis from held-out reference truth

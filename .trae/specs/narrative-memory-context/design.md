@@ -53,8 +53,23 @@
 - `abilities`
 - `recent_activity`
 - `relationships`
+- `story_events`
 - `chapter_indexes`
+- `mentioned_doc_ids`
+- `speaking_doc_ids`
 - `first_seen / last_seen`
+
+目标结构分两层：
+
+- 基础属性层
+  - 保存姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、稳定关系、能力和特长
+  - 该层用于 Writer 快速获得人物稳定状态，不应塞入过长流水账
+- 人物剧情时间线层
+  - 保存以人物为维度过滤出的 `story_events`
+  - 每个事件包含 `event_id`、`label`、`summary`、`source_chapter_indexes`、`source_doc_ids`、`source_doc_range`、`participants`
+  - 该层用于模型先筛选人物相关关键经历，再按事件索引展开原始 document
+
+`mentioned_doc_ids` / `speaking_doc_ids` 继续作为底层倒排索引存在，但不再是模型理解人物过往的主要入口。模型应优先读取人物剧情时间线；只有需要确认细节时，才根据事件携带的 doc ids 请求原文证据。
 
 ### 3.2 World Memory
 
@@ -96,11 +111,52 @@
 - 章节级一行摘要
 - 时间节点
 - 主线推进信息
+- 结构化 `event list`
+- 连续自然语言 `event summary`
 - `outline_status`
 - `evidence_window`
 - `target_range`
 
 当前顺序精读阶段生成的大纲增量默认是 `provisional`。后续可用更大的上下文窗口重算较小的目标范围，例如用第 10 到第 20 个 document/chapter 的故事梗概和人物状态，定稿第 14 到第 18 个 document/chapter 的大纲片段，并标记为 `committed`。
+
+目标叙事压缩链路为：
+
+```text
+document -> summary -> event list -> event summary
+```
+
+- `document`
+  - 粗读入库的原文片段，保存 `doc_id`、`content`、`source_path`、`source_start_offset`、`source_end_offset`
+- `summary`
+  - close-read 后的章节/批次概要，压缩一个或多个 documents
+  - 通过 `source_doc_start_id` / `source_doc_end_id` 或 `source_doc_ids` 回到原始文档
+- `event list`
+  - 更浓缩的关键剧情事件列表
+  - 每个事件必须能回到 doc ids / doc range
+  - 事件粒度应高于 document，通常概括多个 document 或一个章节内的关键推进
+- `event summary`
+  - 对 event list 的连续自然语言总结
+  - 服务于 Writer 快速理解历史剧情顺序和因果衔接
+
+推荐的 outline event 结构：
+
+```json
+{
+  "event_id": "chapter-12:event-03-fingel-sells-exam",
+  "label": "芬格尔兜售3E考试答案",
+  "summary": "芬格尔利用信息差和时间压力诱导路明非购买考题，交易后路明非意识到学生证信用卡已被消费并开始负债。",
+  "document_title_index": 12,
+  "participants": ["路明非", "芬格尔·冯·弗林斯"],
+  "source_title_indexes": [12],
+  "source_doc_ids": [48, 49, 50],
+  "source_doc_start_id": 48,
+  "source_doc_end_id": 50,
+  "source_doc_range": "48-50",
+  "event_summary_level": "chapter_event"
+}
+```
+
+`event_id` 是模型驱动检索的关键。后续 Writer Outline Research Loop 不应只提交自然语言 `story_detail query` 让 Agent 猜测，而应允许模型直接选择 `event_id`、`character_name` 或 `doc_id range`，由 Context Broker 做确定性展开。
 
 ### 3.5 Progress Memory
 
@@ -163,6 +219,179 @@
 该层不直接作为 Writer 的新书规划模板，而是为后续 KB 结构模式沉淀提供事实输入。KB 层可基于 `SourceArcMap` 形成 `NarrativeStructurePattern` / `ArcPatternCard`，例如“前若干章节以日常和感情生活建立人物状态”“新人物登场后用若干章节完成关系试探”“篇章切换前安排低冲突缓冲与未决问题”等可迁移结构特征。
 
 `SourceArcMap` 由 close-read 后处理生成，默认属于 `committed` 级结构信息。它可以反向支持章节摘要和故事大纲中结构功能、节奏、篇章边界等字段的定稿。
+
+### 3.9 BTree Descent Query
+
+BTree descent query 是 Memory 层面向 Writer / Outline Research Loop 的标准故事细节查询协议。它不把整本原文或所有摘要一次性塞给模型，而是让模型沿着 Page 层级逐步选择需要展开的范围。
+
+推荐运行时接口：
+
+```python
+class NarrativeMemoryQueryService:
+    def root_scan(self, query: str, *, budget: MemoryQueryBudget) -> MemoryQueryState: ...
+    def drill_down(self, state: MemoryQueryState, selected_ids: list[str]) -> MemoryQueryState: ...
+    def resolve_event_ids(self, event_ids: list[str]) -> MemoryEvidenceBundle: ...
+    def resolve_chapter_refs(self, chapter_refs: list[str]) -> MemoryEvidenceBundle: ...
+    def resolve_document_refs(self, doc_ids: list[int], *, excerpt_budget: int) -> MemoryEvidenceBundle: ...
+```
+
+Memory 层负责返回候选 Page、确定性展开下层索引、裁剪 excerpt、标注 `provisional` / `committed` 和生成 `memory_query_trace`。
+Writer 层负责把当前候选交给 Outline Research 模型选择，并把模型返回的 `selected_ids` / `query_suffix` / `reason` / `confidence` 传回 Memory。Memory 不生成续写规划，Writer 不直接扫描 SQLite 或 Markdown 绕过 Memory facade。
+
+`NarrativeMemoryQueryService` 是输入来源无关的。`query` 可以来自首次用户输入，也可以来自用户反馈、reviewer feedback 或 retry instruction。Writer Prompt Loop 负责把这些 turn-level 信号归一化为 research intent；Memory facade 只看到查询意图、预算和已选路径，并按同一套 BTree descent 协议返回下一层候选或证据。
+
+查询路径：
+
+```text
+original_query
+  -> event_summary root pages
+  -> selected event_summary range
+  -> event list candidates
+  -> selected event ids
+  -> chapter summary candidates
+  -> selected chapter ids / title ranges
+  -> document candidates
+  -> selected document ids / excerpts
+```
+
+每一层都由模型做一次结构化选择，Agent 只负责确定性展开下一层：
+
+```json
+{
+  "need_drill_down": true,
+  "selected_ids": ["event-041", "event-042"],
+  "query_suffix": "重点确认角色为何改变立场以及该转折的直接后果。",
+  "reason": "这两个事件包含立场转折、关系变化和后续行动结果。",
+  "confidence": 0.82,
+  "need_sibling_scan": false
+}
+```
+
+`query_suffix` 设计：
+
+- `query_suffix` 是模型在当前层筛选后追加的查询约束，不替代 `original_query`。
+- Agent 在下一层 prompt 中同时传入 `original_query` 和累计 `query_suffix_chain`。
+- `query_suffix` 应该短、具体、可审计，只能基于当前层候选内容产生。
+- 多层查询时，`query_suffix_chain` 形成一条逐步收窄的意图路径，例如：
+
+```json
+[
+  "已定位到3E考试前夜和交易压力相关剧情。",
+  "重点确认芬格尔提供答案的方式、路明非的反应和交易后果。"
+]
+```
+
+裁剪策略采用 `Path Context + Current Candidates`：
+
+- 永远保留 `original_query`。
+- 永远保留累计 `query_suffix_chain`。
+- 进入下一层后，上一层未被选中的 sibling candidates 默认裁剪掉。
+- `path_context` 只保留已选中的上层节点：
+  - level
+  - selected id / id range
+  - summary
+  - source range
+  - selection reason
+  - confidence
+- 当前层候选节点必须完整提供必要信息；例如 event 层要提供 `event_id`、`summary`、`participants`、`source_chapter_range`、`source_doc_range`。
+- 只有在模型返回低置信、空选择或 `need_sibling_scan = true` 时，Agent 才回到上一层扩展相邻 sibling。
+
+推荐 prompt payload：
+
+```json
+{
+  "original_query": "确认芬格尔和路明非关于3E考试的交易细节。",
+  "query_suffix_chain": [
+    "已定位到3E考试前夜和入学考试压力相关剧情。"
+  ],
+  "path_context": [
+    {
+      "level": "event_summary",
+      "selected_id": "event-summary-0004",
+      "summary": "路明非进入卡塞尔前后遭遇考试压力、信息差交易和身份审查。",
+      "source_event_range": {
+        "start_event_id": "event-038",
+        "end_event_id": "event-052"
+      },
+      "source_doc_range": "480-620",
+      "selection_reason": "该摘要覆盖3E考试前后的准备与交易线索。",
+      "confidence": 0.86
+    }
+  ],
+  "current_level": "event",
+  "current_candidates": [
+    {
+      "event_id": "event-041",
+      "summary": "芬格尔利用信息差向路明非兜售3E考试答案。",
+      "participants": ["路明非", "芬格尔"],
+      "source_chapter_range": "12-12",
+      "source_doc_range": "501-506",
+      "status": "committed"
+    }
+  ],
+  "selection_task": "判断是否需要继续展开某些 event 来回答 original_query。",
+  "output_schema": {
+    "need_drill_down": "boolean",
+    "selected_ids": ["string"],
+    "query_suffix": "string",
+    "reason": "string",
+    "confidence": "number",
+    "need_sibling_scan": "boolean"
+  }
+}
+```
+
+不同层的候选最小字段：
+
+- `event_summary` 层：
+  - `event_summary_id`
+  - `summary`
+  - `start_event_id`
+  - `end_event_id`
+  - `source_doc_range`
+  - `status`
+- `event` 层：
+  - `event_id`
+  - `label`
+  - `summary`
+  - `participants`
+  - `source_chapter_indexes` 或 `source_chapter_range`
+  - `source_doc_range`
+  - `status`
+- `chapter` 层：
+  - `chapter_id`
+  - `document_title_index`
+  - `summary_md` 或经过预算裁剪的 `summary_excerpt`
+  - `source_doc_range`
+  - `mentioned_characters`
+  - `summary_status`
+- `document` 层：
+  - `doc_id`
+  - `document_title_index`
+  - `source_path`
+  - `source_offsets`
+  - `content` 或预算裁剪后的 excerpt
+
+查询轨迹应写入结构化 trace：
+
+```json
+{
+  "original_query": "...",
+  "steps": [
+    {
+      "level": "event_summary",
+      "input_candidate_ids": ["event-summary-0003", "event-summary-0004"],
+      "selected_ids": ["event-summary-0004"],
+      "query_suffix": "已定位到3E考试前夜相关剧情。",
+      "reason": "覆盖考试压力和交易线索。",
+      "confidence": 0.86
+    }
+  ],
+  "final_document_ids": [501, 502, 503]
+}
+```
+
+这条 trace 是可审计解释链：它说明系统为什么从 root page 最终回源到某些 document。Writer 只消费最终必要上下文；调试和 reviewer 可以读取完整 trace。
 
 ## 4. 当前已实现代码总览
 
@@ -245,6 +474,7 @@
 - 对别名、性格、职业、能力、关系、章节索引做 JSON list 合并
 - 记录 `first_seen_doc_id` / `last_seen_doc_id`
 - 记录 `first_seen_title_index` / `last_seen_title_index`
+- 记录 `mentioned_doc_ids_json` / `speaking_doc_ids_json`
 - 为每次更新重建一个简化版 `profile_summary_md`
 - 维护 `profile_version`
 
@@ -254,6 +484,15 @@
 - `age_update` 进入 `age_timeline_json`
 - `recent_activity` 也以 list 追加
 - 人物摘要目前是轻量模板，不是高保真的人物小传
+
+目标扩展：
+
+- `character_profiles.story_events_json` 保存人物维度 event list
+- close-read 写回时从 `outline_update.timeline_events` 的 `participants` 反向聚合到相关人物
+- `profile_summary_md` 按两层渲染：
+  - `## 基本属性/关系/能力`
+  - `## 剧情时间线`
+- 剧情时间线的每条事件必须显示 `event_id` 与 `documents` 范围，方便模型二次请求原文
 
 ### 4.5 世界观维护
 
@@ -292,6 +531,27 @@
 - 追加内容等价于 `provisional` 大纲增量，尚未区分暂定与定稿状态
 - 还没有真正的结构化主线压缩与弱相关淘汰逻辑
 - 还没有基于后续窗口重算某个 `target_range` 并升级为 `committed` 的机制
+
+目标扩展：
+
+- `outline_update_json.timeline_events` 中每个事件保存 `event_id`、`source_doc_ids`、`source_doc_range` 和 `event_summary_level`
+- `outline_update_json.event_summary` 保存该批 event list 的连续自然语言摘要
+- `memory/outlines/<book>.event_summaries.json` 保存滚动压缩后的 event summary segments：
+  - `segments[].summary` 是模型对一组关联 events 的连续自然语言摘要
+  - `segments[].event_ids` 是该摘要覆盖的底层 event list 索引
+  - `segments[].source_doc_ids` / `segments[].source_doc_range` 用于回源到粗读 document
+  - `pending_event_ids` 保存模型判断不应并入当前摘要的尾部事件
+- `memory/outlines/<book>.outline.md` 仍可作为人类可读投影，但不应是唯一大纲索引来源
+- 结构化事件索引的 source of truth SHOULD 是 `chapters.outline_update_json.timeline_events` 或后续独立事件表
+- Context Broker 应能按 `event_id`、`document_title_index` 或 `source_doc_range` 确定性返回事件详情和原文证据
+
+滚动压缩策略：
+
+1. Agent 从 `chapters.outline_update_json.timeline_events` 收集尚未出现在任何 `segments[].event_ids` 中的 events。
+2. 当 pending event 数量达到阈值时，Agent 将 pending 队列和 `queue_index` 发给模型。
+3. 模型决定前部关联性强的 events 是否可压缩，并返回 `tail_uncompressed_event_indexes`。
+4. Agent 校验尾部 index 必须是连续后缀；只有非尾部 events 会写入新的 `event_summary` segment。
+5. 尾部 events 保持 pending，等待后续 close-read 产生更多上下文后再参与下一轮压缩。
 
 ### 4.7 章节结果持久化
 

@@ -108,6 +108,63 @@
   - [ ] 增加 Context Assembly 测试：输出状态标记，并在缺少 `committed` 时正确回退
   - [ ] 增加 SourceArcMap 集成测试：篇章功能和节奏判断可作为 `committed` 级结构信息进入上下文装配
 
+## BTree Narrative Memory Query 重构
+
+- [ ] Task 13: 定义并迁移 BTree Page schema
+  - `来源`: [spec.md](spec.md) 的 `BTree-like Narrative Memory`、[design.md](design.md) 的 `BTree Descent Query`
+  - `建议只读`: [spec.md](spec.md), [design.md](design.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/schemas/`, `novel_agent/app/repos/`, `novel_agent/app/services/`, `novel_agent/tests/test_*memory*.py`
+  - [ ] 定义 `document -> chapter summary -> event list -> event summary` 四层 Page 数据结构
+  - [ ] `event_summary` Page MUST 只保存对应 event id 起止范围、source doc range、<= 200 字摘要和状态
+  - [ ] `chapter summary` Page MUST 记录 `source_doc_start_id` / `source_doc_end_id`，且 `summary_md` 不超过原文 1/10
+  - [ ] `event` MUST 包含 `event_id`、`label`、`summary`、`participants`、`source_chapter_range`、`source_doc_range`、`status`
+  - [ ] 支持旧数据兼容读取；缺失 BTree Page 时可由现有 chapters / outline assets 重建
+  - [ ] 增加 schema / repo / migration 测试
+
+- [ ] Task 14: 重构 close-read 索引构建
+  - `来源`: [spec.md](spec.md) 的 `Story Outline Memory` 与 `Character Memory`
+  - `建议只读`: [spec.md](spec.md), [design.md](design.md)
+  - `建议只关注代码文件`: `novel_agent/app/runner/close_read_runner.py`, `novel_agent/app/services/outline_service.py`, `novel_agent/app/services/character_profile_service.py`, `novel_agent/app/repos/`, `novel_agent/tests/`
+  - [ ] close-read 每个章节批次生成或更新 chapter summary Page，并保留 doc range
+  - [ ] 从 chapter summaries 压缩生成 `event list`，事件粒度高于 document，通常覆盖多个 document 或一个章节关键推进
+  - [ ] 实现 `event summary` 压缩服务：在存在 N 个未压缩 events 时，让模型选择关联性强的一段压缩，并返回尾部未压缩 event index
+  - [ ] 支持多 `event_summary` Page；每个 Page 目标覆盖 10-20 万字原文，摘要 <= 200 字
+  - [ ] 人物档案新增人物维度 `story_events`，每条事件携带 event id、chapter refs、doc refs、participants
+  - [ ] `mentioned_doc_ids` / `speaking_doc_ids` 只作为底层倒排索引，不作为 Writer 理解人物过往的主要入口
+  - [ ] 增加 close-read 索引构建测试，覆盖 event doc range、event summary range、人物事件时间线和旧数据回退
+
+- [ ] Task 15: 实现 `NarrativeMemoryQueryService`
+  - `来源`: [design.md](design.md) 的 `NarrativeMemoryQueryService`
+  - `建议只读`: [design.md](design.md), [spec.md](spec.md)
+  - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/repos/`, `novel_agent/app/schemas/`, `novel_agent/tests/test_narrative_memory_query*.py`
+  - [ ] 实现 `root_scan(query, budget)`，返回 event_summary root candidates
+  - [ ] 实现 `drill_down(state, selected_ids)`，支持 event_summary -> event -> chapter -> document
+  - [ ] 实现 `resolve_event_ids`、`resolve_chapter_refs`、`resolve_document_refs`
+  - [ ] 每层输出 `MemoryQueryState`，包含 `original_query`、`query_suffix_chain`、`path_context`、`current_level`、`current_candidates`、预算消耗和 trace
+  - [ ] 实现 `Path Context + Current Candidates` 裁剪策略；进入下一层后默认裁剪未选 sibling
+  - [ ] 支持 `need_sibling_scan`、空选择、低置信度的相邻 Page 扩展
+  - [ ] 输出 `MemoryEvidenceBundle` 时保留 sources、状态、doc ids、chapter refs 和必要 excerpt
+  - [ ] 单元测试覆盖 root scan、逐层下钻、sibling scan、预算裁剪、空选择、旧数据兼容
+
+- [ ] Task 16: 接入泄漏边界与状态标注
+  - `来源`: [`../agentic-benchmark/design.md`](../agentic-benchmark/design.md) 的 `Input Boundary`
+  - `建议只读`: [spec.md](spec.md), [design.md](design.md), [`../agentic-benchmark/design.md`](../agentic-benchmark/design.md)
+  - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/benchmarks/`, `novel_agent/tests/`
+  - [ ] Memory Query MUST 只查询 prefix-authorized Memory，不得读取 reference future raw text、future outline、reference character set
+  - [ ] 每个 candidate / evidence MUST 标注 `provisional` / `committed` / `mixed`
+  - [ ] trace 中记录所有 source ids、状态、预算消耗和裁剪原因
+  - [ ] 增加故意注入 reference-only data 的失败测试
+
+- [ ] Task 17: Narrative Memory Query 端到端验收
+  - `来源`: [spec.md](spec.md), [design.md](design.md)
+  - `建议只读`: [spec.md](spec.md), [design.md](design.md), [`../agentic-benchmark/tasks.md`](../agentic-benchmark/tasks.md)
+  - `建议只关注代码文件`: `novel_agent/tests/`, `novel_agent/app/run_single_sample_smoke.py`
+  - [ ] 增加端到端测试：`documents -> close-read -> BTree Pages -> NarrativeMemoryQueryService -> evidence bundle`
+  - [ ] 测试能从 event summary 定位到 event，再定位到 chapter summary，再定位到 document ids
+  - [ ] 测试人物档案能从人物事件时间线定位到相关 event / document
+  - [ ] 默认单元测试使用 fake model，不调用真实 LLM
+  - [ ] 最终验收必须通过显式真实模型 API 的 smoke benchmark；不得用 fake 返回值替代
+
 ## 任务依赖
 
 - Task 1 是 Task 2、Task 4、Task 7 的前置
@@ -121,6 +178,11 @@
 - Task 10 依赖 Task 6 与 Task 8
 - Task 11 依赖 Task 8，并可在 Task 9 / Task 10 未完全完成时先支持状态透传与回退
 - Task 12 依赖 Task 8、Task 9、Task 10、Task 11 的实现结果
+- Task 13 是 Task 14、Task 15、Task 16、Task 17 的前置
+- Task 14 依赖 Task 13，并应与现有 close-read 主流程兼容
+- Task 15 依赖 Task 13、Task 14
+- Task 16 依赖 Task 15，并应与 benchmark leakage audit 对齐
+- Task 17 依赖 Task 14、Task 15、Task 16
 
 ## 外部依赖
 

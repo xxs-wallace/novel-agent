@@ -85,6 +85,7 @@ benchmark 模块不得重新定义与主链路冲突的跨层对象。
 - 梗概层与正文层必须分开评测：先评“大纲 + 历史梗概 + 人物文档 -> 下一段梗概”，再评“梗概 + 长度 + KB/风格约束 -> 正文”。
 - benchmark 只能驱动和评测正式 Writer 接口产物；不得在 benchmark service 中另写一套与 Writer 平行的故事梗概生成 prompt 或正文扩写 prompt。
 - benchmark service 可以组装评测窗口、构造 reference synopsis、调用 Reviewer、落盘审计产物；但 generated synopsis 与 generated draft 的 canonical 产物必须来自 Writer 分层生成链路。
+- benchmark debug 日志 SHOULD 保存模型可返回的 reasoning/debug trace 或结构化决策轨迹，用于复核多轮查询是否真的帮助规划；若模型供应商不返回可见 reasoning 内容，系统 SHALL 至少保存每轮 request、candidate ids、selected ids、`query_suffix`、选择理由和置信度，不得伪造思维链。
 
 ## MVP Smoke Benchmark
 
@@ -227,6 +228,36 @@ benchmark 模块不得重新定义与主链路冲突的跨层对象。
 
 系统 SHALL 将 Writer benchmark 拆成两个互相独立的层级，不得把故事梗概生成和正文扩写混成一个评分。
 
+#### Scenario: 多轮 Memory 查询不改变评分目标
+- **WHEN** Writer 使用 BTree descent + model-guided pruning 生成大纲或章节梗概
+- **THEN** benchmark 的基础流程仍是遮住 held-out reference window，让 Writer 基于 prefix Memory 生成后续大纲、章节梗概和小段正文
+- **AND** 评分标准仍比较 generated outline / synopsis / draft 与 reference outline / reference synopsis / reference truth 的一致性、连续性、人物关系、世界规则和写作质量
+- **AND** 新架构额外评估 research 过程质量：模型是否主动查询需要的章节大概剧情、详细剧情、人物档案和世界规则；查询是否减少幻觉和剧情跳跃
+- **AND** benchmark 不应因为多轮查询而放宽泄漏边界；reference-only 原文、reference_future_outline 和 reference_character_set 仍不得进入 Writer 或 Memory resolver
+
+### Requirement: Author Brief Reconstruction Smoke 多轮化
+
+系统 SHALL 支持用前缀 120KB 建模、遮住后续约 120KB reference window 的 Outline Research author brief smoke。
+
+#### Scenario: 240KB author brief 输入边界
+- **WHEN** benchmark 使用 `longzu_240kb` author brief 模式
+- **THEN** 前约 120KB SHALL 作为 prefix source 进入真实 rough-read、close-read、Creative KB 和 Memory 建模
+- **AND** 后约 120KB SHALL 作为 held-out reference source，仅用于 reference close-read、Reviewer、leakage audit 和人工复核
+- **AND** 系统 MAY 从后约 120KB 的 reference close-read 梗概压缩出 `user_story_overview`，模拟作者给 Writer 的授权概述
+- **AND** `user_story_overview` 可以进入 Writer；后 120KB 的详细 reference outline、reference character set 和原文不得进入 Writer prompt、Context Broker 或 Memory resolver
+
+#### Scenario: Author brief 多轮 Memory 查询
+- **WHEN** Writer 基于 author brief 生成后 120KB 对应的大纲
+- **THEN** 初始 Writer 输入 SHOULD 只包含 `user_story_overview`、prefix modeling snapshot 和轻量索引
+- **AND** Writer SHOULD 通过 Outline Research Loop 主动查询：
+  - 哪些历史章节的大概剧情需要了解
+  - 哪些历史章节或 event 的详细剧情需要展开
+  - 哪些人物需要读取详细人物档案
+  - 哪些世界观概念或规则需要确认
+- **AND** 对 `story_detail` 查询，benchmark SHOULD 验证 Memory 查询通过 `event_summary -> event -> chapter -> document` 的 BTree descent 链路逐层收窄
+- **AND** `query_suffix_chain`、`memory_query_trace` 和每层 selected ids MUST 进入 debug artifacts
+- **AND** 该多轮流程只改变 Writer 获取 prefix facts 的方式，不改变最终大纲层和正文扩写层的评分标准
+
 ### Requirement: 复用正式 Writer 生成接口
 
 Agentic benchmark SHALL 是正式 Writer 链路的评测器，而不是平行生成器。
@@ -304,6 +335,13 @@ Agentic benchmark SHALL 是正式 Writer 链路的评测器，而不是平行生
   - `expansion_reviewer_report.json`: 比较 expansion draft 与 reference truth/reference synopsis
   - `reviewer_report.json`: 汇总两个层级的综合结论
 - **AND** CLI summary SHOULD 同时展示梗概层与扩写层 Reviewer 中文结论
+
+#### Scenario: Benchmark reasoning / decision trace
+- **WHEN** benchmark 调用真实 LLM 进行 Outline Research、Memory page selection、SynopsisReviewer 或 ExpansionReviewer
+- **THEN** benchmark SHOULD 将模型 API 返回的可见 reasoning/debug 字段保存到受控 debug artifact
+- **AND** 若模型 API 不返回可见 reasoning 字段，benchmark MUST 保存结构化决策轨迹作为替代：prompt id、候选 ids、selected ids、`query_suffix`、reason、confidence、预算消耗和最终 evidence ids
+- **AND** 这些 trace 只用于测试日志、debug 和 Reviewer，不得作为下一轮 Writer 输入
+- **AND** 系统不得虚构或补写模型未返回的隐藏思维链
 
 ### Requirement: 抽离可复用 Benchmark 组件
 
@@ -445,6 +483,9 @@ python -m novel_agent.app.run_single_sample_smoke \
   - `expansion/draft.md`
   - `expansion_reviewer_prompt.json`
   - `expansion_reviewer_report.json`
+  - `memory_query_trace.json`（当启用 Outline Research / BTree descent 时）
+  - `memory_query_decision_log.json`（当启用 Outline Research / BTree descent 时）
+  - `model_reasoning_debug.json`（当模型返回可见 reasoning/debug 字段或启用结构化决策日志时）
   - `reviewer_report.json`
   - `summary.json`
 - **AND** 旧 sample/db 兼容路径仍 SHOULD 保存：

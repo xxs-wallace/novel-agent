@@ -807,6 +807,9 @@ class ChapterSummaryIndexEntry:
     concepts: list[str] = field(default_factory=list)
     event_summary: str = ""
     outcome: str = ""
+    outline_update: dict[str, Any] = field(default_factory=dict)
+    source_doc_ids: list[int] = field(default_factory=list)
+    source_doc_range: str = ""
     source_document: str = ""
     source_segment: str = ""
     summary_status: str = "provisional"
@@ -819,6 +822,9 @@ class ChapterSummaryIndexEntry:
         self.concepts = _normalize_string_list(self.concepts)
         self.event_summary = _normalize_text(self.event_summary)
         self.outcome = _normalize_text(self.outcome)
+        self.outline_update = dict(self.outline_update) if isinstance(self.outline_update, Mapping) else {}
+        self.source_doc_ids = [int(item) for item in self.source_doc_ids if str(item).strip().isdigit()]
+        self.source_doc_range = _normalize_text(self.source_doc_range)
         self.source_document = _normalize_text(self.source_document)
         self.source_segment = _normalize_text(self.source_segment)
         self.summary_status = _normalize_text(self.summary_status) or "provisional"
@@ -846,6 +852,9 @@ class HistoricalOutlineEventCard:
     time_hint: str = ""
     source_chapter_id: str = ""
     source_path: str = ""
+    source_doc_ids: list[int] = field(default_factory=list)
+    source_doc_range: str = ""
+    event_summary_level: str = ""
     fact_status: FactStatus = "candidate"
 
     def __post_init__(self) -> None:
@@ -858,6 +867,9 @@ class HistoricalOutlineEventCard:
         self.time_hint = _normalize_text(self.time_hint)
         self.source_chapter_id = _normalize_text(self.source_chapter_id)
         self.source_path = _normalize_text(self.source_path)
+        self.source_doc_ids = [int(item) for item in self.source_doc_ids if str(item).strip().isdigit()]
+        self.source_doc_range = _normalize_text(self.source_doc_range)
+        self.event_summary_level = _normalize_text(self.event_summary_level)
         normalized_status = _normalize_fact_status(self.fact_status)
         if normalized_status not in FACT_STATUSES:
             raise ValueError("fact_status must be a supported value")

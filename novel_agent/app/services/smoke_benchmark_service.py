@@ -634,6 +634,10 @@ class OutlineResearchReviewer:
                 "你是 OutlineResearchReviewer。只输出 JSON。你可以读取 reference-only 材料进行评估，"
                 "但这些材料不得反馈给 Writer。评估 generated_outline 与 reference_future_outline 的主要剧情节点、"
                 "人物抽取/解析、research tool 有效性、sufficiency decision 和 leakage 边界。"
+                "边界规则：user_story_overview 是用户授权输入，允许包含后续方向；prefix_story_outline、"
+                "prefix_modeling_snapshot、chapter/historical indexes 是前缀建模证据。只有 reference_future_outline、"
+                "reference_character_set 或 future raw text 中独有、且不在授权概述或前缀证据中的信息进入 Writer 阶段，"
+                "才判定 leakage_boundary 失败。"
             ),
             "user_payload": {
                 "prefix_story_outline": prefix_story_outline,
@@ -1419,7 +1423,10 @@ class AgenticSmokeBenchmarkService:
         )
         (artifact_dir / "future_source.txt").write_text(reference_truth.strip() + "\n", encoding="utf-8")
 
-        user_story_overview = self._build_user_story_overview(reference_context=reference_context)
+        user_story_overview = self._build_user_story_overview(
+            reference_context=reference_context,
+            prefix_story_context=story_context,
+        )
         user_story_overview_path = artifact_dir / "user_story_overview.txt"
         user_story_overview_path.write_text(user_story_overview + "\n", encoding="utf-8")
 
@@ -1521,11 +1528,16 @@ class AgenticSmokeBenchmarkService:
         planning_notebook = copied_artifacts.get("planning_notebook.json", {})
         sufficiency_decision = copied_artifacts.get("sufficiency_decision.json", {})
         generated_outline = copied_artifacts.get("generated_outline.json", {})
+        memory_query_trace = copied_artifacts.get("memory_query_trace.json", {})
+        memory_query_decision_log = copied_artifacts.get("memory_query_decision_log.json", {})
+        model_reasoning_debug = copied_artifacts.get("model_reasoning_debug.json", {})
         leakage_audit = self._build_leakage_audit(
             writer_stage_payloads={
                 "writer_input": intent_payload,
                 "outline_seed_packet": outline_seed_packet,
                 "outline_research_trace": outline_research_trace,
+                "memory_query_trace": memory_query_trace,
+                "memory_query_decision_log": memory_query_decision_log,
                 "planning_notebook": planning_notebook,
                 "generated_outline": generated_outline,
             },
@@ -1647,6 +1659,11 @@ class AgenticSmokeBenchmarkService:
             "artifact_dir": str(artifact_dir),
             "reviewer": reviewer_report,
             "leakage_audit": leakage_audit,
+            "memory_query_trace_summary": self._summarize_memory_query_trace(
+                memory_query_trace=memory_query_trace,
+                memory_query_decision_log=memory_query_decision_log,
+            ),
+            "model_reasoning_debug": model_reasoning_debug,
             "major_failures": major_failures,
             "next_steps": next_steps,
         }
@@ -1655,25 +1672,146 @@ class AgenticSmokeBenchmarkService:
             raise RuntimeError(f"outline research leakage audit failed: {leakage_audit_path}")
         return result
 
-    def _build_user_story_overview(self, *, reference_context: dict[str, object]) -> str:
+    def _build_user_story_overview(
+        self,
+        *,
+        reference_context: dict[str, object],
+        prefix_story_context: dict[str, object] | None = None,
+    ) -> str:
         summaries = [
             item for item in reference_context.get("reference_chapter_summaries", [])
             if isinstance(item, dict)
         ]
-        parts = []
+        prefix_names = self._prefix_character_aliases(prefix_story_context or {})
+        future_only_names = self._future_only_character_names(
+            prefix_names=prefix_names,
+            reference_context=reference_context,
+        )
+        parts: list[str] = []
         for item in summaries:
-            text = _normalize_text(item.get("summary_short")) or _safe_excerpt(item.get("summary_md"), 260)
-            if text:
-                parts.append(text)
-        overview = "；".join(parts)
-        if len(overview) < 500:
-            expanded = [
-                _normalize_text(item.get("summary_md")) or _normalize_text(item.get("summary_short"))
-                for item in summaries
-            ]
-            overview = "\n".join(item for item in expanded if item)
+            summary_md = _normalize_text(item.get("summary_md"))
+            event_lines = self._extract_author_brief_event_lines(summary_md)
+            if not event_lines:
+                fallback = _normalize_text(item.get("summary_short")) or _safe_excerpt(summary_md, 260)
+                event_lines = [fallback] if fallback else []
+            parts.extend(event_lines)
+        sanitized = [
+            self._sanitize_author_brief_line(
+                line,
+                prefix_names=prefix_names,
+                future_only_names=future_only_names,
+            )
+            for line in parts
+        ]
+        sanitized = [line for line in dict.fromkeys(sanitized) if line]
+        overview = "；".join(sanitized[:8])
         overview = re.sub(r"\s+", " ", overview).strip()
-        return _safe_excerpt(overview, 1000) if len(overview) > 1000 else overview
+        if not overview:
+            overview = "用户授权概述：后续章节应承接前缀主线，推进主角进入新的学院/任务环境，并保留关键人物关系与世界观约束。"
+        if len(overview) > 900:
+            overview = _safe_excerpt(overview, 900)
+        return "用户授权概述：" + overview.removeprefix("用户授权概述：")
+
+    def _extract_author_brief_event_lines(self, summary_md: str) -> list[str]:
+        if not summary_md:
+            return []
+        match = re.search(r"##\s*剧情事件链\s*(.*?)(?=\n##\s+|$)", summary_md, flags=re.S)
+        text = match.group(1) if match else summary_md
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#") or "摘要元信息" in line:
+                continue
+            if not re.search(r"起点|触发|行动/冲突|转折/结果|后续铺垫", line):
+                continue
+            line = re.sub(r"^[-*]\s*", "", line)
+            line = re.sub(r"\*\*", "", line)
+            line = re.sub(r"^(起点|触发|行动/冲突|转折/结果|后续铺垫)\s*[:：]\s*", "", line)
+            line = re.sub(r"\s+", " ", line).strip()
+            if line:
+                lines.append(_safe_excerpt(line, 180))
+        return lines
+
+    def _sanitize_author_brief_line(
+        self,
+        line: str,
+        *,
+        prefix_names: set[str],
+        future_only_names: set[str],
+    ) -> str:
+        sanitized = _normalize_text(line)
+        if not sanitized:
+            return ""
+        role_replacements = {
+            "古德里安教授": "导师",
+            "古德里安": "导师",
+            "富山雅史教员": "学院教员",
+            "富山雅史": "学院教员",
+            "曼施坦因教授": "学院教授",
+            "曼施坦因": "学院教授",
+            "冯·施耐德": "学院执行部负责人",
+            "施耐德教授": "学院执行部负责人",
+            "施耐德": "学院执行部负责人",
+            "恺撒·加图索": "学生会主席",
+            "恺撒": "学生会主席",
+            "EVA": "隐藏系统人格",
+            "白王": "龙族隐秘议题",
+            "尼德霍格": "龙族神话源头",
+            "霍格": "龙族神话源头",
+            "苏醒": "被唤醒",
+        }
+        for name in sorted(future_only_names, key=len, reverse=True):
+            if name and name not in prefix_names:
+                sanitized = sanitized.replace(name, role_replacements.get(name, "新登场人物"))
+                for part in re.split(r"[·\s]+", name):
+                    if len(part) >= 2 and part not in prefix_names:
+                        sanitized = sanitized.replace(part, role_replacements.get(part, "新登场人物"))
+        for needle, replacement in role_replacements.items():
+            if needle not in prefix_names:
+                sanitized = sanitized.replace(needle, replacement)
+        sanitized = re.sub(r"(导师|学生会主席|学院教授|学院教员|学院执行部负责人)\1+", r"\1", sanitized)
+        sanitized = sanitized.replace("龙皇龙族神话源头", "龙族神话源头")
+        sanitized = re.sub(r"\s+", " ", sanitized).strip()
+        return sanitized
+
+    def _prefix_character_aliases(self, story_context: dict[str, object]) -> set[str]:
+        names: set[str] = set()
+        for item in story_context.get("character_docs", []) or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("canonical_name", "name"):
+                text = _normalize_text(item.get(key))
+                if text:
+                    names.add(text)
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            for alias in aliases:
+                text = _normalize_text(alias)
+                if text:
+                    names.add(text)
+        return names
+
+    def _future_only_character_names(
+        self,
+        *,
+        prefix_names: set[str],
+        reference_context: dict[str, object],
+    ) -> set[str]:
+        names: set[str] = set()
+        for item in reference_context.get("reference_character_docs", []) or []:
+            if not isinstance(item, dict):
+                continue
+            candidates = [_normalize_text(item.get("canonical_name")), _normalize_text(item.get("name"))]
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            candidates.extend(_normalize_text(alias) for alias in aliases)
+            if not any(candidate and candidate in prefix_names for candidate in candidates):
+                names.update(candidate for candidate in candidates if candidate)
+        return names
 
     def _build_prefix_modeling_snapshot(
         self,
@@ -1731,11 +1869,7 @@ class AgenticSmokeBenchmarkService:
         prefix_story_context: dict[str, object],
         reference_context: dict[str, object],
     ) -> dict[str, object]:
-        prefix_names = {
-            _normalize_text(item.get("canonical_name"))
-            for item in prefix_story_context.get("character_docs", [])
-            if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
-        }
+        prefix_names = self._prefix_character_aliases(prefix_story_context)
         future_docs = [
             item for item in reference_context.get("reference_character_docs", [])
             if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
@@ -1744,12 +1878,17 @@ class AgenticSmokeBenchmarkService:
         new = []
         for item in future_docs:
             name = _normalize_text(item.get("canonical_name"))
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            future_names = {name, *{_normalize_text(alias) for alias in aliases if _normalize_text(alias)}}
+            is_existing = bool(future_names & prefix_names)
             record = {
                 "name": name,
-                "prefix_evidence": [f"character_profile:{name}"] if name in prefix_names else [],
+                "prefix_evidence": [f"character_profile:{name}"] if is_existing else [],
                 "future_evidence": [f"future_character_profile:{name}"],
             }
-            if name in prefix_names:
+            if is_existing:
                 existing.append(record)
             else:
                 new.append(record)
@@ -1766,30 +1905,38 @@ class AgenticSmokeBenchmarkService:
         prefix_modeling_snapshot: dict[str, object],
         target_chars: int,
     ) -> dict[str, object]:
-        prefix_character_names = [
-            _normalize_text(item.get("canonical_name"))
-            for item in prefix_modeling_snapshot.get("character_docs", [])
+        prefix_character_docs = [
+            item for item in prefix_modeling_snapshot.get("character_docs", [])
             if isinstance(item, dict) and _normalize_text(item.get("canonical_name"))
+        ]
+        overview_names = self._select_overview_character_names(
+            user_story_overview=user_story_overview,
+            character_docs=prefix_character_docs,
+        )
+        prefix_character_names = overview_names or [
+            _normalize_text(item.get("canonical_name"))
+            for item in prefix_character_docs
+            if _normalize_text(item.get("canonical_name"))
         ]
         recent = [
             _normalize_text(item.get("summary_short")) or _safe_excerpt(item.get("summary_md"), 120)
             for item in prefix_modeling_snapshot.get("recent_story_synopses", [])
             if isinstance(item, dict)
         ]
+        concise_goal = "根据用户授权概述重建后续大纲：" + _safe_excerpt(user_story_overview, 700)
         return {
             "allow_character_cast": False,
             "user_story_overview": user_story_overview,
             "major_characters": prefix_character_names[:12],
             "desired_actions": [
-                "根据用户授权概述重建后续大纲，不读取后窗 reference-only 细节。",
-                user_story_overview,
+                concise_goal,
             ],
             "avoidances": [
                 "不得读取或引用隐藏参考大纲、隐藏参考人物全集或后窗原文。",
                 "不得把未确认的新人物写成已有 Character Memory 中的人物。",
                 "如信息不足，返回 needs_user_input / blocked，不伪造用户答案。",
             ],
-            "preferred_outcome": user_story_overview,
+            "preferred_outcome": "输出承接前缀事实、覆盖用户授权概述主要节点的后续章节大纲。",
             "story_scale": {
                 "target_chapter_count": 1,
                 "target_total_chars": int(target_chars),
@@ -1810,6 +1957,23 @@ class AgenticSmokeBenchmarkService:
             ),
         }
 
+    def _select_overview_character_names(
+        self,
+        *,
+        user_story_overview: str,
+        character_docs: list[dict[str, object]],
+    ) -> list[str]:
+        selected: list[str] = []
+        for item in character_docs:
+            canonical = _normalize_text(item.get("canonical_name"))
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [aliases]
+            candidates = [canonical, *[_normalize_text(alias) for alias in aliases]]
+            if canonical and any(candidate and candidate in user_story_overview for candidate in candidates):
+                selected.append(canonical)
+        return [item for item in dict.fromkeys(selected) if item]
+
     def _copy_outline_research_writer_artifacts(
         self,
         *,
@@ -1822,6 +1986,9 @@ class AgenticSmokeBenchmarkService:
             "extracted_character_mentions.json",
             "character_resolution.json",
             "outline_research_trace.json",
+            "memory_query_trace.json",
+            "memory_query_decision_log.json",
+            "model_reasoning_debug.json",
             "planning_notebook.json",
             "sufficiency_decision.json",
             "generated_outline.json",
@@ -1834,6 +2001,47 @@ class AgenticSmokeBenchmarkService:
             (artifact_dir / name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             copied[name] = payload
         return copied
+
+    def _summarize_memory_query_trace(
+        self,
+        *,
+        memory_query_trace: object,
+        memory_query_decision_log: object,
+    ) -> dict[str, object]:
+        trace_items = (
+            memory_query_trace.get("items")
+            if isinstance(memory_query_trace, dict)
+            else memory_query_trace
+        )
+        decision_items = (
+            memory_query_decision_log.get("items")
+            if isinstance(memory_query_decision_log, dict)
+            else memory_query_decision_log
+        )
+        trace_list = [item for item in (trace_items or []) if isinstance(item, dict)] if isinstance(trace_items, list) else []
+        decision_list = [item for item in (decision_items or []) if isinstance(item, dict)] if isinstance(decision_items, list) else []
+        selected_ids: list[str] = []
+        levels: list[str] = []
+        for item in decision_list:
+            level = _normalize_text(item.get("current_level"))
+            if level:
+                levels.append(level)
+            selected_ids.extend(str(value) for value in (item.get("selected_ids") or []))
+        final_doc_ids: list[int] = []
+        for item in trace_list:
+            for value in item.get("source_doc_ids") or item.get("resolved_doc_ids") or []:
+                if str(value).isdigit():
+                    final_doc_ids.append(int(value))
+        return {
+            "trace_item_count": len(trace_list),
+            "decision_count": len(decision_list),
+            "levels": list(dict.fromkeys(levels)),
+            "selected_ids": list(dict.fromkeys(selected_ids))[:30],
+            "source_doc_ids": list(dict.fromkeys(final_doc_ids))[:50],
+            "btree_descent_observed": any(
+                item.get("operation") == "drill_down" for item in trace_list
+            ),
+        }
 
     def _build_leakage_audit(
         self,
@@ -3354,11 +3562,19 @@ class AgenticSmokeBenchmarkService:
         generation_config: RunConfig,
         prompt_payload: dict[str, object],
     ) -> dict[str, object]:
-        result = generation_service.generate(
-            prompt=self._format_prompt_payload(prompt_payload),
-            config=generation_config,
-        )
-        return self._parse_json_response(result.generated_text)
+        prompt = self._format_prompt_payload(prompt_payload)
+        result = generation_service.generate(prompt=prompt, config=generation_config)
+        try:
+            return self._parse_json_response(result.generated_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            repair_prompt = (
+                "你刚才输出的内容不是合法 JSON。请只根据下面的原始输出修复 JSON 语法，"
+                "不要新增事实、不要改写判定含义、不要输出解释或 Markdown。\n\n"
+                f"解析错误：{exc}\n\n"
+                f"原始输出：\n{result.generated_text}"
+            )
+            repaired = generation_service.generate(prompt=repair_prompt, config=generation_config)
+            return self._parse_json_response(repaired.generated_text)
 
     def _format_prompt_payload(self, payload: dict[str, object]) -> str:
         return (
@@ -3432,6 +3648,11 @@ class AgenticSmokeBenchmarkService:
         chunk_target_chars: int = 900,
         reference_min_chars: int = 2_700,
     ) -> tuple[str, list[str], str, list[str]]:
+        minimum_prefix_chars, reference_min_chars = self._normalize_window_char_budgets(
+            source_text=source_text,
+            minimum_prefix_chars=minimum_prefix_chars,
+            reference_min_chars=reference_min_chars,
+        )
         chunks = self._split_agentic_chunks(source_text=source_text, target_chars=chunk_target_chars)
         if len(chunks) < 2:
             raise ValueError("source must contain enough text for one prefix window and one held-out reference window")
@@ -3469,6 +3690,23 @@ class AgenticSmokeBenchmarkService:
         recent_count = max(1, int(recent_window_size))
         recent_segments = prefix_chunks[-recent_count:]
         return "\n\n".join(prefix_chunks).strip(), recent_segments, reference_truth, prefix_chunks
+
+    def _normalize_window_char_budgets(
+        self,
+        *,
+        source_text: str,
+        minimum_prefix_chars: int,
+        reference_min_chars: int,
+    ) -> tuple[int, int]:
+        source_chars = len(source_text)
+        requested_chars = max(1, int(minimum_prefix_chars)) + max(1, int(reference_min_chars))
+        source_bytes = len(source_text.encode("utf-8"))
+        if requested_chars <= source_chars or requested_chars > source_bytes or source_chars <= 0:
+            return max(1, int(minimum_prefix_chars)), max(1, int(reference_min_chars))
+        bytes_per_char = max(1.0, source_bytes / source_chars)
+        normalized_prefix = max(1, int(int(minimum_prefix_chars) / bytes_per_char))
+        normalized_reference = max(1, int(int(reference_min_chars) / bytes_per_char))
+        return normalized_prefix, normalized_reference
 
     def _split_agentic_chunks(self, *, source_text: str, target_chars: int) -> list[str]:
         body = self._source_body_text(source_text)

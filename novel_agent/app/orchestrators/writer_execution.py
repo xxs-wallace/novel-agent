@@ -1408,6 +1408,7 @@ class RestrictedWriterExecutor:
             "abilities_json": "abilities",
             "recent_activity_json": "recent_activity",
             "relationships_json": "relationships",
+            "story_events_json": "story_events",
             "chapter_indexes_json": "chapter_indexes",
         }
         payload: dict[str, Any] = {}

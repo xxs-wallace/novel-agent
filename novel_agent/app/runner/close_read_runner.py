@@ -42,6 +42,7 @@ from ..services.character_mention_service import CharacterMentionService
 from ..services.character_profile_service import CharacterProfileService
 from ..services.debug_export_service import DebugExportService
 from ..services.memory_candidate_service import MemoryCandidateService
+from ..services.outline_event_summary_service import OutlineEventSummaryService
 from ..services.outline_service import OutlineService
 from ..services.world_state_service import WorldStateService
 from ..utils.text_utils import clamp_text, safe_excerpt, split_sentences
@@ -207,6 +208,10 @@ class CloseReadRunner:
         )
         world_service = WorldStateService(repo_root=self.repo_root, model_client=model_client)
         outline_service = OutlineService(repo_root=self.repo_root)
+        outline_event_summary_service = OutlineEventSummaryService(
+            repo_root=self.repo_root,
+            model_client=model_client,
+        )
         processed_batches = 0
         batch_metrics: list[dict[str, Any]] = []
         export_path: Path | None = None
@@ -361,6 +366,7 @@ class CloseReadRunner:
                         },
                     )
                     conn.commit()
+                    outline_event_summary_service.refresh(conn, book_id=self.config.book_id)
                     processed_batches += 1
                     completed_after = self._count_completed_documents(conn, book_id=self.config.book_id)
                     batch_metrics.append(
@@ -1834,6 +1840,12 @@ class CloseReadRunner:
             else existing_importance_reason
         )
         effective_source_total_chars = int(existing["source_total_chars"] or 0) + batch.total_chars if existing else batch.total_chars
+        outline_update = self._enrich_outline_update_with_sources(
+            batch=batch,
+            outline_update=payload.get("outline_update", {}),
+            summary_short=summary_short,
+            fallback_participants=mentioned_characters,
+        )
         chapter_id = chapters_repo.upsert(
             conn,
             {
@@ -1855,7 +1867,7 @@ class CloseReadRunner:
                 "related_chapters": merged_related_chapters,
                 "mentioned_characters": merged_mentioned_characters,
                 "world_update": payload.get("world_update", {}),
-                "outline_update": payload.get("outline_update", {}),
+                "outline_update": outline_update,
                 "outline_status": "provisional",
                 "outline_evidence_window": f"{batch.document_title_index}-{batch.document_title_index}",
                 "outline_target_range": f"{batch.document_title_index}-{batch.document_title_index}",
@@ -1885,9 +1897,9 @@ class CloseReadRunner:
             updates=raw_character_updates,
             mentioned_doc_ids_by_name=self._invert_mentions(document_mentions),
             speaking_doc_ids_by_name=self._invert_mentions(speaking_mentions),
+            story_events_by_name=self._story_events_by_character(outline_update),
         )
         world_service.apply_update(book_id=self.config.book_id, world_update=payload.get("world_update", {}))
-        outline_update = payload.get("outline_update", {})
         if isinstance(outline_update, dict):
             outline_service.apply_update(
                 book_id=self.config.book_id,
@@ -1896,6 +1908,105 @@ class CloseReadRunner:
                 importance_score=merged_importance_score,
             )
         return chapter_id
+
+    def _enrich_outline_update_with_sources(
+        self,
+        *,
+        batch: ChapterBatch,
+        outline_update: object,
+        summary_short: str,
+        fallback_participants: list[str] | None = None,
+    ) -> dict[str, Any]:
+        raw = dict(outline_update) if isinstance(outline_update, dict) else {}
+        doc_ids = [doc.doc_id for doc in batch.documents]
+        doc_range = self._doc_range_text(doc_ids)
+        title_indexes = sorted({doc.document_title_index for doc in batch.documents})
+        fallback_participants = self.character_mention_service.clean_names(fallback_participants or [])
+        raw_events = raw.get("timeline_events")
+        event_items = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
+        if not event_items and summary_short:
+            event_items = [
+                {
+                    "label": f"{batch.chapter_title}剧情进展",
+                    "participants": [],
+                    "summary": summary_short,
+                }
+            ]
+        enriched_events: list[dict[str, Any]] = []
+        for index, event in enumerate(event_items, start=1):
+            label = str(event.get("label") or "").strip()
+            summary = str(event.get("summary") or "").strip()
+            participants = self.character_mention_service.clean_names(
+                event.get("participants", []) if isinstance(event.get("participants"), list) else []
+            )
+            if not participants:
+                participants = list(fallback_participants)
+            event_id = str(event.get("event_id") or "").strip() or self._outline_event_id(
+                document_title_index=batch.document_title_index,
+                order=index,
+                label=label,
+                summary=summary,
+            )
+            enriched_events.append(
+                {
+                    **event,
+                    "event_id": event_id,
+                    "label": label or summary[:24] or f"{batch.chapter_title}事件{index}",
+                    "participants": participants,
+                    "summary": summary or label,
+                    "document_title_index": batch.document_title_index,
+                    "source_title_indexes": title_indexes,
+                    "source_doc_ids": doc_ids,
+                    "source_doc_start_id": doc_ids[0] if doc_ids else 0,
+                    "source_doc_end_id": doc_ids[-1] if doc_ids else 0,
+                    "source_doc_range": doc_range,
+                    "source_chapter_range": self._doc_range_text(title_indexes),
+                    "status": "provisional",
+                    "event_summary_level": "chapter_event",
+                }
+            )
+        raw["timeline_events"] = enriched_events
+        raw["event_summary"] = self._outline_event_summary(enriched_events, fallback=summary_short)
+        raw["source_doc_ids"] = doc_ids
+        raw["source_doc_range"] = doc_range
+        raw["source_title_indexes"] = title_indexes
+        return raw
+
+    def _story_events_by_character(self, outline_update: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in outline_update.get("timeline_events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            for name in self.character_mention_service.clean_names(event.get("participants", []) if isinstance(event.get("participants"), list) else []):
+                grouped.setdefault(name, []).append(
+                    {
+                        "event_id": event.get("event_id", ""),
+                        "label": event.get("label", ""),
+                        "summary": event.get("summary", ""),
+                        "source_chapter_indexes": [event.get("document_title_index")],
+                        "source_chapter_range": event.get("source_chapter_range", ""),
+                        "source_doc_ids": event.get("source_doc_ids", []),
+                        "source_doc_range": event.get("source_doc_range", ""),
+                        "participants": event.get("participants", []),
+                        "status": event.get("status", "provisional"),
+                    }
+                )
+        return grouped
+
+    def _outline_event_id(self, *, document_title_index: int, order: int, label: str, summary: str) -> str:
+        base = re.sub(r"[^\w\u4e00-\u9fff]+", "-", label or summary[:24]).strip("-").lower()
+        suffix = base[:32] or f"event-{order:02d}"
+        return f"chapter-{document_title_index}:event-{order:02d}-{suffix}"
+
+    def _outline_event_summary(self, events: list[dict[str, Any]], *, fallback: str) -> str:
+        summaries = [str(item.get("summary") or item.get("label") or "").strip() for item in events]
+        joined = "；".join(item for item in summaries if item)
+        return joined or fallback
+
+    def _doc_range_text(self, doc_ids: list[int]) -> str:
+        if not doc_ids:
+            return ""
+        return str(doc_ids[0]) if len(doc_ids) == 1 else f"{doc_ids[0]}-{doc_ids[-1]}"
 
     def _normalize_chapter_summary(self, *, summary_md: str, batch: ChapterBatch, source_total_chars: int) -> str:
         sections = self._parse_summary_sections(summary_md)

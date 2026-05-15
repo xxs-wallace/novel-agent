@@ -3,13 +3,19 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_agent.app.repos.assets_repo import AssetsRepo
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.db import NovelAgentDB
-from novel_agent.app.schemas.orchestration_schema import MemoryAssemblyBudget, MemoryAssemblyInput
+from novel_agent.app.runner.close_read_runner import CloseReadRunner
+from novel_agent.app.schemas.orchestration_schema import ContinuationIntent, ExtractedCharacterMentions, MemoryAssemblyBudget, MemoryAssemblyInput
+from novel_agent.app.services.character_mention_service import CharacterMentionService
+from novel_agent.app.services.character_profile_service import CharacterProfileService
 from novel_agent.app.services.context_assembly_service import ContextAssemblyService
+from novel_agent.app.services.outline_event_summary_service import OutlineEventSummaryService
+from novel_agent.app.services.outline_research_service import OutlineSeedPacketBuilder
 from novel_agent.app.services.outline_service import OutlineService
 from novel_agent.app.services.source_arc_mapping_service import SourceArcMappingService
 from novel_agent.app.services.summary_outline_commit_service import SummaryOutlineCommitService
@@ -98,6 +104,156 @@ def test_old_chapter_rows_gain_provisional_status_defaults(tmp_path: Path) -> No
     assert row is not None
     assert row["summary_status"] == "provisional"
     assert row["outline_status"] == "provisional"
+
+
+def test_close_read_outline_events_record_source_doc_range() -> None:
+    runner = object.__new__(CloseReadRunner)
+    runner.character_mention_service = CharacterMentionService()
+    batch = SimpleNamespace(
+        document_title_index=12,
+        chapter_title="第12章 交易",
+        documents=[
+            SimpleNamespace(doc_id=48, document_title_index=12),
+            SimpleNamespace(doc_id=49, document_title_index=12),
+        ],
+    )
+
+    outline_update = runner._enrich_outline_update_with_sources(
+        batch=batch,
+        outline_update={
+            "chapter_line": "[12] 第12章: 芬格尔兜售考题。",
+            "timeline_events": [
+                {
+                    "label": "芬格尔兜售考题",
+                    "participants": ["路明非", "芬格尔"],
+                    "summary": "芬格尔利用时间压力促成交易。",
+                }
+            ],
+        },
+        summary_short="芬格尔向路明非兜售考题。",
+    )
+    fallback_outline_update = runner._enrich_outline_update_with_sources(
+        batch=batch,
+        outline_update={"timeline_events": [{"label": "交易发生", "summary": "考题交易被推进。"}]},
+        summary_short="芬格尔向路明非兜售考题。",
+        fallback_participants=["路明非", "楚子航"],
+    )
+
+    event = outline_update["timeline_events"][0]
+    assert event["event_id"].startswith("chapter-12:event-01")
+    assert event["source_doc_ids"] == [48, 49]
+    assert event["source_doc_range"] == "48-49"
+    assert outline_update["event_summary"] == "芬格尔利用时间压力促成交易。"
+    assert fallback_outline_update["timeline_events"][0]["participants"] == ["路明非", "楚子航"]
+
+
+def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile-events.db")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        CharacterProfileService(profiles_repo=CharacterProfilesRepo()).merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=12,
+            doc_ids=[48, 49],
+            updates=[
+                {
+                    "canonical_name": "芬格尔",
+                    "aliases": [],
+                    "occupations": ["卡塞尔学院师兄"],
+                    "relationships": [],
+                }
+            ],
+            mentioned_doc_ids_by_name={"芬格尔": [48, 49]},
+            speaking_doc_ids_by_name={"芬格尔": [48]},
+            story_events_by_name={
+                "芬格尔": [
+                    {
+                        "event_id": "chapter-12:event-01-fingel-sells-exam",
+                        "label": "芬格尔兜售考题",
+                        "summary": "芬格尔利用信息差向路明非兜售3E考试答案。",
+                        "source_chapter_indexes": [12],
+                        "source_doc_ids": [48, 49],
+                        "source_doc_range": "48-49",
+                        "participants": ["路明非", "芬格尔"],
+                    }
+                ]
+            },
+        )
+        row = CharacterProfilesRepo().get(conn, book_id="book", canonical_name="芬格尔")
+
+    assert row is not None
+    story_events = json.loads(row["story_events_json"])
+    assert story_events[0]["event_id"] == "chapter-12:event-01-fingel-sells-exam"
+    assert story_events[0]["source_doc_ids"] == [48, 49]
+    assert "## 基本属性/关系/能力" in row["profile_summary_md"]
+    assert "## 剧情时间线" in row["profile_summary_md"]
+    assert "documents：48-49" in row["profile_summary_md"]
+
+
+def test_outline_service_renders_timeline_event_source_indexes(tmp_path: Path) -> None:
+    outline_path = OutlineService(repo_root=tmp_path).apply_update(
+        book_id="book",
+        chapter_line="[12] 第12章: 芬格尔兜售考题。",
+        timeline_events=[
+            {
+                "event_id": "chapter-12:event-01-fingel-sells-exam",
+                "label": "芬格尔兜售考题",
+                "participants": ["路明非", "芬格尔"],
+                "summary": "芬格尔利用信息差促成交易。",
+                "source_doc_ids": [48, 49],
+                "source_doc_range": "48-49",
+            }
+        ],
+    )
+
+    outline_md = outline_path.read_text(encoding="utf-8")
+    assert "事件：chapter-12:event-01-fingel-sells-exam" in outline_md
+    assert "documents：48-49" in outline_md
+
+
+def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "event-summary.db")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        _seed_assets(conn, tmp_path, "book")
+        for index in range(1, 10):
+            payload = _chapter_payload(book_id="book", index=index, summary=f"事件{index}推进")
+            payload["outline_update"] = {
+                "chapter_line": f"[{index}] 第{index}章: 事件{index}推进",
+                "timeline_events": [
+                    {
+                        "event_id": f"chapter-{index}:event-01",
+                        "label": f"事件{index}",
+                        "summary": f"事件{index}推动同一条调查线。",
+                        "document_title_index": index,
+                        "source_doc_ids": [index],
+                        "source_doc_range": str(index),
+                        "participants": ["沈青"],
+                    }
+                ],
+            }
+            ChaptersRepo().upsert(conn, payload)
+        conn.commit()
+
+        state = OutlineEventSummaryService(
+            repo_root=tmp_path,
+            min_uncompressed_events=4,
+            fallback_tail_events=2,
+        ).refresh(conn, book_id="book")
+        packet = OutlineSeedPacketBuilder(repo_root=tmp_path).build(
+            conn,
+            book_id="book",
+            intent=ContinuationIntent(desired_actions=["继续调查"]),
+            mentions=ExtractedCharacterMentions(),
+            resolutions=[],
+        )
+
+    assert state["segments"][0]["event_ids"] == [f"chapter-{index}:event-01" for index in range(1, 8)]
+    assert state["pending_event_ids"] == ["chapter-8:event-01", "chapter-9:event-01"]
+    assert state["segments"][0]["source_doc_range"] == "1-7"
+    assert any(item.get("summary_level") == "event_group" for item in packet.historical_story_overview)
+    assert packet.sources[-1].type == "event_summaries"
 
 
 def test_summary_outline_commit_window_marks_target_range_committed(tmp_path: Path) -> None:

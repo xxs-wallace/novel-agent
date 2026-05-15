@@ -317,6 +317,15 @@ class SmokePrefixSnapshotService:
                     "abilities": list(json.loads(row["abilities_json"] or "[]")),
                     "recent_activity": list(json.loads(row["recent_activity_json"] or "[]")),
                     "relationships": list(json.loads(row["relationships_json"] or "[]")),
+                    "story_events": [
+                        item for item in json.loads(row["story_events_json"] or "[]")
+                        if isinstance(item, dict)
+                        and all(
+                            int(index) <= max_document_title_index
+                            for index in item.get("source_chapter_indexes", [])
+                            if str(index).isdigit()
+                        )
+                    ],
                     "chapter_indexes": chapter_indexes,
                     "first_seen_doc_id": first_seen_doc_id,
                     "last_seen_doc_id": last_seen_doc_id,

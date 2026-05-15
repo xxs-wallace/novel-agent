@@ -286,18 +286,75 @@
 - 查询人物 alias、世界观概念索引、历史大纲、章节摘要、事件卡、源文档引用和 Creative KB。
 - 对候选结果去重、rerank、裁剪并标注来源。
 - 返回 evidence，不直接修改大纲或 Memory。
+- 对 `story_detail`，优先调用 Memory 层的 BTree descent / model-guided pruning 查询接口，避免 Writer 层直接扫描所有章节摘要或原始 document。
 
 不负责：
 
 - 自行生成剧情。
 - 替模型决定最终大纲。
 - 把 candidate 当作 confirmed fact。
+- 维护 Memory Page schema 或写入正式 Memory。
 
 ## 8. Story Detail Resolver
 
 `story_detail` 应通过独立 resolver 实现，而不是把 query 直接交给 SQLite。
 
-推荐两段式：
+推荐升级为 BTree descent + model-guided pruning。最低可用版本可以保留两段式 rerank，但长期接口应与 Memory 层 Page 查询对齐。
+
+目标链路：
+
+```text
+story_detail request
+  -> Memory root_scan(event_summary pages)
+  -> Writer model selects event_summary ids and query_suffix
+  -> Memory expands selected event_summary -> event candidates
+  -> Writer model selects event ids and query_suffix
+  -> Memory expands selected events -> chapter summary candidates
+  -> Writer model selects chapter ids and query_suffix
+  -> Memory expands selected chapters -> document candidates / excerpts
+  -> Writer model decides stop or selects documents
+  -> StoryDetailResult + memory_query_trace
+```
+
+每层模型选择 prompt 必须包含：
+
+```json
+{
+  "original_query": "string",
+  "query_suffix_chain": ["string"],
+  "path_context": [
+    {
+      "level": "event_summary | event | chapter | document",
+      "selected_id": "string",
+      "summary": "string",
+      "source_range": "string",
+      "selection_reason": "string",
+      "confidence": 0.0
+    }
+  ],
+  "current_level": "event_summary | event | chapter | document",
+  "current_candidates": [],
+  "selection_task": "判断是否需要继续展开当前层候选以回答 original_query。",
+  "output_schema": {
+    "need_drill_down": "boolean",
+    "selected_ids": ["string"],
+    "query_suffix": "string",
+    "reason": "string",
+    "confidence": "number",
+    "need_sibling_scan": "boolean"
+  }
+}
+```
+
+裁剪规则：
+
+- `original_query` 和累计 `query_suffix_chain` 始终保留。
+- 当前层 candidates 必须完整提供必要字段。
+- 上一层未被选中的 sibling candidates 默认裁剪掉。
+- `path_context` 只保留已选中的 Page breadcrumb、选择理由和置信度。
+- 若模型返回低置信、空选择或 `need_sibling_scan = true`，Context Broker 可回到上一层扩展相邻 sibling。
+
+旧两段式兼容路径：
 
 ```text
 story_detail request
@@ -549,6 +606,8 @@ Notebook 是生成大纲的工作台，不是正式 Memory。进入 Freeze A 的
 - `OutlineSeedPacket` 摘要
 - 每轮 requests
 - 每轮 broker results
+- 每次 Memory BTree descent 的 `memory_query_trace`
+- 每层 Memory candidates 的 input ids、selected ids、`query_suffix`、选择理由、置信度和 sibling scan 回退
 - 被合并或跳过的请求
 - budget 使用情况
 - sufficiency decision

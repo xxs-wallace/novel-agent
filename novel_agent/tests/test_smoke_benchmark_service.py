@@ -17,6 +17,7 @@ from novel_agent.app.services.smoke_sample_service import SmokeSampleService
 LONGZU_FIXTURE = Path(__file__).with_name("longzu_32kb.txt")
 LONGZU_96KB_FIXTURE = Path(__file__).with_name("longzu_96kb.txt")
 LONGZU_120KB_FIXTURE = Path(__file__).with_name("longzu_120kb.txt")
+LONGZU_240KB_FIXTURE = Path(__file__).with_name("longzu_240kb.txt")
 
 
 def test_longzu_32kb_fixture_is_stable() -> None:
@@ -105,6 +106,21 @@ def test_agentic_benchmark_windows_can_select_later_120kb_reference_truth() -> N
 
     assert len(prefix_text) >= 30_000
     assert len(reference_truth) >= 10_000
+
+
+def test_author_brief_240kb_window_accepts_utf8_byte_sized_fixture() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    source_text = LONGZU_240KB_FIXTURE.read_text(encoding="utf-8")
+    prefix_text, _recent_segments, reference_truth, _prefix_chunks = service._prepare_agentic_windows(
+        source_text=source_text,
+        minimum_prefix_chars=120_000,
+        minimum_prefix_chunks=1,
+        recent_window_size=3,
+        reference_min_chars=120_000,
+    )
+
+    assert len(prefix_text.encode("utf-8")) >= 115_000
+    assert len(reference_truth.encode("utf-8")) >= 115_000
 
 
 def test_sequence_reference_context_splits_close_read_summaries_in_order() -> None:
@@ -546,6 +562,51 @@ def test_outline_research_reviewer_fake_report_covers_required_checks() -> None:
     assert report["decision"] in {"pass", "borderline"}
     assert set(report["checks"]) == set(OutlineResearchReviewer.CHECK_NAMES)  # type: ignore[arg-type]
     assert "research_tool_usefulness_score" in report["scores"]  # type: ignore[operator]
+
+
+def test_author_brief_overview_sanitizes_close_read_metadata_and_future_only_names() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    overview = service._build_user_story_overview(
+        reference_context={
+            "reference_chapter_summaries": [
+                {
+                    "summary_md": (
+                        "## 摘要元信息\n- 章节索引：1\n## 剧情事件链\n"
+                        "- **起点**：路明非登上列车，与芬格尔同行。\n"
+                        "- **转折/结果**：冯·施耐德和曼施坦因讨论 EVA 与白王可能是雌性。\n"
+                    )
+                }
+            ],
+            "reference_character_docs": [{"canonical_name": "冯·施耐德"}],
+        },
+        prefix_story_context={
+            "character_docs": [
+                {"canonical_name": "李嘉图·M·路", "aliases": ["路明非"]},
+                {"canonical_name": "芬格尔·冯·弗林斯", "aliases": ["芬格尔"]},
+            ]
+        },
+    )
+
+    assert overview.startswith("用户授权概述：")
+    assert "摘要元信息" not in overview
+    assert "章节索引" not in overview
+    assert "冯·施耐德" not in overview
+    assert "曼施坦因" not in overview
+    assert "EVA" not in overview
+    assert "白王" not in overview
+    assert "路明非" in overview
+    assert "芬格尔" in overview
+
+
+def test_reference_character_set_matches_prefix_aliases() -> None:
+    service = AgenticSmokeBenchmarkService(repo_root=Path.cwd())
+    character_set = service._build_reference_character_set(
+        prefix_story_context={"character_docs": [{"canonical_name": "李嘉图·M·路", "aliases": ["路明非"]}]},
+        reference_context={"reference_character_docs": [{"canonical_name": "路明非"}, {"canonical_name": "新人物"}]},
+    )
+
+    assert [item["name"] for item in character_set["existing_characters"]] == ["路明非"]  # type: ignore[index]
+    assert [item["name"] for item in character_set["new_characters"]] == ["新人物"]  # type: ignore[index]
 
 
 def test_outline_research_leakage_audit_fails_reference_only_in_writer_payload() -> None:
