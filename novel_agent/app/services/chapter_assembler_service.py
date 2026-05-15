@@ -117,50 +117,11 @@ class ChapterAssemblerService:
 
     def _build_batch(self, conn, *, book_id: str, remaining: list[DocumentRow]) -> ChapterBatch:
         first = remaining[0]
-        selected: list[DocumentRow] = []
-        current_chars = 0
-        cursor = 0
-        while cursor < len(remaining):
-            chapter_first = remaining[cursor]
-            same_chapter: list[DocumentRow] = []
-            while (
-                cursor + len(same_chapter) < len(remaining)
-                and remaining[cursor + len(same_chapter)].document_title_index == chapter_first.document_title_index
-            ):
-                same_chapter.append(remaining[cursor + len(same_chapter)])
-            chapter_batch = self._build_single_chapter_batch(
-                conn,
-                book_id=book_id,
-                first=chapter_first,
-                same_chapter=same_chapter,
-            )
-            if chapter_batch.is_split_batch:
-                if selected:
-                    break
-                return chapter_batch
-            if selected and current_chars + chapter_batch.total_chars > self.document_chars_budget:
-                break
-            selected.extend(chapter_batch.documents)
-            current_chars += chapter_batch.total_chars
-            cursor += len(same_chapter)
-            if current_chars >= self.document_chars_budget:
-                break
-        if not selected:
-            return self._build_single_chapter_batch(
-                conn,
-                book_id=book_id,
-                first=first,
-                same_chapter=[doc for doc in remaining if doc.document_title_index == first.document_title_index],
-            )
-        return ChapterBatch(
-            document_title_index=selected[0].document_title_index,
-            chapter_title=selected[0].document_title,
-            documents=selected,
-            is_complete_chapter=True,
-            chapter_doc_count=len(selected),
-            chapter_total_chars=sum(doc.content_chars for doc in selected),
-            batch_doc_start_index=1,
-            split_reason=SPLIT_REASON_FULL_CHAPTER,
+        return self._build_single_chapter_batch(
+            conn,
+            book_id=book_id,
+            first=first,
+            same_chapter=[doc for doc in remaining if doc.document_title_index == first.document_title_index],
         )
 
     def _build_single_chapter_batch(

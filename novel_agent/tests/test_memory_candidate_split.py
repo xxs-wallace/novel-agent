@@ -12,6 +12,7 @@ from novel_agent.app.schemas.config_schema import CloseReadAgentConfig, CloseRea
 from novel_agent.app.services.chapter_assembler_service import ChapterAssemblerService, ChapterBatch
 from novel_agent.app.services.memory_candidate_service import MemoryCandidateService
 
+
 def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
     service = MemoryCandidateService()
     reduce_inputs = service.build_character_reduce_inputs(
@@ -71,6 +72,302 @@ def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
     evidence = reduce_inputs[0]["ordered_character_evidence"]
     assert [item["source_doc_ids"] for item in evidence] == [[1], [2]]
     assert reduce_inputs[0]["existing_profile"]["profile_summary_md"] == "旧档案"
+
+
+def test_memory_candidates_keep_model_supported_short_names_and_roles() -> None:
+    service = MemoryCandidateService()
+    evidence_payload = {
+        "characters": [
+            {
+                "canonical_name": "静",
+                "aliases": [],
+                "is_speaking_character": True,
+                "speaking_evidence": "静说今晚继续调查。",
+                "personhood_evidence": "静被明确当作行动者。",
+                "activity_or_state_evidence": "静继续调查旧案。",
+                "relationship_evidence": "静与丈夫存在冲突。",
+                "candidate_type": "character",
+                "confidence": 0.9,
+            },
+            {
+                "canonical_name": "小锋",
+                "aliases": [],
+                "is_speaking_character": False,
+                "personhood_evidence": "小锋在门口等待。",
+                "activity_or_state_evidence": "小锋负责看守门口。",
+                "relationship_evidence": "",
+                "candidate_type": "character",
+                "confidence": 0.72,
+            },
+            {
+                "canonical_name": "丈夫",
+                "aliases": [],
+                "is_speaking_character": False,
+                "personhood_evidence": "丈夫是家庭关系中的行动者。",
+                "activity_or_state_evidence": "丈夫拿走录音带。",
+                "relationship_evidence": "丈夫与静存在隐瞒。",
+                "candidate_type": "character",
+                "confidence": 0.81,
+            },
+            {
+                "canonical_name": "身体",
+                "aliases": [],
+                "personhood_evidence": "身体只是物理状态。",
+                "activity_or_state_evidence": "",
+                "relationship_evidence": "",
+                "candidate_type": "object",
+                "confidence": 0.9,
+            },
+        ]
+    }
+
+    updates = service.build_character_updates(summary_short="静重新调查旧案。", evidence_payload=evidence_payload)
+    reduce_inputs = service.build_character_reduce_inputs(
+        prompt_input={"book_id": "book", "character_profiles": []},
+        summary_payload={"chapter_summary_short": "静重新调查旧案。"},
+        evidence_payload=evidence_payload,
+    )
+
+    assert {item["canonical_name"] for item in updates} == {"静", "小锋", "丈夫"}
+    assert {item["canonical_name"] for item in reduce_inputs} == {"静", "小锋", "丈夫"}
+
+
+def test_document_mentions_keep_model_supported_short_names(tmp_path: Path) -> None:
+    runner = CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+    content = "静说今晚继续调查，小锋说他会守在门口。丈夫先生把录音带藏了起来。"
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[
+            DocumentRow(
+                doc_id=1,
+                book_id="book",
+                path="source.txt",
+                scope="chapter",
+                title="第一章",
+                document_title="第一章",
+                document_title_index=1,
+                inferred_chapter_no=1,
+                content=content,
+                content_chars=len(content),
+                character_keywords=[],
+                content_tags=[],
+                source_path="source.txt",
+                source_file_name="source.txt",
+                source_start_offset=0,
+                source_end_offset=len(content),
+            )
+        ],
+        chapter_doc_count=1,
+        chapter_total_chars=len(content),
+    )
+
+    mentions = runner._document_mentions_from_character_evidence(  # noqa: SLF001
+        batch=batch,
+        evidence_payload={
+            "characters": [
+                {
+                    "canonical_name": "静",
+                    "is_speaking_character": True,
+                    "speaking_evidence": "静说今晚继续调查。",
+                    "personhood_evidence": "静说今晚继续调查。",
+                    "activity_or_state_evidence": "静继续调查旧案。",
+                    "candidate_type": "character",
+                    "confidence": 0.9,
+                },
+                {
+                    "canonical_name": "小锋",
+                    "is_speaking_character": True,
+                    "speaking_evidence": "小锋说他会守在门口。",
+                    "personhood_evidence": "小锋说他会守在门口。",
+                    "activity_or_state_evidence": "小锋守在门口。",
+                    "candidate_type": "character",
+                    "confidence": 0.78,
+                },
+                {
+                    "canonical_name": "丈夫",
+                    "is_speaking_character": False,
+                    "personhood_evidence": "丈夫先生把录音带藏了起来。",
+                    "activity_or_state_evidence": "丈夫先生把录音带藏了起来。",
+                    "relationship_evidence": "丈夫与静有隐瞒。",
+                    "candidate_type": "character",
+                    "confidence": 0.8,
+                },
+            ]
+        },
+    )
+    normalized_mentions = runner._normalize_document_character_mentions(  # noqa: SLF001
+        batch=batch,
+        payload={"document_character_mentions": mentions},
+    )
+
+    assert normalized_mentions[1] == ["静", "小锋", "丈夫"]
+
+
+def test_document_mentions_use_source_doc_ids_and_alias_evidence(tmp_path: Path) -> None:
+    runner = CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+    documents = [
+        DocumentRow(
+            doc_id=1,
+            book_id="book",
+            path="source.txt",
+            scope="chapter",
+            title="第一章",
+            document_title="第一章",
+            document_title_index=1,
+            inferred_chapter_no=1,
+            content="门外传来脚步声，房间里暂时无人说话。",
+            content_chars=len("门外传来脚步声，房间里暂时无人说话。"),
+            character_keywords=[],
+            content_tags=[],
+            source_path="source.txt",
+            source_file_name="source.txt",
+            source_start_offset=0,
+            source_end_offset=20,
+        ),
+        DocumentRow(
+            doc_id=2,
+            book_id="book",
+            path="source.txt",
+            scope="chapter",
+            title="第一章",
+            document_title="第一章",
+            document_title_index=1,
+            inferred_chapter_no=1,
+            content="Danny说今晚继续调查，老板点头回应。",
+            content_chars=len("Danny说今晚继续调查，老板点头回应。"),
+            character_keywords=[],
+            content_tags=[],
+            source_path="source.txt",
+            source_file_name="source.txt",
+            source_start_offset=20,
+            source_end_offset=50,
+        ),
+    ]
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=documents,
+        chapter_doc_count=2,
+        chapter_total_chars=sum(doc.content_chars for doc in documents),
+    )
+
+    mentions = runner._document_mentions_from_character_evidence(  # noqa: SLF001
+        batch=batch,
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [2],
+                    "document_title_indexes": [1],
+                    "characters": [
+                        {
+                            "canonical_name": "丹尼",
+                            "aliases": ["Danny"],
+                            "is_speaking_character": True,
+                            "speaking_evidence": "Danny说今晚继续调查",
+                            "personhood_evidence": "Danny说今晚继续调查",
+                            "activity_or_state_evidence": "Danny继续调查",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                            "source_doc_ids": [2],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    normalized_mentions = runner._normalize_document_character_mentions(  # noqa: SLF001
+        batch=batch,
+        payload={"document_character_mentions": mentions},
+    )
+    normalized_speakers = runner._normalize_document_speaking_mentions(  # noqa: SLF001
+        batch=batch,
+        payload={"document_character_mentions": mentions},
+    )
+
+    assert normalized_mentions[1] == []
+    assert normalized_mentions[2] == ["丹尼"]
+    assert normalized_speakers[2] == ["丹尼"]
+
+
+def test_document_mentions_trust_source_doc_ids_for_summarized_evidence(tmp_path: Path) -> None:
+    runner = CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+    content = "门外传来脚步声，房间里暂时无人说话。"
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[
+            DocumentRow(
+                doc_id=1,
+                book_id="book",
+                path="source.txt",
+                scope="chapter",
+                title="第一章",
+                document_title="第一章",
+                document_title_index=1,
+                inferred_chapter_no=1,
+                content=content,
+                content_chars=len(content),
+                character_keywords=[],
+                content_tags=[],
+                source_path="source.txt",
+                source_file_name="source.txt",
+                source_start_offset=0,
+                source_end_offset=len(content),
+            )
+        ],
+        chapter_doc_count=1,
+        chapter_total_chars=len(content),
+    )
+
+    mentions = runner._document_mentions_from_character_evidence(  # noqa: SLF001
+        batch=batch,
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [1],
+                    "document_title_indexes": [1],
+                    "characters": [
+                        {
+                            "canonical_name": "林澈",
+                            "is_speaking_character": False,
+                            "personhood_evidence": "林澈在这一段被作为行动者追踪。",
+                            "activity_or_state_evidence": "林澈注意到门外脚步声。",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    normalized_mentions = runner._normalize_document_character_mentions(  # noqa: SLF001
+        batch=batch,
+        payload={"document_character_mentions": mentions},
+    )
+
+    assert normalized_mentions[1] == ["林澈"]
 
 
 def test_global_memory_input_excludes_documents_and_fallback_uses_world_candidates() -> None:
@@ -186,6 +483,81 @@ def test_close_read_normalizes_model_low_signal_front_matter_summary(tmp_path: P
     assert "低信号前置文本" in summary
 
 
+def test_close_read_ignores_stray_chapter_summaries_for_single_chapter_batch(tmp_path: Path) -> None:
+    runner = CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+    content = "林澈推开旧仓库的门，发现失踪的录音带藏在铁柜背后。"
+    batch = ChapterBatch(
+        document_title_index=8,
+        chapter_title="第八章",
+        documents=[
+            DocumentRow(
+                doc_id=56,
+                book_id="book",
+                path="source.txt",
+                scope="chapter",
+                title="第八章",
+                document_title="第八章",
+                document_title_index=8,
+                inferred_chapter_no=8,
+                content=content,
+                content_chars=len(content),
+                character_keywords=[],
+                content_tags=[],
+                source_path="source.txt",
+                source_file_name="source.txt",
+                source_start_offset=0,
+                source_end_offset=len(content),
+            )
+        ],
+        chapter_doc_count=1,
+        chapter_total_chars=len(content),
+    )
+    summary_md = "\n".join(
+        [
+            "## 剧情事件链",
+            "林澈进入旧仓库寻找线索，发现铁柜背后藏着失踪录音带，调查线因此获得新证据。",
+            "## 人物状态/关系变化",
+            "林澈从被动追查转为掌握关键证据。",
+            "## 关键信息/设定",
+            "录音带被藏在旧仓库铁柜背后。",
+            "## 结构功能/节奏",
+            "本章完成线索发现，并为后续对峙铺垫。",
+        ]
+    )
+
+    payload = runner._compose_close_read_payload(  # noqa: SLF001
+        batch=batch,
+        summary_payload={
+            "summary_quality": "plot_synopsis",
+            "chapter_summary_md": summary_md,
+            "chapter_summary_short": "林澈在旧仓库发现失踪录音带。",
+            "importance_score": 70,
+            "importance_reason": "关键证据出现。",
+            "related_chapters": [],
+            "chapter_summaries": [
+                {
+                    "document_title_index": 999,
+                    "chapter_title": "模型误填章节",
+                    "chapter_summary_md": "这一项不属于当前 batch。",
+                }
+            ],
+        },
+        evidence_payload={},
+        character_reduce_payload={},
+        global_memory_payload={},
+    )
+
+    assert "chapter_summaries" not in payload
+    assert payload["chapter_summary_md"] == summary_md
+
+
 def test_chapter_assembler_can_prefetch_multiple_close_read_batches(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "novel.db")
     documents_repo = DocumentsRepo()
@@ -213,6 +585,37 @@ def test_chapter_assembler_can_prefetch_multiple_close_read_batches(tmp_path: Pa
     assert len(batches) == 2
     assert [batch.documents[0].document_title_index for batch in batches] == [1, 2]
     assert [batch.documents[0].doc_id for batch in batches] == [1, 2]
+
+
+def test_chapter_assembler_does_not_merge_adjacent_chapters_into_one_batch(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "novel.db")
+    documents_repo = DocumentsRepo()
+    progress_repo = ReadingProgressRepo()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        for index in range(1, 4):
+            _insert_document(
+                conn,
+                book_id="book",
+                title_index=index,
+                content=f"第{index}章内容，沈青继续调查。",
+                offset=index * 100,
+            )
+        conn.commit()
+
+        assembler = ChapterAssemblerService(
+            documents_repo=documents_repo,
+            progress_repo=progress_repo,
+            document_chars_budget=100_000,
+            progress_stage=DEFAULT_CLOSE_READING_STAGE,
+        )
+        batch = assembler.load_next_batch(conn, book_id="book")
+        batches = assembler.load_next_batches(conn, book_id="book", limit=3)
+
+    assert batch is not None
+    assert batch.title_indexes == [1]
+    assert batch.is_multi_chapter is False
+    assert [item.title_indexes for item in batches] == [[1], [2], [3]]
 
 
 def test_close_read_character_evidence_runs_once_per_document_in_batch(tmp_path: Path) -> None:
@@ -248,6 +651,51 @@ def test_close_read_character_evidence_runs_once_per_document_in_batch(tmp_path:
         progress_callback=events.append,
     )
 
+    def fake_summary_payload(*, model_client, batch, prompt_input):  # noqa: ANN001, ARG001
+        runner._emit_progress(  # noqa: SLF001
+            {
+                "stage": "close_reading",
+                "agent": "chapter_summary",
+                "event": "prompt_start",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+            }
+        )
+        runner._emit_progress(  # noqa: SLF001
+            {
+                "stage": "close_reading",
+                "agent": "chapter_summary",
+                "event": "prompt_end",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "duration_seconds": 0.0,
+            }
+        )
+        return {
+            "summary_quality": "plot_synopsis",
+            "chapter_summary_md": "\n".join(
+                [
+                    "## 剧情事件链",
+                    "沈青、顾迟和林晚继续调查旧案，三人各自确认下一步行动。",
+                    "## 人物状态/关系变化",
+                    "三人的协作关系继续推进。",
+                    "## 关键信息/设定",
+                    "旧案仍是本章调查核心。",
+                    "## 结构功能/节奏",
+                    "本章承担继续推进调查线的功能。",
+                ]
+            ),
+            "chapter_summary_short": "三人继续调查旧案。",
+            "importance_score": 50,
+            "importance_reason": "人物行动清晰。",
+            "related_chapters": [],
+            "world_signal_score": 0,
+            "world_evidence_candidates": [],
+        }
+
+    runner._generate_chapter_summary_payload = fake_summary_payload  # type: ignore[method-assign]  # noqa: SLF001
     result = runner.run()
 
     evidence_starts = [

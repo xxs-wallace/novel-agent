@@ -37,6 +37,7 @@ class CharacterEvidenceValidator:
         doc_text: str,
         names: Sequence[str],
         evidence_map: Mapping[str, object] | None,
+        aliases_by_name: Mapping[str, Sequence[str]] | None = None,
     ) -> list[str]:
         doc_text = self._norm(doc_text)
         if not doc_text.strip():
@@ -49,13 +50,30 @@ class CharacterEvidenceValidator:
                 continue
             if not self._passes_known_prefix_guard(name=name, doc_text=doc_text):
                 continue
+            aliases = self._aliases_for_name(name=name, aliases_by_name=aliases_by_name)
             evidence_list = self._get_evidence_list(evidence_map=evidence_map, name=name)
-            if not self._has_valid_evidence(name=name, evidence_list=evidence_list, doc_text=doc_text):
+            if not self._has_valid_evidence(name=name, aliases=aliases, evidence_list=evidence_list, doc_text=doc_text):
                 continue
             if self._is_high_risk_name(name=name) and not self._passes_high_risk_bar(name=name, doc_text=doc_text):
                 continue
             cleaned.append(name)
         return self._dedupe_preserve_order(cleaned)
+
+    def _aliases_for_name(
+        self,
+        *,
+        name: str,
+        aliases_by_name: Mapping[str, Sequence[str]] | None,
+    ) -> list[str]:
+        if not aliases_by_name:
+            return []
+        raw_aliases = aliases_by_name.get(name, [])
+        aliases: list[str] = []
+        for raw_alias in raw_aliases:
+            alias = self._norm(str(raw_alias)).strip()
+            if alias and alias != name and alias not in aliases:
+                aliases.append(alias)
+        return aliases
 
     def _get_evidence_list(self, *, evidence_map: Mapping[str, object] | None, name: str) -> list[str]:
         if not evidence_map:
@@ -67,22 +85,24 @@ class CharacterEvidenceValidator:
             return [self._norm(raw.strip())]
         return []
 
-    def _has_valid_evidence(self, *, name: str, evidence_list: Sequence[str], doc_text: str) -> bool:
+    def _has_valid_evidence(self, *, name: str, aliases: Sequence[str], evidence_list: Sequence[str], doc_text: str) -> bool:
         if not evidence_list:
             return False
+        accepted_terms = [name, *aliases]
         for snippet in evidence_list:
             s = self._norm(str(snippet)).strip()
             if not s:
                 continue
-            if name not in s:
+            matching_terms = [term for term in accepted_terms if term and term in s]
+            if not matching_terms:
                 continue
             if s not in doc_text:
                 continue
             # For known characters, substring evidence is sufficient.
-            if name in KNOWN_CHARACTER_NAMES:
+            if any(term in KNOWN_CHARACTER_NAMES for term in matching_terms):
                 return True
             # For unknown tokens, require a personness cue in the evidence snippet.
-            if not self._snippet_has_name_cue(name=name, snippet=s):
+            if not any(self._snippet_has_name_cue(name=term, snippet=s) for term in matching_terms):
                 continue
             return True
         return False

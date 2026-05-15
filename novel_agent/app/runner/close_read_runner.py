@@ -728,6 +728,13 @@ class CloseReadRunner:
             if smaller_batch is not None:
                 raise _RetryCloseReadBatch(smaller_batch) from None
             raise
+        except InvalidChapterSynopsisError as exc:
+            if not self._should_retry_invalid_synopsis(batch=batch, error=exc):
+                raise
+            smaller_batch = self._split_batch_for_retry(batch)
+            if smaller_batch is not None:
+                raise _RetryCloseReadBatch(smaller_batch) from None
+            raise
 
     def _as_single_document_batch(
         self,
@@ -751,6 +758,10 @@ class CloseReadRunner:
             batch_doc_start_index=batch.batch_doc_start_index,
             split_reason=batch.split_reason,
         )
+
+    @staticmethod
+    def _should_retry_invalid_synopsis(*, batch: ChapterBatch, error: InvalidChapterSynopsisError) -> bool:
+        return batch.is_multi_chapter and "multi-chapter batch missing chapter_summaries" in str(error)
 
     def _combine_character_evidence_payloads(
         self,
@@ -1001,7 +1012,7 @@ class CloseReadRunner:
             value = summary_payload.get(key)
             if isinstance(value, list):
                 payload[key] = value
-        if "chapter_summaries" in summary_payload:
+        if batch.is_multi_chapter and "chapter_summaries" in summary_payload:
             payload["chapter_summaries"] = self._normalize_model_chapter_summaries(
                 batch=batch,
                 raw_summaries=summary_payload.get("chapter_summaries"),
@@ -1320,58 +1331,173 @@ class CloseReadRunner:
                 evidence_payload=evidence_payload,
             )
         }
-        names = self.character_mention_service.clean_names(
-            str(item.get("canonical_name", "")).strip() for item in characters
-            if str(item.get("canonical_name", "")).strip() in kept_names
-        )
-        speaking_names = {
-            str(item.get("canonical_name", "")).strip()
-            for item in characters
-            if bool(item.get("is_speaking_character"))
-        }
-        document_mentions: list[dict[str, Any]] = []
-        for doc in batch.documents:
-            doc_text = str(doc.content or "")
-            doc_names = [name for name in names if name in doc_text]
-            speaking_doc_names = [
-                name
-                for name in doc_names
-                if name in speaking_names and self._name_has_speaking_cue(name=name, text=doc_text)
+        names: list[str] = []
+        name_aliases: dict[str, list[str]] = {}
+        doc_mentions_by_id: dict[int, dict[str, Any]] = {}
+        docs_by_id = {int(doc.doc_id): doc for doc in batch.documents}
+
+        for doc_id in docs_by_id:
+            doc_mentions_by_id[doc_id] = {
+                "doc_id": doc_id,
+                "character_keywords": [],
+                "speaking_character_keywords": [],
+                "character_evidence": {},
+                "speaking_evidence": {},
+                "character_aliases": {},
+                "source_doc_verified_names": [],
+                "source_doc_verified_speakers": [],
+            }
+
+        for item in characters:
+            name = self.memory_candidate_service.clean_evidence_name(item.get("canonical_name"), character=item)
+            if name and name in kept_names and name not in names:
+                names.append(name)
+            if not name or name not in kept_names:
+                continue
+
+            aliases = self._character_aliases_for_evidence(name=name, character=item)
+            name_aliases[name] = aliases
+            source_doc_ids = [
+                doc_id
+                for doc_id in self._safe_int_list(item.get("source_doc_ids"))
+                if doc_id in docs_by_id
             ]
-            character_evidence = {
-                name: [self._excerpt_around_name(name=name, text=doc_text)]
-                for name in doc_names
-                if self._excerpt_around_name(name=name, text=doc_text)
-            }
-            speaking_evidence = {
-                name: [self._excerpt_around_name(name=name, text=doc_text)]
-                for name in speaking_doc_names
-                if self._excerpt_around_name(name=name, text=doc_text)
-            }
-            document_mentions.append(
-                {
-                    "doc_id": doc.doc_id,
-                    "character_keywords": doc_names,
-                    "speaking_character_keywords": speaking_doc_names,
-                    "character_evidence": character_evidence,
-                    "speaking_evidence": speaking_evidence,
-                }
-            )
-        return document_mentions
+            if not source_doc_ids:
+                source_doc_ids = [
+                    doc_id
+                    for doc_id, doc in docs_by_id.items()
+                    if self._first_term_in_text(name=name, aliases=aliases, text=str(doc.content or ""))
+                ]
+            for doc_id in source_doc_ids:
+                doc = docs_by_id[doc_id]
+                doc_text = str(doc.content or "")
+                mention = doc_mentions_by_id[doc_id]
+                self._append_unique(mention["character_keywords"], name)
+                self._append_unique(mention["source_doc_verified_names"], name)
+                if aliases:
+                    mention["character_aliases"][name] = aliases
+                evidence_snippet = self._evidence_snippet_for_character(name=name, aliases=aliases, character=item, doc_text=doc_text)
+                if evidence_snippet:
+                    mention["character_evidence"].setdefault(name, [])
+                    self._append_unique(mention["character_evidence"][name], evidence_snippet)
+                if bool(item.get("is_speaking_character")):
+                    self._append_unique(mention["speaking_character_keywords"], name)
+                    self._append_unique(mention["source_doc_verified_speakers"], name)
+                    speaking_snippet = self._evidence_snippet_for_character(
+                        name=name,
+                        aliases=aliases,
+                        character=item,
+                        doc_text=doc_text,
+                        preferred_fields=("speaking_evidence",),
+                    )
+                    if speaking_snippet:
+                        mention["speaking_evidence"].setdefault(name, [])
+                        self._append_unique(mention["speaking_evidence"][name], speaking_snippet)
+
+        # Preserve the old exact-text fallback for model payloads without source_doc_ids.
+        for doc_id, doc in docs_by_id.items():
+            doc_text = str(doc.content or "")
+            mention = doc_mentions_by_id[doc_id]
+            for name in names:
+                aliases = name_aliases.get(name, [])
+                if name not in mention["character_keywords"] and self._first_term_in_text(name=name, aliases=aliases, text=doc_text):
+                    self._append_unique(mention["character_keywords"], name)
+                    if aliases:
+                        mention["character_aliases"][name] = aliases
+                    evidence_snippet = self._evidence_snippet_for_character(name=name, aliases=aliases, character={}, doc_text=doc_text)
+                    if evidence_snippet:
+                        mention["character_evidence"].setdefault(name, [])
+                        self._append_unique(mention["character_evidence"][name], evidence_snippet)
+                if (
+                    name in mention["character_keywords"]
+                    and name not in mention["speaking_character_keywords"]
+                    and self._name_has_speaking_cue_for_any_term(name=name, aliases=aliases, text=doc_text)
+                ):
+                    self._append_unique(mention["speaking_character_keywords"], name)
+                    speaking_snippet = self._evidence_snippet_for_character(name=name, aliases=aliases, character={}, doc_text=doc_text)
+                    if speaking_snippet:
+                        mention["speaking_evidence"].setdefault(name, [])
+                        self._append_unique(mention["speaking_evidence"][name], speaking_snippet)
+
+        return [doc_mentions_by_id[int(doc.doc_id)] for doc in batch.documents]
+
+    def _append_unique(self, values: list[Any], value: Any) -> None:
+        if value not in values:
+            values.append(value)
+
+    def _character_aliases_for_evidence(self, *, name: str, character: dict[str, Any]) -> list[str]:
+        raw_aliases = character.get("aliases", [])
+        alias_items = raw_aliases if isinstance(raw_aliases, list) else []
+        aliases: list[str] = []
+        for raw_alias in alias_items:
+            alias = str(raw_alias or "").strip()
+            if not alias or alias == name or alias in aliases:
+                continue
+            if len(alias) > 12 or not re.fullmatch(r"[\u4e00-\u9fffA-Za-z·]{1,12}", alias):
+                continue
+            aliases.append(alias)
+        return [alias for alias in aliases if alias != name]
+
+    def _first_term_in_text(self, *, name: str, aliases: list[str], text: str) -> str:
+        for term in [name, *aliases]:
+            if term and term in text:
+                return term
+        return ""
+
+    def _name_has_speaking_cue_for_any_term(self, *, name: str, aliases: list[str], text: str) -> bool:
+        return any(self._name_has_speaking_cue(name=term, text=text) for term in [name, *aliases] if term)
+
+    def _evidence_snippet_for_character(
+        self,
+        *,
+        name: str,
+        aliases: list[str],
+        character: dict[str, Any],
+        doc_text: str,
+        preferred_fields: tuple[str, ...] = (
+            "personhood_evidence",
+            "activity_or_state_evidence",
+            "speaking_evidence",
+            "relationship_evidence",
+        ),
+    ) -> str:
+        matching_term = self._first_term_in_text(name=name, aliases=aliases, text=doc_text)
+        if matching_term:
+            return self._excerpt_around_name(name=matching_term, text=doc_text)
+        for field in preferred_fields:
+            evidence = str(character.get(field, "")).strip()
+            if evidence and evidence in doc_text:
+                return evidence
+        return ""
 
     def _flatten_character_evidence_items(self, evidence_payload: dict[str, Any]) -> list[dict[str, Any]]:
         characters = evidence_payload.get("characters")
         if isinstance(characters, list):
-            return [item for item in characters if isinstance(item, dict)]
+            batch_doc_ids = self._safe_int_list(evidence_payload.get("doc_ids"))
+            batch_title_indexes = self._safe_int_list(evidence_payload.get("document_title_indexes"))
+            flattened: list[dict[str, Any]] = []
+            for item in characters:
+                if not isinstance(item, dict):
+                    continue
+                character = dict(item)
+                character.setdefault("source_doc_ids", batch_doc_ids)
+                character.setdefault("source_title_indexes", batch_title_indexes)
+                flattened.append(character)
+            return flattened
         batches = evidence_payload.get("character_evidence_batches")
         flattened: list[dict[str, Any]] = []
         if isinstance(batches, list):
-            for batch in batches:
-                if not isinstance(batch, dict):
+            for evidence_batch in batches:
+                if not isinstance(evidence_batch, dict):
                     continue
-                for item in batch.get("characters", []):
+                batch_doc_ids = self._safe_int_list(evidence_batch.get("doc_ids"))
+                batch_title_indexes = self._safe_int_list(evidence_batch.get("document_title_indexes"))
+                for item in evidence_batch.get("characters", []):
                     if isinstance(item, dict):
-                        flattened.append(item)
+                        character = dict(item)
+                        character.setdefault("source_doc_ids", batch_doc_ids)
+                        character.setdefault("source_title_indexes", batch_title_indexes)
+                        flattened.append(character)
         return flattened
 
     def _excerpt_around_name(self, *, name: str, text: str) -> str:
@@ -1485,6 +1611,17 @@ class CloseReadRunner:
             return int(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None
+
+    def _safe_int_list(self, values: object) -> list[int]:
+        if not isinstance(values, list):
+            return []
+        result: list[int] = []
+        for value in values:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
 
     def _disallowed_summary_fallback(self, batch: ChapterBatch) -> dict[str, Any]:
         return {
@@ -2248,16 +2385,79 @@ class CloseReadRunner:
                 continue
             raw_keywords = item.get("character_keywords", [])
             keyword_items = raw_keywords if isinstance(raw_keywords, list) else []
-            cleaned_keywords = self.character_mention_service.clean_names(keyword_items)
             evidence_map = item.get("character_evidence")
             evidence_mapping = evidence_map if isinstance(evidence_map, dict) else {}
+            aliases_map = item.get("character_aliases")
+            aliases_mapping = aliases_map if isinstance(aliases_map, dict) else {}
+            cleaned_keywords = self._clean_model_mention_names(
+                keyword_items,
+                evidence_mapping=evidence_mapping,
+                aliases_mapping=aliases_mapping,
+            )
             filtered = self.character_evidence_validator.filter_names(
                 doc_text=doc_text_by_id.get(doc_id, ""),
                 names=cleaned_keywords,
                 evidence_map=evidence_mapping,
+                aliases_by_name=aliases_mapping,
             )
-            mentions_by_doc_id[doc_id] = filtered
+            trusted = self._clean_trusted_source_names(item.get("source_doc_verified_names", []))
+            mentions_by_doc_id[doc_id] = self._dedupe_preserve_order([*filtered, *trusted])
         return mentions_by_doc_id
+
+    def _clean_model_mention_names(
+        self,
+        names: list[object],
+        *,
+        evidence_mapping: dict[str, object],
+        aliases_mapping: dict[str, object] | None = None,
+    ) -> list[str]:
+        cleaned: list[str] = []
+        for raw_name in names:
+            raw_text = str(raw_name or "").strip()
+            evidence = evidence_mapping.get(raw_text)
+            evidence_text = " ".join(str(item) for item in evidence) if isinstance(evidence, list) else str(evidence or "")
+            raw_aliases = (aliases_mapping or {}).get(raw_text, [])
+            aliases = raw_aliases if isinstance(raw_aliases, list) else []
+            name = self.memory_candidate_service.clean_evidence_name(
+                raw_text,
+                character={
+                    "canonical_name": raw_text,
+                    "aliases": aliases,
+                    "confidence": 0.75,
+                    "personhood_evidence": evidence_text or raw_text,
+                    "activity_or_state_evidence": evidence_text,
+                },
+            )
+            if name and name not in cleaned:
+                cleaned.append(name)
+        return cleaned
+
+    def _clean_trusted_source_names(self, names: object) -> list[str]:
+        name_items = names if isinstance(names, list) else []
+        cleaned: list[str] = []
+        for raw_name in name_items:
+            raw_text = str(raw_name or "").strip()
+            if not raw_text or len(raw_text) > 12 or not re.fullmatch(r"[\u4e00-\u9fffA-Za-z·]{1,12}", raw_text):
+                continue
+            name = self.memory_candidate_service.clean_evidence_name(
+                raw_text,
+                character={
+                    "canonical_name": raw_text,
+                    "confidence": 0.8,
+                    "personhood_evidence": raw_text,
+                    "activity_or_state_evidence": raw_text,
+                },
+            )
+            if name and name not in cleaned:
+                cleaned.append(name)
+        return cleaned
+
+    def _dedupe_preserve_order(self, values: list[str]) -> list[str]:
+        deduped: list[str] = []
+        for value in values:
+            if value and value not in deduped:
+                deduped.append(value)
+        return deduped
 
     def _normalize_document_speaking_mentions(self, *, batch: ChapterBatch, payload: dict[str, Any]) -> dict[int, list[str]]:
         mention_items = payload.get("document_character_mentions", [])
@@ -2277,15 +2477,23 @@ class CloseReadRunner:
                 continue
             raw_keywords = item.get("speaking_character_keywords", [])
             keyword_items = raw_keywords if isinstance(raw_keywords, list) else []
-            cleaned_keywords = self.character_mention_service.clean_names(keyword_items)
             evidence_map = item.get("speaking_evidence")
             evidence_mapping = evidence_map if isinstance(evidence_map, dict) else {}
+            aliases_map = item.get("character_aliases")
+            aliases_mapping = aliases_map if isinstance(aliases_map, dict) else {}
+            cleaned_keywords = self._clean_model_mention_names(
+                keyword_items,
+                evidence_mapping=evidence_mapping,
+                aliases_mapping=aliases_mapping,
+            )
             filtered = self.character_evidence_validator.filter_names(
                 doc_text=doc_text_by_id.get(doc_id, ""),
                 names=cleaned_keywords,
                 evidence_map=evidence_mapping,
+                aliases_by_name=aliases_mapping,
             )
-            mentions_by_doc_id[doc_id] = filtered
+            trusted = self._clean_trusted_source_names(item.get("source_doc_verified_speakers", []))
+            mentions_by_doc_id[doc_id] = self._dedupe_preserve_order([*filtered, *trusted])
         return mentions_by_doc_id
 
     def _invert_mentions(self, mentions_by_doc_id: dict[int, list[str]]) -> dict[str, list[int]]:

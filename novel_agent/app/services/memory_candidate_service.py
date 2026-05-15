@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .character_mention_service import CharacterMentionService
+from .character_mention_service import CHARACTER_NAME_STOPWORDS, CharacterMentionService
 
 
 LOW_CONFIDENCE_THRESHOLD = 0.45
@@ -17,6 +18,37 @@ LOW_VALUE_CANDIDATE_TYPES = {
     "setting",
     "weak_cooccurrence",
 }
+MODEL_NAME_STOPWORDS = {
+    *CHARACTER_NAME_STOPWORDS,
+    "身体",
+    "房门",
+    "邮件",
+    "照片",
+    "电脑",
+    "手机",
+    "本章",
+    "章节",
+    "剧情",
+    "现实",
+    "幻想",
+}
+ROLE_CHARACTER_NAMES = {
+    "主角",
+    "男主",
+    "女主",
+    "丈夫",
+    "妻子",
+    "未婚妻",
+    "表弟",
+    "表姐",
+    "哥哥",
+    "姐姐",
+    "弟弟",
+    "妹妹",
+    "父亲",
+    "母亲",
+}
+NICKNAME_PREFIXES = ("小", "老", "阿")
 
 
 class MemoryCandidateService:
@@ -122,11 +154,12 @@ class MemoryCandidateService:
             update = output.get("character_update")
             if not isinstance(update, dict):
                 continue
-            canonical_name = str(update.get("canonical_name") or output.get("canonical_name") or "").strip()
-            cleaned = self.character_mention_service.clean_names([canonical_name])
-            if not cleaned:
+            canonical_name = self.clean_evidence_name(
+                update.get("canonical_name") or output.get("canonical_name"),
+                character=update,
+            )
+            if not canonical_name:
                 continue
-            canonical_name = cleaned[0]
             if canonical_name in seen:
                 continue
             seen.add(canonical_name)
@@ -225,11 +258,9 @@ class MemoryCandidateService:
         updates: list[dict[str, Any]] = []
         seen: set[str] = set()
         for character in self._iter_character_evidence(evidence_payload):
-            canonical_name = str(character.get("canonical_name", "")).strip()
-            cleaned = self.character_mention_service.clean_names([canonical_name])
-            if not cleaned:
+            canonical_name = self.clean_evidence_name(character.get("canonical_name"), character=character)
+            if not canonical_name:
                 continue
-            canonical_name = cleaned[0]
             if canonical_name in seen or not self._should_keep_character(character):
                 continue
             seen.add(canonical_name)
@@ -386,17 +417,58 @@ class MemoryCandidateService:
     def _group_character_evidence(self, evidence_payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         grouped: dict[str, list[dict[str, Any]]] = {}
         for character in self._iter_character_evidence(evidence_payload):
-            canonical_name = str(character.get("canonical_name", "")).strip()
-            cleaned = self.character_mention_service.clean_names([canonical_name])
-            if not cleaned or not self._should_keep_character(character):
+            canonical_name = self.clean_evidence_name(character.get("canonical_name"), character=character)
+            if not canonical_name or not self._should_keep_character(character):
                 continue
-            canonical_name = cleaned[0]
             item = dict(character)
             item["canonical_name"] = canonical_name
             item["source_doc_ids"] = self._safe_int_list(item.get("source_doc_ids"))
             item["source_title_indexes"] = self._safe_int_list(item.get("source_title_indexes"))
             grouped.setdefault(canonical_name, []).append(item)
         return grouped
+
+    def clean_evidence_name(self, raw_name: object, *, character: dict[str, Any] | None = None) -> str:
+        name = str(raw_name or "").strip()
+        cleaned = self.character_mention_service.clean_names([name])
+        if cleaned:
+            return cleaned[0]
+        if self._is_supported_model_character_name(name=name, character=character or {}):
+            return name
+        return ""
+
+    def _is_supported_model_character_name(self, *, name: str, character: dict[str, Any]) -> bool:
+        if not name or name in MODEL_NAME_STOPWORDS:
+            return False
+        if len(name) > 12:
+            return False
+        if not re.fullmatch(r"[\u4e00-\u9fffA-Za-z·]{1,12}", name):
+            return False
+        if name in ROLE_CHARACTER_NAMES:
+            return True
+        if len(name) <= 4 and name.startswith(NICKNAME_PREFIXES):
+            return True
+        if len(name) == 1 and re.fullmatch(r"[\u4e00-\u9fff]", name):
+            return self._safe_float(character.get("confidence"), default=0.0) >= 0.6 and self._model_evidence_mentions_name(
+                name=name,
+                character=character,
+            )
+        if 2 <= len(name) <= 4 and re.fullmatch(r"[\u4e00-\u9fff]{2,4}", name):
+            return self._model_evidence_mentions_name(name=name, character=character)
+        return False
+
+    @staticmethod
+    def _model_evidence_mentions_name(*, name: str, character: dict[str, Any]) -> bool:
+        evidence_fields = (
+            "speaking_evidence",
+            "personhood_evidence",
+            "activity_or_state_evidence",
+            "relationship_evidence",
+        )
+        aliases = character.get("aliases", [])
+        terms = [name]
+        if isinstance(aliases, list):
+            terms.extend(str(alias).strip() for alias in aliases if str(alias).strip())
+        return any(term in str(character.get(field) or "") for term in terms for field in evidence_fields)
 
     def _evidence_sort_key(self, item: dict[str, Any]) -> tuple[int, int, str]:
         doc_ids = self._safe_int_list(item.get("source_doc_ids"))
