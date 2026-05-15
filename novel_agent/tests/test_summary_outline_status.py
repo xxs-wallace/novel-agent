@@ -9,8 +9,10 @@ from novel_agent.app.repos.assets_repo import AssetsRepo
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.db import NovelAgentDB
+from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.runner.close_read_runner import CloseReadRunner
 from novel_agent.app.schemas.orchestration_schema import ContinuationIntent, ExtractedCharacterMentions, MemoryAssemblyBudget, MemoryAssemblyInput
+from novel_agent.app.services.chapter_assembler_service import ChapterBatch
 from novel_agent.app.services.character_mention_service import CharacterMentionService
 from novel_agent.app.services.character_profile_service import CharacterProfileService
 from novel_agent.app.services.context_assembly_service import ContextAssemblyService
@@ -143,8 +145,243 @@ def test_close_read_outline_events_record_source_doc_range() -> None:
     assert event["event_id"].startswith("chapter-12:event-01")
     assert event["source_doc_ids"] == [48, 49]
     assert event["source_doc_range"] == "48-49"
+    assert event["event_id"].endswith("docs-48-49")
     assert outline_update["event_summary"] == "芬格尔利用时间压力促成交易。"
     assert fallback_outline_update["timeline_events"][0]["participants"] == ["路明非", "楚子航"]
+
+
+def test_outline_service_keeps_split_batch_events_with_same_label(tmp_path: Path) -> None:
+    service = OutlineService(repo_root=tmp_path)
+
+    service.apply_update(
+        book_id="book",
+        chapter_line="[8] （八）: 长章节推进。",
+        timeline_events=[
+            {
+                "label": "（八）剧情进展",
+                "participants": ["强哥"],
+                "summary": "前一批剧情推进。",
+                "event_id": "chapter-8:event-01",
+                "source_doc_ids": [67, 68, 69, 70],
+                "source_doc_range": "67-70",
+            }
+        ],
+    )
+    outline_path = service.apply_update(
+        book_id="book",
+        chapter_line="[8] （八）: 长章节推进到后段。",
+        timeline_events=[
+            {
+                "label": "（八）剧情进展",
+                "participants": ["强哥"],
+                "summary": "后一批剧情推进。",
+                "event_id": "chapter-8:event-01",
+                "source_doc_ids": [98, 99, 100, 101, 102],
+                "source_doc_range": "98-102",
+            }
+        ],
+    )
+
+    outline_md = outline_path.read_text(encoding="utf-8")
+    assert outline_md.count("（八）剧情进展") == 2
+    assert "documents：67-70" in outline_md
+    assert "documents：98-102" in outline_md
+
+
+def test_close_read_merges_split_outline_updates_by_doc_range() -> None:
+    runner = object.__new__(CloseReadRunner)
+
+    merged = runner._merge_outline_updates(  # noqa: SLF001
+        existing={
+            "chapter_line": "[8] 旧章节线",
+            "source_doc_ids": [67, 68, 69, 70],
+            "source_title_indexes": [8],
+            "timeline_events": [
+                {
+                    "label": "（八）剧情进展",
+                    "participants": ["强哥"],
+                    "summary": "前一批剧情推进。",
+                    "event_id": "chapter-8:event-01",
+                    "source_doc_ids": [67, 68, 69, 70],
+                    "source_doc_range": "67-70",
+                }
+            ],
+        },
+        current={
+            "chapter_line": "[8] 新章节线",
+            "source_doc_ids": [98, 99, 100, 101, 102],
+            "source_title_indexes": [8],
+            "timeline_events": [
+                {
+                    "label": "（八）剧情进展",
+                    "participants": ["强哥"],
+                    "summary": "后一批剧情推进。",
+                    "event_id": "chapter-8:event-01",
+                    "source_doc_ids": [98, 99, 100, 101, 102],
+                    "source_doc_range": "98-102",
+                }
+            ],
+        },
+    )
+
+    assert merged["chapter_line"] == "[8] 新章节线"
+    assert len(merged["timeline_events"]) == 2
+    assert [event["source_doc_range"] for event in merged["timeline_events"]] == ["67-70", "98-102"]
+    assert merged["source_doc_range"] == "67-102"
+
+
+def test_merged_chapter_summary_preserves_late_split_batches() -> None:
+    runner = object.__new__(CloseReadRunner)
+    batch = SimpleNamespace(
+        document_title_index=8,
+        is_split_batch=True,
+        batch_label="拆批-93-97",
+        batch_doc_count=5,
+        total_chars=16000,
+        chapter_doc_count=94,
+    )
+    summaries = [
+        "\n".join(
+            [
+                "## 剧情事件链",
+                f"- 第{index}批剧情：" + "甲" * 900,
+                "## 人物状态/关系变化",
+                f"- 第{index}批人物变化。",
+                "## 关键信息/设定",
+                f"- 第{index}批设定。",
+                "## 结构功能/节奏",
+                f"- 第{index}批结构功能。",
+            ]
+        )
+        for index in range(1, 8)
+    ]
+    summaries.append(
+        "\n".join(
+            [
+                "## 剧情事件链",
+                "- 终局标记：最后一批剧情不能被头部截断吞掉。",
+                "## 人物状态/关系变化",
+                "- 最后一批人物关系落点。",
+                "## 关键信息/设定",
+                "- 最后一批设定回收。",
+                "## 结构功能/节奏",
+                "- 最后一批结构收束。",
+            ]
+        )
+    )
+
+    merged = runner._merge_intermediate_summaries(  # noqa: SLF001
+        summaries=summaries,
+        batch=batch,
+        source_total_chars=335544,
+    )
+
+    assert "终局标记" in merged
+    assert "章节总文档数：94" in merged
+    assert len(merged) > 6000
+
+
+def test_close_read_source_stats_are_derived_from_document_rows(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "source-stats.db")
+    documents_repo = DocumentsRepo()
+    with db.connect() as conn:
+        db.init_schema(conn)
+        for index, content in enumerate(["甲" * 10, "乙" * 20, "丙" * 30], start=1):
+            documents_repo.insert_document(
+                conn,
+                {
+                    "path": f"doc-{index}.txt",
+                    "scope": "chapter",
+                    "title": "第八章",
+                    "content": content,
+                    "mtime": 0,
+                    "size": len(content),
+                    "content_sha256": f"sha-{index}",
+                    "book_id": "book",
+                    "source_path": "book.txt",
+                    "source_file_name": "book.txt",
+                    "source_start_offset": index * 100,
+                    "source_end_offset": index * 100 + len(content),
+                    "source_batch_no": index,
+                    "document_title": "第八章",
+                    "document_title_index": 8,
+                    "inferred_chapter_no": 8,
+                    "content_chars": len(content),
+                    "character_keywords": [],
+                    "content_tags": [],
+                    "segmentation_notes": "",
+                    "ingestion_run_id": "seed",
+                    "created_at": "now",
+                    "updated_at": "now",
+                },
+            )
+        docs = documents_repo.fetch_by_title_index(conn, book_id="book", document_title_index=8)
+        partial_batch = ChapterBatch(
+            document_title_index=8,
+            chapter_title="第八章",
+            documents=[docs[1]],
+            is_complete_chapter=False,
+            chapter_doc_count=3,
+            chapter_total_chars=60,
+            batch_doc_start_index=2,
+        )
+        complete_batch = ChapterBatch(
+            document_title_index=8,
+            chapter_title="第八章",
+            documents=[docs[2]],
+            is_complete_chapter=True,
+            chapter_doc_count=3,
+            chapter_total_chars=60,
+            batch_doc_start_index=3,
+        )
+        runner = object.__new__(CloseReadRunner)
+        runner.config = SimpleNamespace(book_id="book")
+
+        partial_stats = runner._processed_chapter_source_stats(  # noqa: SLF001
+            conn=conn,
+            documents_repo=documents_repo,
+            batch=partial_batch,
+        )
+        complete_stats = runner._processed_chapter_source_stats(  # noqa: SLF001
+            conn=conn,
+            documents_repo=documents_repo,
+            batch=complete_batch,
+        )
+
+    assert partial_stats == (1, 2, 2, 30)
+    assert complete_stats == (1, 3, 3, 60)
+
+
+def test_close_read_seeds_existing_summary_when_resuming_mid_chapter() -> None:
+    runner = object.__new__(CloseReadRunner)
+    batch = SimpleNamespace(
+        documents=[
+            SimpleNamespace(doc_id=20),
+            SimpleNamespace(doc_id=21),
+        ],
+    )
+
+    should_seed = runner._should_seed_existing_summary_intermediate(  # noqa: SLF001
+        existing={
+            "source_doc_start_id": 8,
+            "source_doc_end_id": 19,
+            "summary_md": "## 剧情事件链\n- 前半章摘要。",
+        },
+        batch=batch,
+        summary_intermediate=[],
+    )
+    should_not_seed_completed = runner._should_seed_existing_summary_intermediate(  # noqa: SLF001
+        existing={
+            "source_doc_start_id": 8,
+            "source_doc_end_id": 102,
+            "summary_md": "## 剧情事件链\n- 已完整摘要。",
+        },
+        batch=batch,
+        summary_intermediate=[],
+    )
+
+    assert should_seed is True
+    assert should_not_seed_completed is False
 
 
 def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: Path) -> None:

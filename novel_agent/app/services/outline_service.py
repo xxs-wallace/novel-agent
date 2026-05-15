@@ -65,6 +65,17 @@ class OutlineTimelineEntry:
         normalized_participants = ",".join(sorted(self.participants))
         normalized_label = self._normalize_match_text(self.label)
         normalized_summary = self._normalize_match_text(self.summary)
+        source_key = self._normalize_match_text(self.source_doc_range) if self.source_doc_range else ""
+        if not source_key:
+            source_key = ",".join(str(item) for item in sorted(set(self.source_doc_ids)))
+        if source_key:
+            return "||".join(
+                [
+                    normalized_label or normalized_summary,
+                    self._normalize_match_text(normalized_participants),
+                    source_key,
+                ]
+            )
         if normalized_label:
             return "||".join([normalized_label, self._normalize_match_text(normalized_participants)])
         return "||".join([normalized_summary, self._normalize_match_text(normalized_participants)])
@@ -326,7 +337,9 @@ class OutlineService:
                 if entry.event_id and not current.event_id:
                     current.event_id = entry.event_id
                 current.source_doc_ids = sorted({*current.source_doc_ids, *entry.source_doc_ids})
-                if entry.source_doc_range and not current.source_doc_range:
+                if current.source_doc_ids:
+                    current.source_doc_range = self._doc_range_text(current.source_doc_ids)
+                elif entry.source_doc_range and not current.source_doc_range:
                     current.source_doc_range = entry.source_doc_range
                 continue
             by_key[key] = OutlineTimelineEntry(

@@ -19,7 +19,9 @@ from novel_agent.app.run_interactive import (
     redact_writer_result_for_terminal,
     run_writer_guided_flow,
 )
+from novel_agent.app.runner.close_read_runner import CloseReadRunner, InvalidChapterSynopsisError, _RetryCloseReadBatch
 from novel_agent.app.schemas.creative_kb_schema import CreativeKBBuildResult
+from novel_agent.app.services.chapter_assembler_service import ChapterBatch
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
     _seed_assets,
     _seed_document,
@@ -50,6 +52,53 @@ class _RecordingCreativeKBFacade:
             fragment_ids=[f"fragment-{document.doc_id}" for document in documents],
             cluster_ids=["cluster-1"],
         )
+
+
+def test_close_read_retries_schema_invalid_multi_chapter_batch_with_smaller_batch() -> None:
+    runner = CloseReadRunner.__new__(CloseReadRunner)
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="multi",
+        documents=[
+            _document_row(doc_id=1, title_index=1, chars=3000),
+            _document_row(doc_id=2, title_index=2, chars=2000),
+        ],
+    )
+
+    class _Future:
+        def result(self) -> None:
+            raise InvalidChapterSynopsisError("multi-chapter batch missing chapter_summaries")
+
+    try:
+        runner._result_or_retry(_Future(), batch=batch)  # type: ignore[attr-defined]
+    except _RetryCloseReadBatch as exc:
+        retry_batch = exc.batch
+    else:
+        raise AssertionError("expected close-read batch retry")
+
+    assert [doc.doc_id for doc in retry_batch.documents] == [1]
+    assert retry_batch.total_chars == 3000
+
+
+def _document_row(*, doc_id: int, title_index: int, chars: int) -> DocumentRow:
+    return DocumentRow(
+        doc_id=doc_id,
+        book_id="book-one",
+        path=f"doc-{doc_id}.txt",
+        scope="chapter",
+        title=None,
+        document_title=f"第 {title_index} 章",
+        document_title_index=title_index,
+        inferred_chapter_no=title_index,
+        content="x" * chars,
+        content_chars=chars,
+        character_keywords=[],
+        content_tags=[],
+        source_path="source.txt",
+        source_file_name="source.txt",
+        source_start_offset=0,
+        source_end_offset=chars,
+    )
 
 
 def test_creative_kb_facade_enables_thinking_fallback_for_kb_agents(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -264,6 +313,155 @@ def test_pipeline_builds_creative_kb_after_each_close_read_round(tmp_path: Path,
 
     assert kb_max_doc_ids == [1, 2]
     assert [item["max_doc_id"] for item in result["creative_kb_runs"]] == [1, 2]  # type: ignore[index]
+
+
+def test_pipeline_runs_unbounded_close_read_when_read_budget_is_zero(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    db_path = tmp_path / "pipeline.db"
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("雨夜之后，调查继续。", encoding="utf-8")
+    debug_path = repo_root / ".memory" / "debug" / "couple.sqlite.md"
+
+    db = NovelAgentDB(db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.commit()
+
+    class FakeSegmentationRunner:
+        def __init__(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError("segmentation should not run when max_read_kb is 0")
+
+    class FakeCloseReadRunner:
+        calls = 0
+
+        def __init__(self, *, db_path: Path, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.db_path = db_path
+
+        def run(self):  # type: ignore[no-untyped-def]
+            FakeCloseReadRunner.calls += 1
+            if FakeCloseReadRunner.calls > 2:
+                return SimpleNamespace(processed_batches=0, batch_metrics=[])
+            db = NovelAgentDB(self.db_path)
+            with db.connect() as conn:
+                db.init_schema(conn)
+                ReadingProgressRepo().upsert(
+                    conn,
+                    {
+                        "book_id": "couple",
+                        "agent_stage": DEFAULT_CLOSE_READING_STAGE,
+                        "last_completed_doc_id": FakeCloseReadRunner.calls,
+                        "updated_at": "now",
+                    },
+                )
+                conn.commit()
+            return SimpleNamespace(
+                processed_batches=1,
+                batch_metrics=[{"batch_index": FakeCloseReadRunner.calls}],
+            )
+
+    monkeypatch.setattr(run_interactive, "SegmentationRunner", FakeSegmentationRunner)
+    monkeypatch.setattr(run_interactive, "CloseReadRunner", FakeCloseReadRunner)
+    monkeypatch.setattr(run_interactive, "_build_source_arc_map", lambda **_kwargs: {"status": "skipped"})
+
+    result = run_interactive._run_pipeline(  # noqa: SLF001
+        repo_root=repo_root,
+        book_id="couple",
+        source_path=source_path,
+        db_path=db_path,
+        debug_path=debug_path,
+        api_key="unused",
+        run_mode="resume",
+        max_read_kb=0,
+        max_close_batches=None,
+        segment_step_kb=1,
+        close_step_batches=1,
+        build_creative_kb=False,
+    )
+
+    assert FakeCloseReadRunner.calls == 3
+    assert result["close_read_batches"] == 2
+
+
+def test_pipeline_runs_unbounded_segmentation_when_close_batches_are_zero(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    db_path = tmp_path / "pipeline.db"
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一章\n\n雨夜之后，调查继续。\n\n第二章\n\n新的线索出现。", encoding="utf-8")
+    debug_path = repo_root / ".memory" / "debug" / "couple.sqlite.md"
+
+    db = NovelAgentDB(db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.commit()
+
+    class FakeSegmentationRunner:
+        calls = 0
+
+        def __init__(self, *, db_path: Path, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.db_path = db_path
+
+        def run(self):  # type: ignore[no-untyped-def]
+            FakeSegmentationRunner.calls += 1
+            if FakeSegmentationRunner.calls > 2:
+                return SimpleNamespace(inserted_documents=0, batch_count=0)
+            db = NovelAgentDB(self.db_path)
+            with db.connect() as conn:
+                db.init_schema(conn)
+                DocumentsRepo().insert_document(
+                    conn,
+                    {
+                        "book_id": "couple",
+                        "path": f"chapter-{FakeSegmentationRunner.calls}.txt",
+                        "scope": "chapter",
+                        "title": f"第{FakeSegmentationRunner.calls}章",
+                        "document_title": f"第{FakeSegmentationRunner.calls}章",
+                        "document_title_index": FakeSegmentationRunner.calls,
+                        "inferred_chapter_no": FakeSegmentationRunner.calls,
+                        "content": "雨夜之后，调查继续。",
+                        "content_chars": 10,
+                        "character_keywords": [],
+                        "content_tags": [],
+                        "source_path": str(source_path),
+                        "source_file_name": source_path.name,
+                        "source_start_offset": FakeSegmentationRunner.calls * 100,
+                        "source_end_offset": FakeSegmentationRunner.calls * 100 + 10,
+                        "ingestion_run_id": "test",
+                        "created_at": "now",
+                        "updated_at": "now",
+                    },
+                )
+                conn.commit()
+            return SimpleNamespace(inserted_documents=1, batch_count=1)
+
+    class FakeCloseReadRunner:
+        def __init__(self, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise AssertionError("close read should not run when max_close_batches is 0")
+
+    monkeypatch.setattr(run_interactive, "SegmentationRunner", FakeSegmentationRunner)
+    monkeypatch.setattr(run_interactive, "CloseReadRunner", FakeCloseReadRunner)
+    monkeypatch.setattr(run_interactive, "_build_source_arc_map", lambda **_kwargs: {"status": "skipped"})
+
+    result = run_interactive._run_pipeline(  # noqa: SLF001
+        repo_root=repo_root,
+        book_id="couple",
+        source_path=source_path,
+        db_path=db_path,
+        debug_path=debug_path,
+        api_key="unused",
+        run_mode="resume",
+        max_read_kb=None,
+        max_close_batches=0,
+        segment_step_kb=1,
+        close_step_batches=1,
+        build_creative_kb=False,
+    )
+
+    assert FakeSegmentationRunner.calls == 3
+    assert result["inserted_documents"] == 2
+    assert result["segmentation_batches"] == 2
+    assert result["close_read_batches"] == 0
 
 
 def test_interactive_pipeline_builds_source_arc_map_from_chapter_summaries(tmp_path: Path) -> None:

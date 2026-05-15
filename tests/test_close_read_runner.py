@@ -366,8 +366,8 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
     result = CloseReadRunner(repo_root=tmp_path, db_path=db_path, config=config).run()
 
     assert result.processed_batches == 1
-    assert result.batch_metrics[0]["doc_count"] == 2
-    assert result.batch_metrics[0]["document_title_indexes"] == [1, 2]
+    assert result.batch_metrics[0]["doc_count"] == 1
+    assert result.batch_metrics[0]["document_title_indexes"] == [1]
 
     with sqlite3.connect(db_path) as conn:
         chapter_rows = conn.execute(
@@ -394,14 +394,10 @@ def test_close_read_runner_persists_multi_chapter_batch_without_schema_changes(
             """
         ).fetchall()
 
-    assert [(row[0], row[1], row[2], row[3]) for row in chapter_rows] == [(1, 1, 1, 1), (2, 2, 2, 1)]
+    assert [(row[0], row[1], row[2], row[3]) for row in chapter_rows] == [(1, 1, 1, 1)]
     assert "路明非" in chapter_rows[0][4]
-    assert "楚子航" in chapter_rows[1][4]
-    assert progress_row == (2, 2)
-    assert [(row[0], row[1], row[2]) for row in profile_rows] == [
-        ("楚子航", "[2]", "[2]"),
-        ("路明非", "[1]", "[1]"),
-    ]
+    assert progress_row == (1, 1)
+    assert [(row[0], row[1], row[2]) for row in profile_rows] == [("路明非", "[1]", "[1]")]
     assert "发言 documents" in profile_rows[0][3]
 
 
@@ -600,7 +596,10 @@ def test_close_read_runner_resumes_split_chapter_and_merges_intermediate_summari
         ).fetchone()
 
     assert final_row is not None
-    assert final_row[0] == "[]"
+    final_intermediate = json.loads(final_row[0])
+    assert len(final_intermediate) == 2
+    assert "路明非在雨夜进入校园" in final_intermediate[0]
+    assert "楚子航补充说明龙族真相" in final_intermediate[1]
     assert "## 摘要元信息" in final_row[1]
     assert "## 剧情事件链" in final_row[1]
     assert "## 人物状态/关系变化" in final_row[1]
@@ -729,9 +728,8 @@ def test_close_read_runner_persists_complete_multi_chapter_synopses_in_non_dry_r
             """
         ).fetchall()
 
-    assert [row[0] for row in chapter_rows] == [1, 2]
+    assert [row[0] for row in chapter_rows] == [1]
     assert "路明非" in chapter_rows[0][1]
-    assert "楚子航" in chapter_rows[1][1]
 
 
 def test_payload_for_title_index_rejects_missing_chapter_synopsis_item(

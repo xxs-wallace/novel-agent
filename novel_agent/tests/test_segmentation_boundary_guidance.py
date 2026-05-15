@@ -28,6 +28,7 @@ def test_short_numbered_segments_are_treated_as_explicit_titles() -> None:
     service = object.__new__(DocumentIngestService)
 
     assert service._extract_explicit_title("十五\n雨声从窗外压下来。") == "十五"  # noqa: SLF001
+    assert service._extract_explicit_title("（十五）\n雨声从窗外压下来。") == "（十五）"  # noqa: SLF001
     assert service._extract_explicit_title("第十五章 雨夜\n雨声从窗外压下来。") == "第十五章 雨夜"  # noqa: SLF001
     assert service._extract_explicit_title("3. 回声\n他们停在走廊尽头。") == "3. 回声"  # noqa: SLF001
     assert service._extract_explicit_title("三个人走进房间") is None  # noqa: SLF001

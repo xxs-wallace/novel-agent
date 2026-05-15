@@ -272,3 +272,79 @@ def test_run_single_sample_smoke_cli_uses_tool_calling_defaults_for_real_model(
     assert generation_config.tools == []
     output = json.loads(capsys.readouterr().out)
     assert output["run_id"] == "run-3"
+
+
+def test_run_single_sample_smoke_source_mode_reads_api_key_from_env(
+    tmp_path: Path,
+    monkeypatch,  # type: ignore[no-untyped-def]
+    capsys,  # type: ignore[no-untyped-def]
+) -> None:
+    source_path = tmp_path / "source.txt"
+    source_path.write_text("第一段。\n\n第二段。", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class _FakeAgenticResult:
+        run_id = "agentic-run"
+        run_dir = str(tmp_path / "runs" / "agentic-run")
+        generated_synopsis_path = str(tmp_path / "runs" / "agentic-run" / "generated_story_synopsis.json")
+        reference_synopsis_path = str(tmp_path / "runs" / "agentic-run" / "reference_story_synopsis.json")
+        draft_path = str(tmp_path / "runs" / "agentic-run" / "expansion" / "draft.md")
+        reference_truth_path = str(tmp_path / "runs" / "agentic-run" / "reference_truth.txt")
+        synopsis_summary = "梗概通过"
+        synopsis_decision = "pass"
+        synopsis_score = 0.88
+        expansion_summary = "扩写通过"
+        expansion_decision = "pass"
+        expansion_score = 0.86
+        reviewer_summary = "综合通过"
+        reviewer_decision = "pass"
+        reviewer_score = 0.87
+
+        def to_dict(self) -> dict[str, object]:
+            return {
+                "run_id": self.run_id,
+                "run_dir": self.run_dir,
+                "generated_synopsis_path": self.generated_synopsis_path,
+                "reference_synopsis_path": self.reference_synopsis_path,
+                "draft_path": self.draft_path,
+                "reference_truth_path": self.reference_truth_path,
+                "generated_chars": 128,
+                "reference_truth_chars": 256,
+                "reviewer_decision": self.reviewer_decision,
+                "reviewer_score": self.reviewer_score,
+            }
+
+    class _FakeAgenticSmokeBenchmarkService:
+        def __init__(self, *, repo_root: Path) -> None:
+            captured["repo_root"] = repo_root
+
+        def run_from_source(self, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return _FakeAgenticResult()
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-from-env")
+    monkeypatch.setattr(
+        "novel_agent.app.run_single_sample_smoke.AgenticSmokeBenchmarkService",
+        _FakeAgenticSmokeBenchmarkService,
+    )
+
+    exit_code = main(
+        [
+            "--source",
+            str(source_path),
+            "--repo-root",
+            str(tmp_path),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--use-real-model",
+            "--api-key-env",
+            "DEEPSEEK_API_KEY",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["api_key"] == "secret-from-env"
+    assert captured["source_path"] == source_path
+    output = json.loads(capsys.readouterr().out)
+    assert output["run_id"] == "agentic-run"
+    assert "梗概层 Reviewer" in output["summary_text"]

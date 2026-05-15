@@ -202,6 +202,25 @@ class RunEventStream:
             prefix = f"精读 batch {batch_index} 完成" if batch_index else "精读 batch 完成"
             suffix = f" · {progress}" if progress else ""
             return f"{prefix}（doc {doc_range}）{suffix}"
+        if event_name == "prompt_start":
+            agent = RunEventStream._close_read_agent_label(event)
+            doc_indexes = event.get("document_title_indexes")
+            doc_count = event.get("doc_count")
+            total_chars = event.get("total_chars")
+            details = []
+            if doc_indexes:
+                details.append(f"章节 {doc_indexes}")
+            if doc_count:
+                details.append(f"{doc_count} docs")
+            if total_chars:
+                details.append(f"{total_chars} 字")
+            suffix = f"（{'，'.join(str(item) for item in details)}）" if details else ""
+            return f"正在调用模型：{agent}{suffix}"
+        if event_name == "prompt_end":
+            agent = RunEventStream._close_read_agent_label(event)
+            duration = event.get("duration_seconds")
+            suffix = f" · {duration}s" if duration is not None else ""
+            return f"模型调用完成：{agent}{suffix}"
         if event_name == "cancelled":
             suffix = f" · {progress}" if progress else ""
             return f"已请求停止 close-read，将从最近 checkpoint 恢复{suffix}"
@@ -214,3 +233,14 @@ class RunEventStream:
         if first_doc is not None and last_doc is not None:
             return f"{first_doc}-{last_doc}" if first_doc != last_doc else str(first_doc)
         return "?"
+
+    @staticmethod
+    def _close_read_agent_label(event: Mapping[str, Any]) -> str:
+        agent = str(event.get("agent") or "").strip()
+        return {
+            "chapter_summary": "章节摘要",
+            "character_evidence": "人物证据",
+            "world_evidence": "世界观证据",
+            "character_reduce": "人物记忆归并",
+            "global_memory": "全局记忆归并",
+        }.get(agent, agent or "精读")

@@ -76,7 +76,7 @@ def test_chapter_assembler_returns_whole_chapter_when_total_chars_within_budget(
     assert batch.batch_doc_start_index == 1
 
 
-def test_chapter_assembler_packs_multiple_title_indexes_within_budget(tmp_path: Path) -> None:
+def test_chapter_assembler_keeps_title_indexes_separate_even_within_budget(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "assembler_multi.db")
     with db.connect() as conn:
         db.init_schema(conn)
@@ -94,11 +94,11 @@ def test_chapter_assembler_packs_multiple_title_indexes_within_budget(tmp_path: 
         batch = service.load_next_batch(conn, book_id="book-multi")
 
     assert batch is not None
-    assert batch.title_indexes == [1, 2]
-    assert batch.is_multi_chapter is True
-    assert batch.batch_doc_count == 2
-    assert batch.total_chars == 220
-    assert batch.batch_label == "多章-1-2"
+    assert batch.title_indexes == [1]
+    assert batch.is_multi_chapter is False
+    assert batch.batch_doc_count == 1
+    assert batch.total_chars == 120
+    assert batch.batch_label == "整章"
 
 
 def test_chapter_assembler_resumes_from_checkpoint_token_and_splits_over_budget(tmp_path: Path) -> None:
@@ -142,3 +142,9 @@ def test_chapter_assembler_resumes_from_checkpoint_token_and_splits_over_budget(
     assert batch.batch_doc_start_index == 2
     assert batch.chapter_doc_count == 3
     assert batch.chapter_total_chars == 420
+
+    single_title_batch = batch.as_single_title_batch(3)
+    assert single_title_batch.chapter_doc_count == 3
+    assert single_title_batch.chapter_total_chars == 420
+    assert single_title_batch.batch_doc_start_index == 2
+    assert single_title_batch.split_reason == SPLIT_REASON_OVER_BUDGET

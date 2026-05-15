@@ -65,6 +65,8 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+web/test-results/
+web/playwright-report/
 uv.lock
 
 # Translations
@@ -154,3 +156,4 @@ tool_output/
 # Novel agent runtime artifacts
 .memory/
 .indexes/
+runs/

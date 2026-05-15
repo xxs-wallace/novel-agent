@@ -375,12 +375,14 @@ def run_writer_workflow_action(
         "continue_after_chapter_acceptance",
         "accept_chapter",
         "revise_length",
+        "revise_chapter_length",
         "replan_chapter",
         "discard_chapter",
     }:
         status_by_action = {
             "accept_chapter": "accepted",
             "revise_length": "revise_length",
+            "revise_chapter_length": "revise_length",
             "replan_chapter": "replan_chapter",
             "discard_chapter": "discarded",
         }
@@ -407,6 +409,12 @@ def run_writer_workflow_action(
         )
     if action == "apply_scoped_artifact_revision":
         return workflow.apply_scoped_artifact_revision(
+            run_id=run_id,
+            request_id=str(payload.get("request_id") or ""),
+        )
+    if action in {"discard_scoped_artifact_revision", "reject_scoped_artifact_revision"}:
+        return _discard_scoped_artifact_revision(
+            workflow=workflow,
             run_id=run_id,
             request_id=str(payload.get("request_id") or ""),
         )
@@ -770,11 +778,14 @@ def _write_writer_review_decision_status(
     workflow: WriterInteractiveWorkflow,
     run_id: str,
     status: str,
+    payload: Mapping[str, object] | None = None,
 ) -> None:
+    normalized_payload = dict(payload or {})
+    normalized_payload["status"] = status
     _write_writer_review_decision_payload(
         workflow=workflow,
         run_id=run_id,
-        payload={"status": status},
+        payload=normalized_payload,
     )
 
 
@@ -790,6 +801,13 @@ def _write_writer_review_decision_payload(
     chapter_id = str(existing.get("chapter_id") or state.get("current_chapter_id") or "").strip()
     draft_id = str(existing.get("draft_id") or state.get("current_draft_id") or "draft-001").strip()
     decision_id = str(existing.get("decision_id") or f"review-{chapter_id or 'chapter'}-{draft_id}").strip()
+    feedback_text = str(
+        payload.get("feedback_text")
+        or payload.get("user_feedback")
+        or payload.get("feedback")
+        or existing.get("feedback_text")
+        or ""
+    )
     next_checkpoint_by_status = {
         "accepted": "freeze_e",
         "revise_length": "wait_length_review",
@@ -803,17 +821,19 @@ def _write_writer_review_decision_payload(
         "discarded": "discarded_by_user",
     }
     reason_code = str(payload.get("reason_code") or reason_by_status.get(status, status))
-    feedback_text = str(payload.get("feedback_text") or existing.get("feedback_text") or "")
     length_plan_update = payload.get("length_plan_update") or existing.get("length_plan_update")
     if status == "revise_length" and not isinstance(length_plan_update, Mapping):
+        target_chars = _optional_positive_int(payload.get("target_chars") or payload.get("default_target_chars")) or 1
+        min_chars = _optional_positive_int(payload.get("min_chars")) or target_chars
+        max_chars = _optional_positive_int(payload.get("max_chars")) or max(target_chars, min_chars)
         length_plan_update = {
             "schema_version": "1.0",
             "update_id": f"length-update-{decision_id}",
             "decision_id": decision_id,
             "chapter_id": chapter_id,
-            "target_chars": 1,
-            "min_chars": 1,
-            "max_chars": 1,
+            "target_chars": target_chars,
+            "min_chars": min_chars,
+            "max_chars": max_chars,
             "reason_code": reason_code,
             "feedback_text": feedback_text or "用户要求调整字数或节奏后重写。",
         }
@@ -876,6 +896,41 @@ def _write_writer_review_decision_payload(
             "reviewer_type": "user",
         },
     )
+
+
+def _optional_positive_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(cast(Any, value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _discard_scoped_artifact_revision(
+    *,
+    workflow: WriterInteractiveWorkflow,
+    run_id: str,
+    request_id: str = "",
+) -> dict[str, Any]:
+    state = workflow.load_workflow_state(run_id=run_id) or {}
+    pending = state.get("pending_scoped_revision") if isinstance(state.get("pending_scoped_revision"), Mapping) else {}
+    resolved_request_id = request_id or str((pending or {}).get("request_id") or "")
+    state["pending_scoped_revision"] = None
+    state["last_scoped_revision"] = {
+        **dict(pending or {}),
+        "request_id": resolved_request_id,
+        "status": "discarded",
+    }
+    save_state = getattr(workflow, "_save_workflow_state", None)
+    if callable(save_state):
+        save_state(run_id, state)
+    return {
+        "status": "discarded",
+        "request_id": resolved_request_id,
+        "workflow_state": state,
+    }
 
 
 def _load_run_data_if_exists(workflow: WriterInteractiveWorkflow, run_id: str, artifact_name: str) -> dict[str, Any]:
@@ -1529,11 +1584,12 @@ def _run_pipeline(
     while True:
         if should_stop():
             break
-        if remaining_read_chars is not None and remaining_read_chars <= 0 and (
-            remaining_close_batches is None or remaining_close_batches <= 0
+        if (
+            remaining_read_chars is not None
+            and remaining_read_chars <= 0
+            and remaining_close_batches is not None
+            and remaining_close_batches <= 0
         ):
-            break
-        if remaining_read_chars is None and remaining_close_batches is not None and remaining_close_batches <= 0:
             break
 
         iteration += 1
@@ -1663,11 +1719,12 @@ def _run_pipeline(
 
         if not iteration_made_progress:
             break
-        if remaining_read_chars is not None and remaining_read_chars <= 0 and (
-            remaining_close_batches is None or remaining_close_batches <= 0
+        if (
+            remaining_read_chars is not None
+            and remaining_read_chars <= 0
+            and remaining_close_batches is not None
+            and remaining_close_batches <= 0
         ):
-            break
-        if remaining_read_chars is None and remaining_close_batches is not None and remaining_close_batches <= 0:
             break
 
     source_arc_map_result = (

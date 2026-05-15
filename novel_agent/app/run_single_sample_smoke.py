@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .bootstrap import resolve_db_path, resolve_repo_root
@@ -95,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-base", type=str, default=None, help="API base url")
     parser.add_argument("--api-key", type=str, default=None, help="API key")
     parser.add_argument(
+        "--api-key-env",
+        type=str,
+        default=None,
+        help="Environment variable name used as API key when --api-key is not provided",
+    )
+    parser.add_argument(
         "--thinking",
         type=str,
         default=None,
@@ -130,12 +137,15 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = resolve_repo_root(args.repo_root)
     if not args.use_real_model:
         raise SystemExit("--use-real-model is required for smoke benchmark runs")
+    api_key = args.api_key
+    if not api_key and args.api_key_env:
+        api_key = os.getenv(args.api_key_env)
     sample_path = args.sample
     db_arg = args.db
     if args.source:
         result = AgenticSmokeBenchmarkService(repo_root=repo_root).run_from_source(
             source_path=Path(args.source),
-            api_key=args.api_key or "",
+            api_key=api_key or "",
             runs_dir=Path(args.runs_dir),
             prefix_count=args.prefix_count,
             prefix_min_chars=args.prefix_min_chars,
@@ -187,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         model_id=args.model_id,
         provider=args.provider,
         api_base=args.api_base,
-        api_key=args.api_key,
+        api_key=api_key,
         thinking=args.thinking,
         reasoning_effort=args.reasoning_effort,
         save_reasoning=bool(args.save_reasoning),

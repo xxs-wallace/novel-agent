@@ -127,6 +127,34 @@ def test_run_event_stream_summarizes_close_read_document_progress() -> None:
     assert "已完成 6/20 documents" in rendered
 
 
+def test_run_event_stream_shows_close_read_model_prompt_progress() -> None:
+    stream = RunEventStream()
+
+    stream.progress_callback(
+        {
+            "stage": "close_reading",
+            "agent": "chapter_summary",
+            "event": "prompt_start",
+            "document_title_indexes": [1, 2],
+            "doc_count": 2,
+            "total_chars": 6400,
+        }
+    )
+    stream.progress_callback(
+        {
+            "stage": "close_reading",
+            "agent": "chapter_summary",
+            "event": "prompt_end",
+            "duration_seconds": 12.5,
+        }
+    )
+
+    messages = [event.message for event in stream.events()]
+    assert "正在调用模型：章节摘要" in messages[0]
+    assert "章节 [1, 2]" in messages[0]
+    assert "模型调用完成：章节摘要 · 12.5s" in messages[1]
+
+
 def test_artifact_presenter_summarizes_batch_chapter_length_and_draft(tmp_path: Path) -> None:
     presenter = ArtifactPresenter()
     batch_path = tmp_path / "batch_plan.json"
