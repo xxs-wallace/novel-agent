@@ -16,11 +16,11 @@ from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
+from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget
 from novel_agent.app.schemas.orchestration_schema import (
     ExtractedCharacterMention,
     ExtractedCharacterMentions,
     OutlineSeedPacket,
-    PlanningFact,
     PlanningNotebook,
     ResearchBudget,
     ResearchRequest,
@@ -28,7 +28,7 @@ from novel_agent.app.schemas.orchestration_schema import (
     SufficiencyDecision,
     TraceableSource,
 )
-from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget
+from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
 from novel_agent.app.services.outline_research_service import (
     CharacterMentionExtractor,
     CharacterMentionResolver,
@@ -38,7 +38,6 @@ from novel_agent.app.services.outline_research_service import (
     OutlineSeedPacketBuilder,
     StoryDetailResolver,
 )
-from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
@@ -514,11 +513,12 @@ def test_character_mention_extractor_ignores_notes_and_avoidances_for_person_det
     assert "隐藏新人物" not in names
 
 
-def test_character_mention_extractor_filters_common_event_nouns_from_author_brief() -> None:
+def test_character_mention_extractor_uses_explicit_major_characters_only() -> None:
     extractor = CharacterMentionExtractor()
 
     mentions = extractor.extract(
         {
+            "major_characters": ["路明非"],
             "desired_actions": [
                 "路明非经历危机后，学院教授暂时搁置报告，导师继续观察。"
             ]

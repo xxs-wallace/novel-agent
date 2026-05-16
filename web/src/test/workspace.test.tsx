@@ -31,7 +31,7 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.queryByText("wait_chapter_acceptance")).not.toBeInTheDocument();
   });
 
-  it("opens the create task dialog and submits to createTask", async () => {
+  it("opens the create task dialog, submits to createTask, and starts importing", async () => {
     const user = userEvent.setup();
     renderWorkspace();
     await waitForInitialTask();
@@ -40,18 +40,22 @@ describe("Novel Agent Web workspace", () => {
     const dialog = screen.getByRole("dialog", { name: "创建任务" });
     await user.type(within(dialog).getByLabelText("任务 ID"), "new-task");
     await user.type(within(dialog).getByLabelText("原文路径"), "/tmp/source.txt");
-    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+    await user.click(within(dialog).getByRole("button", { name: "创建并导入" }));
 
     await waitFor(() => expect(calls.createTask).toHaveLength(1));
     expect(calls.createTask[0]).toEqual({ task_id: "new-task", source_path: "/tmp/source.txt" });
+    await waitFor(() => expect(calls.actions.some((call) => call.taskId === "new-task" && call.body.action === "start_read")).toBe(true));
   });
 
-  it("switches selected task by clicking a task card", async () => {
+  it("asks for confirmation before switching selected task", async () => {
     const user = userEvent.setup();
     renderWorkspace();
     await waitForInitialTask();
 
     await user.click(await screen.findByRole("button", { name: "task-beta" }));
+    expect(await screen.findByText("确定切换到任务 task-beta 吗？")).toBeInTheDocument();
+    expect(calls.actions.filter((call) => call.body.action === "select_task")).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => expect(calls.actions.filter((call) => call.body.action === "select_task")).toHaveLength(1));
     expect(calls.actions.find((call) => call.body.action === "select_task")?.body.payload).toEqual({ task_id: "task-beta" });
@@ -74,7 +78,7 @@ describe("Novel Agent Web workspace", () => {
     await waitForInitialTask();
 
     await user.click(await screen.findByLabelText("打开 task-alpha 操作菜单"));
-    await user.click(screen.getByRole("menuitem", { name: "开始粗读" }));
+    await user.click(screen.getByRole("menuitem", { name: "导入原文" }));
 
     await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_read")).toBe(true));
     const actionCall = calls.actions.find((call) => call.body.action === "start_read");
@@ -87,11 +91,11 @@ describe("Novel Agent Web workspace", () => {
     const user = userEvent.setup();
     renderWorkspace();
     await waitForInitialTask();
-    await screen.findByText("Close-read 总览");
+    await screen.findByText("阅读总览");
     const initialArtifactViewCalls = calls.artifactViews.length;
 
     await user.click(await screen.findByLabelText("打开 task-alpha 操作菜单"));
-    await user.click(screen.getByRole("menuitem", { name: "运行精读" }));
+    await user.click(screen.getByRole("menuitem", { name: "开始阅读" }));
 
     await waitFor(() => expect(calls.artifactViews.length).toBeGreaterThan(initialArtifactViewCalls));
   });
@@ -100,9 +104,9 @@ describe("Novel Agent Web workspace", () => {
     setTaskActiveJob("task-alpha");
     renderWorkspace();
     await waitForInitialTask();
-    await screen.findByText("Close-read 总览");
+    await screen.findByText("阅读总览");
 
-    await screen.findByText("粗读进度已更新");
+    await screen.findByText("导入原文进度已更新");
   });
 
   it("sends natural language to messages endpoint, not commands", async () => {
@@ -180,7 +184,7 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
-    await screen.findByText("Close-read 总览");
+    await screen.findByText("阅读总览");
     expect(screen.queryByText("raw_secret_stage")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "技术详情" }));

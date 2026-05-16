@@ -81,7 +81,7 @@ class _TextualFakeFacade:
         return [self._task("couple"), self._task("longzu-32kb-agentic-12345678")]
 
     def render_task_list(self, *, active_book_id: str = "") -> str:
-        return f"当前任务：\n* {active_book_id or 'couple'} · documents=2 · chapters=1 · 精读完成"
+        return f"当前任务：\n* {active_book_id or 'couple'} · documents=2 · chapters=1 · 阅读完成"
 
     def reset_close_read_task(self, *, book_id: str):  # type: ignore[no-untyped-def]
         self.calls.append("reset_close_read")
@@ -131,7 +131,7 @@ class _TextualFakeFacade:
         if query_type == "character":
             return f"# 人物档案：{book_id}\n\n## {character_name or '沈青'}\n\n已建档人物。"
         if summary_scope == "total":
-            return f"# 当前精读总览：{book_id}\n\n- chapter_count: 2"
+            return f"# 当前阅读总览：{book_id}\n\n- chapter_count: 2"
         if document_title_index is not None:
             return f"# 剧情概括：document {document_title_index}：{book_id}\n\n## [{document_title_index}] 第二章 旧楼"
         return f"# 剧情概括：{book_id}\n\n## [1] 第一章 雨夜\n\n旧案开始。"
@@ -310,7 +310,7 @@ def test_home_screen_is_prompt_first_and_actions_are_split_by_line(tmp_path: Pat
             assert type(app.screen).__name__ == "HomeScreen"
             actions = str(app.screen.query_one("#home-actions-text", Static).render())
             assert "1  选择或创建任务\n2  继续上次会话" in actions
-            assert "6  查看精读产物" in actions
+            assert "6  查看阅读产物" in actions
             assert "8  运行最小续写回归" in actions
             assert "9  开始或恢复 Writer" in actions
             assert app.screen.query_one("#home-prompt", PromptInput).value == ""
@@ -332,7 +332,7 @@ def test_workbench_wide_layout_and_background_events_keep_prompt_stable(tmp_path
             prompt = screen.query_one("#workbench-prompt", PromptInput)
             assert prompt.query_one("#prompt-text", TextArea).size.height >= 5
             prompt.value = "用户仍在编辑"
-            app.session.event_stream.emit("进度", "正在精读章节", payload={"stage": "close_reading"})
+            app.session.event_stream.emit("进度", "正在阅读章节", payload={"stage": "close_reading"})
             screen.refresh_all()
             await pilot.pause()
             assert prompt.value == "用户仍在编辑"
@@ -468,7 +468,7 @@ def test_reset_close_read_command_targets_current_task(tmp_path: Path) -> None:
             screen.handle_command("/reset-close-read")
             await pilot.pause()
             assert "请先选择 task id" not in app.session.messages.render(limit=20)
-            assert "已清空任务 couple 的精读进度" in app.session.messages.render(limit=20)
+            assert "已清空任务 couple 的阅读进度" in app.session.messages.render(limit=20)
             assert "reset_close_read" in app.session.facade.calls  # type: ignore[attr-defined]
 
     _run(scenario())
@@ -488,7 +488,7 @@ def test_close_read_without_task_shows_usage_guidance(tmp_path: Path) -> None:
             rendered = app.session.messages.render(limit=20)
             assert "请先选择 task id" in rendered
             assert "用法：先 /task <task_id> 或 /new-task <task_id> <source_path>，再执行 /close-read [source_path] [--batches N]" in rendered
-            assert "默认跑完全部剩余已粗读 documents" in rendered
+            assert "默认跑完全部剩余已导入 documents" in rendered
 
     _run(scenario())
 
@@ -504,7 +504,7 @@ def test_close_read_without_batches_processes_all_remaining_rough_read_documents
             screen.handle_command("/close-read")
             await pilot.pause()
             rendered = app.session.messages.render(limit=20)
-            assert "全部剩余精读 batch" in rendered
+            assert "全部剩余阅读 batch" in rendered
             assert app.session.facade.last_read_kwargs["max_close_batches"] is None  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["max_read_kb"] == 0  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["build_creative_kb"] is True  # type: ignore[attr-defined]
@@ -523,7 +523,7 @@ def test_close_read_batches_option_controls_work_amount_and_announces_default_bu
             screen.handle_command("/close-read --batches 3")
             await pilot.pause()
             rendered = app.session.messages.render(limit=20)
-            assert "最多 3 个精读 batch" in rendered
+            assert "最多 3 个阅读 batch" in rendered
             assert "约 20000 字文档预算" in rendered
             assert app.session.facade.last_read_kwargs["max_close_batches"] == 3  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["close_step_batches"] == 1  # type: ignore[attr-defined]
@@ -544,7 +544,7 @@ def test_close_read_document_budget_option_controls_batch_size(tmp_path: Path) -
             screen.handle_command("/close-read --batches 2 --document-kb 60")
             await pilot.pause()
             rendered = app.session.messages.render(limit=20)
-            assert "最多 2 个精读 batch" in rendered
+            assert "最多 2 个阅读 batch" in rendered
             assert "约 61440 字文档预算" in rendered
             assert app.session.facade.last_read_kwargs["max_close_batches"] == 2  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["close_document_chars_budget"] == 60 * 1024  # type: ignore[attr-defined]
@@ -565,7 +565,7 @@ def test_read_all_runs_full_rough_read_close_read_and_kb(tmp_path: Path) -> None
             screen.handle_command(f"/read {source_path} --all --document-kb 64")
             await pilot.pause()
             rendered = app.session.messages.render(limit=20)
-            assert "完整粗读原文、精读全部已粗读 documents" in rendered
+            assert "完整导入原文、阅读全部已导入 documents" in rendered
             assert app.session.facade.last_read_kwargs["run_mode"] == "new"  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["max_read_kb"] is None  # type: ignore[attr-defined]
             assert app.session.facade.last_read_kwargs["max_close_batches"] is None  # type: ignore[attr-defined]
@@ -606,7 +606,7 @@ def test_query_summary_command_supports_document_and_total_selectors(tmp_path: P
             await pilot.pause()
             rendered = app.session.messages.render(limit=20)
             assert "# 剧情概括：document 2：couple" in rendered
-            assert "# 当前精读总览：couple" in rendered
+            assert "# 当前阅读总览：couple" in rendered
             assert "query:couple:summary::2:None:document:markdown" in app.session.facade.calls  # type: ignore[attr-defined]
             assert "query:couple:summary::None:None:total:markdown" in app.session.facade.calls  # type: ignore[attr-defined]
 
@@ -923,12 +923,12 @@ def test_textual_close_read_worker_streams_document_progress_before_completion(t
             for _ in range(20):
                 await pilot.pause()
                 rendered = app.session.messages.render(limit=80)
-                if progress_emitted.is_set() and "正在精读：旧楼追踪（doc 7-9）" in rendered:
+                if progress_emitted.is_set() and "正在阅读：旧楼追踪（doc 7-9）" in rendered:
                     break
             else:
                 raise AssertionError(app.session.messages.render(limit=80))
 
-            assert getattr(app.screen, "running_worker_name", "") == "精读建模"
+            assert getattr(app.screen, "running_worker_name", "") == "阅读建模"
             assert "已完成 6/20 documents" in app.session.messages.render(limit=80)
             allow_finish.set()
             for _ in range(20):
@@ -980,10 +980,10 @@ def test_textual_cli_scripted_smoke_covers_read_close_read_queries_and_benchmark
             assert facade.creative_kb_benchmark_runs[-1]["enable_writer_ab"] is True  # type: ignore[attr-defined]
             assert facade.creative_kb_benchmark_runs[-1]["dry_run_model"] is True  # type: ignore[attr-defined]
             assert "已创建并进入任务 smoke" in rendered
-            assert "粗读/精读本轮已完成" in rendered
-            assert "精读建模本轮已完成" in rendered
+            assert "导入原文/阅读本轮已完成" in rendered
+            assert "阅读建模本轮已完成" in rendered
             assert "# 人物档案：smoke" in rendered
-            assert "# 当前精读总览：smoke" in rendered
+            assert "# 当前阅读总览：smoke" in rendered
             assert "综合 Reviewer：CLI 端到端链路通过" in rendered
             assert "Creative KB Benchmark" in rendered
             assert "artifact_dir" in rendered

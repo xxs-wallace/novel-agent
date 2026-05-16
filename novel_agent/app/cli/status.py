@@ -38,17 +38,17 @@ class StatusPresenter:
     )
 
     _READ_STATUS: dict[str, tuple[str, str, str]] = {
-        "source selected": ("粗读", "已选择原文", "开始粗读并切分原文"),
-        "segmentation": ("粗读", "正在粗读并切分原文", "完成后可进入精读"),
-        "segmentation running": ("粗读", "正在粗读并切分原文", "完成后可进入精读"),
-        "documents indexed": ("粗读", "原文已入库", "可以运行精读建模"),
-        "segmentation paused": ("粗读", "粗读已暂停，可稍后继续", "从 checkpoint 继续粗读"),
-        "segmentation failed": ("粗读", "粗读遇到问题", "查看错误并从 checkpoint 重试"),
-        "close_reading": ("精读", "正在精读章节", "整理人物、世界观与大纲"),
-        "memory extraction": ("精读", "正在整理人物、世界观与大纲", "完成后可查看建模状态"),
-        "summary review ready": ("精读", "精读摘要需要检查", "审阅摘要后继续"),
-        "memory ready": ("精读", "精读记忆已可用", "可以构建知识库或开始续写"),
-        "close_read paused": ("精读", "精读已暂停，可稍后继续", "从最近 checkpoint 继续精读"),
+        "source selected": ("导入原文", "已选择原文", "开始导入原文并切分"),
+        "segmentation": ("导入原文", "正在导入原文并切分", "完成后可进入阅读"),
+        "segmentation running": ("导入原文", "正在导入原文并切分", "完成后可进入阅读"),
+        "documents indexed": ("导入原文", "原文已入库", "可以开始阅读建模"),
+        "segmentation paused": ("导入原文", "原文导入已暂停，可稍后继续", "从 checkpoint 继续导入原文"),
+        "segmentation failed": ("导入原文", "导入原文遇到问题", "查看错误并从 checkpoint 重试"),
+        "close_reading": ("阅读", "正在阅读章节", "整理人物、世界观与大纲"),
+        "memory extraction": ("阅读", "正在整理人物、世界观与大纲", "完成后可查看建模状态"),
+        "summary review ready": ("阅读", "阅读摘要需要检查", "审阅摘要后继续"),
+        "memory ready": ("阅读", "阅读记忆已可用", "可以构建知识库或开始续写"),
+        "close_read paused": ("阅读", "阅读已暂停，可稍后继续", "从最近 checkpoint 继续阅读"),
     }
 
     _WRITER_STATUS: dict[str, tuple[str, str, str]] = {
@@ -57,7 +57,7 @@ class StatusPresenter:
         "pending": ("Writer 分层生成", "等待你确认", "确认后继续下一步"),
         "confirmed": ("Writer 分层生成", "已确认，继续下一步", "系统会进入后续生成阶段"),
         "needs_review": ("Writer 分层生成", "需要审阅", "审阅并确认后继续"),
-        "blocked_by_modeling": ("Writer 分层生成", "前置建模未完成", "返回粗读、精读或知识库流程补齐材料"),
+        "blocked_by_modeling": ("Writer 分层生成", "前置建模未完成", "返回导入原文、阅读或知识库流程补齐材料"),
         "initialized": ("Writer 分层生成", "写作流程已初始化", "下一步生成全书续写规划"),
         "outline_research_user_input": ("Writer 分层生成", "需要你补充几个关键问题", "回答后继续大纲研究"),
         "outline_research_blocked": ("Writer 分层生成", "前置建模不足", "先补齐建模材料再继续"),
@@ -266,7 +266,7 @@ class StatusPresenter:
         if status in self._KB_STATUS:
             return self._KB_STATUS[status]
         if not status:
-            return ("工作台", "等待你选择下一步", "可以查看状态、粗读、精读、构建知识库或开始续写")
+            return ("工作台", "等待你选择下一步", "可以查看状态、导入原文、阅读、构建知识库或开始续写")
         return ("工作台", "正在处理当前步骤", "查看技术详情或稍后重试")
 
     def _sanitize(self, text: str) -> str:
@@ -285,12 +285,12 @@ class StatusPresenter:
     def _runner_progress_message(self, payload: Mapping[str, Any]) -> str:
         stage = str(payload.get("stage") or payload.get("agent") or "").strip()
         if stage == "segmentation":
-            return "正在粗读并切分原文"
+            return "正在导入原文并切分"
         if stage == "close_reading":
             indexes = payload.get("document_title_indexes")
             if isinstance(indexes, list) and indexes:
-                return f"正在精读章节 {indexes[0]}-{indexes[-1]}"
-            return "正在精读章节"
+                return f"正在阅读章节 {indexes[0]}-{indexes[-1]}"
+            return "正在阅读章节"
         if stage == "creative_kb":
             return "正在构建 Creative KB"
         return "正在处理当前步骤"

@@ -75,11 +75,11 @@ class WebSessionService:
 
     def reset_close_read(self, *, task_id: str) -> WebActionResult:
         result = dict(self.facade.reset_close_read_task(book_id=task_id))
-        self.append_message(task_id, role="assistant", content="已清空精读进度，可以重新运行精读。", payload=result)
+        self.append_message(task_id, role="assistant", content="已清空阅读进度，可以重新开始阅读。", payload=result)
         return WebActionResult(
             action="reset_close_read",
             task_id=task_id,
-            message="已清空精读进度，可以重新运行精读。",
+            message="已清空阅读进度，可以重新开始阅读。",
             payload={"deleted": result.get("deleted", {})},
             progress=self.task_progress(task_id),
         )

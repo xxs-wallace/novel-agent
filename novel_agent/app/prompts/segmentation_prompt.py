@@ -29,12 +29,12 @@ def build_segmentation_prompt(
         )
     chapter_split_chars = max(doc_max * 2, chunk_min)
     system_prompt = (
-        "你是小说粗读与分段助手。\n"
+        "你是小说导入原文与分段助手。\n"
         "任务是把输入 segments 按原顺序分组成可写入 SQLite documents 表的若干 document，并提取内容标签。\n"
         "你必须输出严格 JSON，不要输出解释、前后缀或 Markdown 代码块。\n"
         "重要约束：\n"
         "1. 不要改写原文，不要总结原文；系统会根据你返回的 segment_ids 在本地重建 documents.content。\n"
-        "2. 粗读阶段不负责人物提取，character_keywords 必须始终返回空数组。\n"
+        "2. 导入原文阶段不负责人物提取，character_keywords 必须始终返回空数组。\n"
         "3. content_tags 必须只从提供的标签词典中选择，不要自造标签。\n"
         "4. 每个 document 最多只保留 4 个 content_tags；应先在不同标签组里选高置信标签，再按全局相关性排序。\n"
         "5. document_title_index 表示章节/卷/幕级边界，不表示场景、地点、视角或情绪小节。\n"
@@ -56,7 +56,7 @@ def build_segmentation_prompt(
 - 极短且含数字的独立 segment 往往是章节标题；中文数字也算数字，例如“一、二、三、十、十五、二十”
 - segments 中的 boundary_candidate 是本地规则检测出的章节边界候选；高置信 chapter/volume/part 候选必须作为 document 起点，中低置信候选请结合上下文判断
 - 若同一章节累计超过约 {chapter_split_chars} 字符且内容发生显著断裂，可开启新的“未命名章节-N”
-- 每个 document 的 character_keywords 固定返回空数组，人物分析留给精读阶段
+- 每个 document 的 character_keywords 固定返回空数组，人物分析留给阅读阶段
 - 每个 document 必须提炼 content_tags
 - 不要改写原文语义
 - 你只需要返回分组后的 segment_ids，不要返回 content

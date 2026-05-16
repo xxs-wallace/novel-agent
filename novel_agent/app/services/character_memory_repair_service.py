@@ -9,7 +9,6 @@ from typing import Any, Callable
 
 from ..constants import DEFAULT_CLOSE_READING_STAGE
 from ..llm import JsonModelClient, ModelSettings
-from ..prompts.character_evidence_prompt import build_character_evidence_prompt
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
@@ -19,7 +18,9 @@ from ..repos.reading_progress_repo import ReadingProgressRepo
 from ..runner.close_read_runner import CloseReadRunner
 from ..schemas.config_schema import CloseReadAgentConfig
 from .chapter_assembler_service import SPLIT_REASON_FULL_CHAPTER, SPLIT_REASON_OVER_BUDGET, ChapterBatch
+from .character_canonical_name_service import CharacterCanonicalNameService
 from .character_profile_service import CharacterProfileService
+from .character_roster_service import CharacterRosterService
 from .outline_service import OutlineService
 from .world_state_service import WorldStateService
 
@@ -85,6 +86,8 @@ class CharacterMemoryRepairService:
         chapters_repo = ChaptersRepo()
         profiles_repo = CharacterProfilesRepo()
         profile_service = CharacterProfileService(profiles_repo=profiles_repo)
+        canonical_name_service = CharacterCanonicalNameService(profiles_repo=profiles_repo)
+        roster_service = CharacterRosterService(profiles_repo=profiles_repo)
         db = NovelAgentDB(self.db_path)
         run_id = uuid.uuid4().hex
 
@@ -119,14 +122,17 @@ class CharacterMemoryRepairService:
                         "last_doc_id": batch.documents[-1].doc_id,
                     }
                 )
-                prompt_input = runner._prepare_extraction(  # noqa: SLF001
+                prepared = runner._prepare_extraction(  # noqa: SLF001
                     conn=conn,
                     batch=batch,
                     outline_path=outline_path,
                     world_summary_path=world_summary_path,
                     profile_service=profile_service,
-                ).prompt_input
-                prompt_dict = prompt_input.to_dict()
+                    roster_service=roster_service,
+                )
+                prompt_dict = prepared.prompt_input.to_dict()
+                prompt_dict["existing_character_roster"] = prepared.existing_character_roster
+                prompt_dict["full_existing_character_roster"] = prepared.full_existing_character_roster
                 summary_payload = self._summary_payload(conn, chapters_repo=chapters_repo, batch=batch)
                 evidence_payload = self._run_character_evidence(
                     runner=runner,
@@ -151,6 +157,8 @@ class CharacterMemoryRepairService:
                     documents_repo=documents_repo,
                     chapters_repo=chapters_repo,
                     profile_service=profile_service,
+                    canonical_name_service=canonical_name_service,
+                    model_client=model_client,
                 )
                 conn.commit()
                 result.processed_batches += 1
@@ -211,18 +219,10 @@ class CharacterMemoryRepairService:
                         int(doc.doc_id),
                         doc_batch,
                         executor.submit(
-                            runner._generate_agent_payload,  # noqa: SLF001
+                            runner._generate_character_evidence_payload,  # noqa: SLF001
                             model_client=model_client,
                             batch=doc_batch,
-                            prompt_input=runner._build_character_evidence_input(  # noqa: SLF001
-                                batch=doc_batch,
-                                prompt_input=prompt_dict,
-                            ),
-                            agent_name="character_evidence",
-                            prompt_builder=build_character_evidence_prompt,
-                            fallback_factory=lambda doc_batch=doc_batch: runner._fallback_character_evidence_output(  # noqa: SLF001
-                                doc_batch
-                            ),
+                            prompt_input=prompt_dict,
                         ),
                     )
                 )
@@ -250,6 +250,8 @@ class CharacterMemoryRepairService:
         documents_repo: DocumentsRepo,
         chapters_repo: ChaptersRepo,
         profile_service: CharacterProfileService,
+        canonical_name_service: CharacterCanonicalNameService,
+        model_client: JsonModelClient,
     ) -> None:
         document_mentions = runner._normalize_document_character_mentions(  # noqa: SLF001
             batch=batch,
@@ -310,6 +312,12 @@ class CharacterMemoryRepairService:
                 }
                 for name in mentioned_characters
             ]
+        raw_character_updates = canonical_name_service.resolve_updates(
+            conn,
+            book_id=self.config.book_id,
+            model_client=model_client,
+            updates=raw_character_updates,
+        )
         profile_service.merge_updates(
             conn,
             book_id=self.config.book_id,

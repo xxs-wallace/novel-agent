@@ -18,6 +18,9 @@ class CharacterEvidenceBatch:
     documents: list[dict[str, object]] = field(default_factory=list)
     document_separator_hint: str = "[DOC doc_id=<id> title_index=<index> title=<title>] ... [/DOC]"
     existing_context_summary: str = ""
+    existing_character_roster: list[dict[str, object]] = field(default_factory=list)
+    character_roster_scope: str = "recent_32"
+    can_request_full_roster: bool = False
 
     @property
     def total_chars(self) -> int:
@@ -45,7 +48,11 @@ class CharacterEvidenceBatchAssemblerService:
         documents: list[DocumentRow],
         existing_context_summary: str = "",
         local_character_hints: dict[int, list[str]] | None = None,
+        existing_character_roster: list[dict[str, object]] | None = None,
+        character_roster_scope: str = "recent_32",
+        can_request_full_roster: bool = False,
     ) -> CharacterEvidenceBatch:
+        _ = local_character_hints
         selected = self._select_documents_within_budget(documents)
         if not selected:
             raise ValueError("Character evidence batch requires at least one document")
@@ -65,12 +72,14 @@ class CharacterEvidenceBatchAssemblerService:
                     "doc_id": int(doc.doc_id),
                     "document_title_index": int(doc.document_title_index),
                     "document_title": str(doc.document_title),
-                    "local_character_hints": list((local_character_hints or {}).get(int(doc.doc_id), [])),
                     "content_chars": int(doc.content_chars),
                 }
                 for doc in selected
             ],
             existing_context_summary=clamp_text(existing_context_summary, 1500),
+            existing_character_roster=list(existing_character_roster or []),
+            character_roster_scope=str(character_roster_scope or "recent_32"),
+            can_request_full_roster=bool(can_request_full_roster),
         )
 
     def to_prompt_input(self, *, batch: CharacterEvidenceBatch) -> dict[str, object]:

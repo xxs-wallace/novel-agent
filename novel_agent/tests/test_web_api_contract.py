@@ -124,8 +124,8 @@ def test_task_status_shows_active_close_read_job_instead_of_paused_checkpoint(tm
 
     assert status.status_code == 200
     payload = status.json()
-    assert payload["flow"] == "精读"
-    assert payload["step"] == "正在精读章节"
+    assert payload["flow"] == "阅读"
+    assert payload["step"] == "正在阅读章节"
     assert payload["next_action"] == "整理人物、世界观与大纲"
 
     tasks = client.get("/api/tasks")
@@ -194,7 +194,7 @@ def test_delete_task_defaults_to_dry_run(tmp_path: Path) -> None:
 
 def test_start_read_action_runs_real_facade_pipeline(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     source_path = tmp_path / "source.txt"
-    source_path.write_text("第一章\n\n一个可供粗读的段落。", encoding="utf-8")
+    source_path.write_text("第一章\n\n一个可供导入的段落。", encoding="utf-8")
     calls: list[dict[str, object]] = []
 
     class _FakeFacade:
@@ -232,7 +232,7 @@ def test_start_read_action_runs_real_facade_pipeline(tmp_path: Path, monkeypatch
 
         def start_read_pipeline(self, **kwargs):  # type: ignore[no-untyped-def]
             calls.append(kwargs)
-            self.event_stream.emit("系统", "粗读/精读本轮已完成", payload={"inserted_documents": 1})
+            self.event_stream.emit("系统", "导入原文/阅读本轮已完成", payload={"inserted_documents": 1})
             return {"inserted_documents": 1, "segmentation_batches": 1}
 
     source_path_file = source_path
@@ -261,7 +261,7 @@ def test_start_read_action_runs_real_facade_pipeline(tmp_path: Path, monkeypatch
             ensure_ascii=False,
             default=str,
         )
-        assert "粗读/精读本轮已完成" in rendered
+        assert "导入原文/阅读本轮已完成" in rendered
         assert "inserted_documents" in rendered
 
     asyncio.run(run_action())
@@ -277,7 +277,7 @@ def test_start_read_action_runs_real_facade_pipeline(tmp_path: Path, monkeypatch
 
 def test_start_read_action_reads_entire_source_by_default(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     source_path = tmp_path / "source.txt"
-    source_path.write_text("第一章\n\n一个需要完整粗读的段落。", encoding="utf-8")
+    source_path.write_text("第一章\n\n一个需要完整导入的段落。", encoding="utf-8")
     calls: list[dict[str, object]] = []
 
     class _FakeFacade:
@@ -343,7 +343,7 @@ def test_start_read_action_reads_entire_source_by_default(tmp_path: Path, monkey
 
 def test_start_close_read_action_runs_all_remaining_by_default(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     source_path = tmp_path / "source.txt"
-    source_path.write_text("第一章\n\n一个可供精读的段落。", encoding="utf-8")
+    source_path.write_text("第一章\n\n一个可供阅读的段落。", encoding="utf-8")
     calls: list[dict[str, object]] = []
 
     class _FakeFacade:

@@ -51,7 +51,7 @@ def test_query_close_read_outputs_total_summary(tmp_path: Path, capsys) -> None:
     assert main(["demo-task", "summary", "--repo-root", str(tmp_path), "--summary-scope", "total"]) == 0
 
     output = capsys.readouterr().out
-    assert "# 当前精读总览：demo-task" in output
+    assert "# 当前阅读总览：demo-task" in output
     assert "chapter_count: 2" in output
     assert "[1] 第一章 雨夜: 沈青在雨夜继续追查旧案。" in output
     assert "[2] 第二章 旧楼: 林白在旧楼找到新的证词。" in output

@@ -40,8 +40,8 @@ def test_status_presenter_translates_internal_writer_and_read_states() -> None:
     assert "请验收当前章节" in rendered
     assert "请审阅本批剧情大纲" in rendered
     assert "已保存你的修改" in rendered
-    assert "正在粗读并切分原文" in rendered
-    assert "精读记忆已可用" in rendered
+    assert "正在导入原文并切分" in rendered
+    assert "阅读记忆已可用" in rendered
     for token in presenter.FORBIDDEN_PUBLIC_TOKENS:
         assert token not in rendered
 
@@ -122,7 +122,7 @@ def test_run_event_stream_summarizes_close_read_document_progress() -> None:
     )
 
     rendered = stream.events()[0].message
-    assert "精读 batch 2 完成" in rendered
+    assert "阅读 batch 2 完成" in rendered
     assert "doc 4-6" in rendered
     assert "已完成 6/20 documents" in rendered
 
@@ -426,13 +426,13 @@ def test_command_router_supports_slash_commands_palette_and_context_filtering() 
     )
     assert router.parse("/confirm", context).handler_name == "confirm_current_step"
     assert router.parse("\x10", context).handler_name == "show_command_palette"
-    assert "/read  导入或继续粗读原文；/read --all 完整粗读、精读并更新 KB" in router.render_panel(context)
+    assert "/read  导入或继续原文；/read --all 完整导入原文、阅读并更新 KB" in router.render_panel(context)
     assert "/delete-task  删除任务及本地建模产物" in router.render_panel(context)
-    assert "/close-read  运行精读；用法 /close-read [source_path] [--batches N]" in router.render_panel(context)
+    assert "/close-read  开始阅读；用法 /close-read [source_path] [--batches N]" in router.render_panel(context)
     assert "/benchmark  运行端到端 Agentic benchmark" in router.render_panel(context)
     assert "/creative-kb-benchmark  运行 Creative KB Benchmark" in router.render_panel(context)
     assert "--document-kb KB" in router.render_panel(context)
-    assert "默认跑完全部剩余已粗读 documents" in router.render_panel(context)
+    assert "默认跑完全部剩余已导入 documents" in router.render_panel(context)
     panel = router.command_panel(context)
     assert "Writer" in panel
     assert any(command.command_id == "save" for command in panel["artifact"])
@@ -654,7 +654,7 @@ def _fake_agentic_smoke_result(tmp_path: Path) -> SimpleNamespace:
     )
     assert "documents=1" in rendered
     assert "chapters=1" in rendered
-    assert "精读完成" in rendered
+    assert "阅读完成" in rendered
     assert str(source_path) in rendered
 
 
@@ -693,8 +693,8 @@ def test_task_list_infers_segmentation_progress_from_source_offset(tmp_path: Pat
 
     rendered = facade.render_task_list(active_book_id="couple")
 
-    assert "粗读至 doc 2/2" in rendered
-    assert "精读完成" in rendered
+    assert "导入原文至 doc 2/2" in rendered
+    assert "阅读完成" in rendered
 
 
 def test_workflow_facade_reset_close_read_keeps_documents_and_clears_progress(tmp_path: Path) -> None:
@@ -864,7 +864,7 @@ class _FakeFacade:
             (),
             {
                 "close_read_ready": True,
-                "ready_map": lambda _self: {"原文": True, "精读记忆": True, "桥段 KB": True},
+                "ready_map": lambda _self: {"原文": True, "阅读记忆": True, "桥段 KB": True},
             },
         )()
 
@@ -907,7 +907,7 @@ def test_read_to_writer_minimal_path_in_one_tui_session(tmp_path: Path) -> None:
     )
 
     snapshot = facade.modeling_status(book_id="couple")
-    assert snapshot.ready_map()["精读记忆"] is True
+    assert snapshot.ready_map()["阅读记忆"] is True
     writer_result = facade.start_writer(book_id="couple")
     app.set_status(writer_result["checkpoint"]["stage"])
 

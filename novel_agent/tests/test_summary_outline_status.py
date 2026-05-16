@@ -16,6 +16,8 @@ from novel_agent.app.services.chapter_assembler_service import ChapterBatch
 from novel_agent.app.services.character_mention_service import CharacterMentionService
 from novel_agent.app.services.character_profile_service import CharacterProfileService
 from novel_agent.app.services.context_assembly_service import ContextAssemblyService
+from novel_agent.app.services.chapter_event_list_service import ChapterEventListService
+from novel_agent.app.services.chapter_event_summary_service import ChapterEventSummaryService
 from novel_agent.app.services.outline_event_summary_service import OutlineEventSummaryService
 from novel_agent.app.services.outline_research_service import OutlineSeedPacketBuilder
 from novel_agent.app.services.outline_service import OutlineService
@@ -150,6 +152,266 @@ def test_close_read_outline_events_record_source_doc_range() -> None:
     assert fallback_outline_update["timeline_events"][0]["participants"] == ["路明非", "楚子航"]
 
 
+def test_close_read_outline_event_summary_uses_full_plot_chain_without_excerpt() -> None:
+    runner = object.__new__(CloseReadRunner)
+    runner.character_mention_service = CharacterMentionService()
+    batch = SimpleNamespace(
+        document_title_index=3,
+        chapter_title="第三章",
+        documents=[
+            SimpleNamespace(doc_id=10, document_title_index=3),
+            SimpleNamespace(doc_id=11, document_title_index=3),
+        ],
+    )
+    summary_md = "\n".join(
+        [
+            "## 摘要元信息",
+            "- 章节索引：3",
+            "## 剧情事件链",
+            "- 调查员接到新线索，重新梳理前一晚的行动顺序。",
+            "- 同伴补充关键证词，使队伍确认事件并非偶然。",
+            "- " + "后续行动持续推进，新的证据逐步连接到同一个核心冲突。" * 6,
+            "## 人物状态/关系变化",
+            "- 队伍内部从迟疑转为协作。",
+            "## 关键信息/设定",
+            "- 证据链需要继续核验。",
+            "## 结构功能/节奏",
+            "- 本章把线索从分散状态推进为可追踪链条。",
+        ]
+    )
+
+    event_summary = runner._flatten_summary_event_chain(summary_md)  # noqa: SLF001
+    outline_update = runner._enrich_outline_update_with_sources(  # noqa: SLF001
+        batch=batch,
+        outline_update={},
+        summary_short="调查员接到新线索...",
+        event_summary=event_summary,
+    )
+
+    assert len(event_summary) > 120
+    assert event_summary.endswith("核心冲突。")
+    assert "- " not in event_summary
+    assert outline_update["event_summary"] == event_summary
+    assert outline_update["timeline_events"][0]["summary"] == event_summary
+
+
+def test_chapter_event_summary_service_uses_summary_md_compression_prompt() -> None:
+    class _EventSummaryModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = fallback_factory, use_fallback_on_error
+            assert "Chapter Event Summary Agent" in system_prompt
+            assert "summary_md" in user_prompt
+            assert "chapter_event_list" in user_prompt
+            return (
+                {
+                    "event_summary": (
+                        "调查员接到线索后重新串联前夜行动，同伴补充证词让队伍确认事件并非偶然，"
+                        "后续证据把分散线索指向同一核心冲突。"
+                    ),
+                    "compression_notes": "保留起因、协作、转折和结果。",
+                },
+                "",
+            )
+
+    summary_md = "\n".join(
+        [
+            "## 剧情事件链",
+            "- 起点：调查员接到新线索，重新梳理前一晚的行动顺序。",
+            "- 触发：同伴补充关键证词，使队伍确认事件并非偶然。",
+            "- 行动/冲突：" + "后续行动持续推进，新的证据逐步连接到同一个核心冲突。" * 5,
+            "## 人物状态/关系变化",
+            "- 队伍内部从迟疑转为协作。",
+            "## 关键信息/设定",
+            "- 证据链需要继续核验。",
+            "## 结构功能/节奏",
+            "- 本章把线索从分散状态推进为可追踪链条。",
+        ]
+    )
+
+    event_summary = ChapterEventSummaryService(model_client=_EventSummaryModel()).summarize(
+        book_id="book",
+        document_title_index=3,
+        chapter_title="第三章",
+        summary_md=summary_md,
+        chapter_summary_short="调查员接到新线索。",
+        source_doc_range="10-11",
+        chapter_event_list=[{"label": "线索串联", "summary": "调查员接到线索并串联前夜行动。"}],
+    )
+
+    assert event_summary.startswith("调查员接到线索后")
+    assert "后续证据" in event_summary
+    assert not event_summary.endswith("...")
+
+
+def test_chapter_event_list_service_uses_summary_md_prompt_and_returns_events() -> None:
+    class _EventListModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = fallback_factory, use_fallback_on_error
+            assert "Chapter Event List Agent" in system_prompt
+            assert "summary_md" in user_prompt
+            assert "existing_timeline_events" in user_prompt
+            return (
+                {
+                    "chapter_line": "[3] 第三章: 调查线索被重新串联。",
+                    "timeline_events": [
+                        {
+                            "label": "线索重启",
+                            "participants": ["调查员"],
+                            "summary": "调查员接到新线索后重新梳理前夜行动顺序。",
+                        },
+                        {
+                            "label": "证词确认",
+                            "participants": ["同伴"],
+                            "summary": "同伴补充关键证词，使队伍确认事件并非偶然。",
+                        },
+                    ],
+                },
+                "",
+            )
+
+    outline_update = ChapterEventListService(model_client=_EventListModel()).build_outline_update(
+        book_id="book",
+        document_title_index=3,
+        chapter_title="第三章",
+        summary_md="## 剧情事件链\n- 起点：调查员接到新线索。\n- 触发：同伴补充关键证词。",
+        chapter_summary_short="调查线索被重新串联。",
+        source_doc_range="10-11",
+    )
+
+    assert outline_update["chapter_line"] == "[3] 第三章: 调查线索被重新串联。"
+    assert [event["label"] for event in outline_update["timeline_events"]] == ["线索重启", "证词确认"]
+    assert outline_update["timeline_events"][0]["participants"] == ["调查员"]
+
+
+def test_chapter_event_list_fallback_compresses_plot_chain_into_timeline_events() -> None:
+    outline_update = ChapterEventListService(model_client=None).build_outline_update(
+        book_id="book",
+        document_title_index=3,
+        chapter_title="第三章",
+        summary_md=(
+            "## 剧情事件链\n"
+            "- 起点：调查员接到新线索，重新梳理前一晚的行动顺序。\n"
+            "- 触发：同伴补充关键证词，使队伍确认事件并非偶然。\n"
+            "- 结果：队伍决定分头追踪证人与幕后联系人。\n"
+            "## 结构功能/节奏\n"
+            "- 本章把线索从分散状态推进为可追踪链条。"
+        ),
+        chapter_summary_short="调查线索被重新串联。",
+    )
+
+    assert outline_update["timeline_events"]
+    assert len(outline_update["timeline_events"]) == 3
+    assert outline_update["timeline_events"][0]["summary"].startswith("调查员接到新线索")
+    assert not outline_update["timeline_events"][0]["summary"].endswith("...")
+
+
+def test_close_read_generates_event_list_then_event_summary_from_summary_md() -> None:
+    calls: list[str] = []
+
+    class _EventModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = fallback_factory, use_fallback_on_error
+            if "Chapter Event List Agent" in system_prompt:
+                calls.append("event_list")
+                assert "summary_md" in user_prompt
+                return (
+                    {
+                        "chapter_line": "[3] 第三章: 调查线索被重新串联。",
+                        "timeline_events": [
+                            {
+                                "label": "线索重启",
+                                "participants": ["调查员"],
+                                "summary": "调查员接到新线索后重新梳理前夜行动顺序。",
+                            },
+                            {
+                                "label": "证词确认",
+                                "participants": ["同伴"],
+                                "summary": "同伴补充关键证词，使队伍确认事件并非偶然。",
+                            },
+                        ],
+                    },
+                    "",
+                )
+            if "Chapter Event Summary Agent" in system_prompt:
+                calls.append("event_summary")
+                assert "chapter_event_list" in user_prompt
+                assert "线索重启" in user_prompt
+                return (
+                    {
+                        "event_summary": "调查员接到新线索后重启前夜行动梳理，同伴证词进一步确认事件并非偶然。",
+                        "compression_notes": "由事件列表压缩。",
+                    },
+                    "",
+                )
+            raise AssertionError(system_prompt)
+
+    runner = object.__new__(CloseReadRunner)
+    runner.config = SimpleNamespace(book_id="book")
+    runner._emit_progress = lambda event: None  # noqa: SLF001
+    batch = SimpleNamespace(
+        document_title_index=3,
+        chapter_title="第三章",
+        title_indexes=[3],
+        documents=[
+            SimpleNamespace(doc_id=10, document_title_index=3),
+            SimpleNamespace(doc_id=11, document_title_index=3),
+        ],
+        total_chars=2000,
+    )
+    summary_md = "## 剧情事件链\n- 起点：调查员接到新线索。\n- 触发：同伴补充关键证词。"
+
+    outline_update = runner._generate_chapter_event_list(  # noqa: SLF001
+        model_client=_EventModel(),
+        batch=batch,
+        summary_md=summary_md,
+        summary_short="调查线索被重新串联。",
+        outline_update={},
+    )
+    event_summary = runner._generate_chapter_event_summary(  # noqa: SLF001
+        model_client=_EventModel(),
+        batch=batch,
+        summary_md=summary_md,
+        summary_short="调查线索被重新串联。",
+        outline_update=outline_update,
+    )
+
+    assert calls == ["event_list", "event_summary"]
+    assert [event["label"] for event in outline_update["timeline_events"]] == ["线索重启", "证词确认"]
+    assert event_summary.startswith("调查员接到新线索后")
+
+
+def test_chapter_event_summary_fallback_is_not_mechanical_excerpt() -> None:
+    summary_md = "\n".join(
+        [
+            "## 剧情事件链",
+            "- 起点：调查员接到新线索，重新梳理前一晚的行动顺序。",
+            "- 触发：同伴补充关键证词，使队伍确认事件并非偶然。",
+            "- 行动/冲突：" + "后续行动持续推进，新的证据逐步连接到同一个核心冲突。" * 5,
+            "- 后续铺垫：队伍决定分头追踪证人与幕后联系人。",
+            "## 人物状态/关系变化",
+            "- 队伍内部从迟疑转为协作。",
+        ]
+    )
+
+    event_summary = ChapterEventSummaryService(model_client=None).summarize(
+        book_id="book",
+        document_title_index=3,
+        chapter_title="第三章",
+        summary_md=summary_md,
+        chapter_summary_short="调查员接到新线索...",
+    )
+
+    assert event_summary
+    assert "调查员接到新线索" in event_summary
+    assert not event_summary.endswith("...")
+
+
 def test_outline_service_keeps_split_batch_events_with_same_label(tmp_path: Path) -> None:
     service = OutlineService(repo_root=tmp_path)
 
@@ -228,6 +490,46 @@ def test_close_read_merges_split_outline_updates_by_doc_range() -> None:
     assert len(merged["timeline_events"]) == 2
     assert [event["source_doc_range"] for event in merged["timeline_events"]] == ["67-70", "98-102"]
     assert merged["source_doc_range"] == "67-102"
+
+
+def test_complete_outline_merge_prefers_current_full_event_summary() -> None:
+    runner = object.__new__(CloseReadRunner)
+    full_event_summary = (
+        "完整章节事件链从初始线索、调查推进、人物协作到冲突确认连续展开。"
+        + "后续证据持续补足，使这一章的事件摘要不再依赖 timeline event 的短句。" * 4
+    )
+
+    merged = runner._merge_outline_updates(  # noqa: SLF001
+        existing={
+            "event_summary": "前一批拆分摘要。",
+            "source_doc_ids": [1, 2],
+            "source_title_indexes": [3],
+            "timeline_events": [
+                {
+                    "label": "前批事件",
+                    "summary": "前批短句。",
+                    "source_doc_ids": [1, 2],
+                    "source_doc_range": "1-2",
+                }
+            ],
+        },
+        current={
+            "event_summary": full_event_summary,
+            "source_doc_ids": [3, 4],
+            "source_title_indexes": [3],
+            "timeline_events": [
+                {
+                    "label": "后批事件",
+                    "summary": "后批短句。",
+                    "source_doc_ids": [3, 4],
+                    "source_doc_range": "3-4",
+                }
+            ],
+        },
+        prefer_current_event_summary=True,
+    )
+
+    assert merged["event_summary"] == full_event_summary
 
 
 def test_merged_chapter_summary_preserves_late_split_batches() -> None:

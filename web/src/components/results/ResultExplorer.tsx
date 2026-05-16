@@ -45,7 +45,7 @@ export function ResultExplorer({ selectedTaskId }: ResultExplorerProps) {
       <div className="pane-title-row">
         <div>
           <h2>结果</h2>
-          <p>{selectedTaskId ? "Close-read / Writer" : "请选择任务"}</p>
+          <p>{selectedTaskId ? "阅读 / Writer" : "请选择任务"}</p>
         </div>
       </div>
       <div className="result-tabs" role="tablist" aria-label="结果类型">
@@ -57,7 +57,7 @@ export function ResultExplorer({ selectedTaskId }: ResultExplorerProps) {
           onClick={() => setSurface("close-read")}
         >
           <FileText size={16} aria-hidden="true" />
-          Close-read
+          阅读
         </button>
         <button
           type="button"

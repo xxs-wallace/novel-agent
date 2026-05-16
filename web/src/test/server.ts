@@ -195,11 +195,11 @@ function artifactView(artifactId: string): ArtifactView {
   }
   return {
     artifact_id: artifactId,
-    title: "Close-read 总览",
+    title: "阅读总览",
     kind: "close_read_overview",
     sections: [
       { title: "建模准备度", body: "人物=已完成；世界观=待补齐" },
-      { title: "下一步", body: "查看人物百科或运行精读。" }
+      { title: "下一步", body: "查看人物百科或开始阅读。" }
     ],
     cards: [],
     tables: [],
@@ -252,7 +252,7 @@ function jobEvents(jobId: string): JobEventView[] {
       event_id: "000001",
       job_id: jobId,
       kind: "progress",
-      message: "粗读进度已更新",
+      message: "导入原文进度已更新",
       payload: jobId.includes("start_close_read") ? { stage: "close_reading", event: "batch_done" } : {},
       created_at: now
     }

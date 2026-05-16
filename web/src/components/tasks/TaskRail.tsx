@@ -13,10 +13,11 @@ interface TaskRailProps {
   isBusy?: boolean;
   onCreateTask: (request: CreateTaskRequest) => Promise<unknown>;
   onSelectTask: (taskId: string) => void;
-  onAction: (action: string, payload?: Record<string, unknown>) => void;
+  onAction: (taskId: string, action: string, payload?: Record<string, unknown>) => void;
   onStartWriter: () => void;
   onResetCloseRead: (taskId: string) => Promise<unknown>;
   onDeleteTask: (taskId: string, confirm: boolean) => Promise<DeleteTaskPreview>;
+  onRefresh: () => Promise<unknown> | void;
 }
 
 export function TaskRail({
@@ -29,10 +30,12 @@ export function TaskRail({
   onAction,
   onStartWriter,
   onResetCloseRead,
-  onDeleteTask
+  onDeleteTask,
+  onRefresh
 }: TaskRailProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [deletePreview, setDeletePreview] = useState<{ taskId: string; preview: DeleteTaskPreview } | null>(null);
+  const [pendingSwitchTaskId, setPendingSwitchTaskId] = useState("");
 
   async function previewDelete(taskId: string) {
     const preview = await onDeleteTask(taskId, false);
@@ -49,9 +52,30 @@ export function TaskRail({
 
   function selectTask(taskId: string) {
     if (taskId === selectedTaskId) {
+      setPendingSwitchTaskId("");
       return;
     }
-    onSelectTask(taskId);
+    if (!selectedTaskId) {
+      onSelectTask(taskId);
+      return;
+    }
+    setPendingSwitchTaskId(taskId);
+  }
+
+  function confirmTaskSwitch() {
+    if (!pendingSwitchTaskId) {
+      return;
+    }
+    onSelectTask(pendingSwitchTaskId);
+    setPendingSwitchTaskId("");
+  }
+
+  function startWriterForTask(taskId: string) {
+    if (taskId !== selectedTaskId) {
+      setPendingSwitchTaskId(taskId);
+      return;
+    }
+    onStartWriter();
   }
 
   function selectTaskFromButton(event: MouseEvent<HTMLButtonElement>, taskId: string) {
@@ -66,14 +90,33 @@ export function TaskRail({
           <h1>任务</h1>
           <p>{isLoading ? "加载中" : `${tasks.length} 个任务`}</p>
         </div>
-        <button type="button" className="primary-icon-button" onClick={() => setCreateOpen(true)} aria-label="快速创建任务">
-          <Plus size={18} aria-hidden="true" />
-        </button>
+        <div className="rail-header-actions">
+          <button type="button" className="icon-button" onClick={() => void onRefresh()} aria-label="刷新任务进度" disabled={isLoading}>
+            <RefreshCw size={17} aria-hidden="true" />
+          </button>
+          <button type="button" className="primary-icon-button" onClick={() => setCreateOpen(true)} aria-label="快速创建任务">
+            <Plus size={18} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <button type="button" className="wide-primary-button" onClick={() => setCreateOpen(true)}>
         创建任务
       </button>
+
+      {pendingSwitchTaskId ? (
+        <div className="task-switch-prompt" role="status" aria-live="polite">
+          <p>确定切换到任务 {pendingSwitchTaskId} 吗？</p>
+          <div>
+            <button type="button" className="secondary-button" onClick={() => setPendingSwitchTaskId("")}>
+              取消
+            </button>
+            <button type="button" className="primary-button" onClick={confirmTaskSwitch} disabled={isBusy}>
+              切换
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="task-list" aria-live="polite">
         {tasks.length === 0 && !isLoading ? <div className="empty-state">还没有任务。</div> : null}
@@ -96,8 +139,8 @@ export function TaskRail({
                 <TaskActionMenu
                   taskId={task.task_id}
                   disabled={isBusy}
-                  onAction={(action, payload) => onAction(action, payload)}
-                  onStartWriter={onStartWriter}
+                  onAction={(action, payload) => onAction(task.task_id, action, payload)}
+                  onStartWriter={() => startWriterForTask(task.task_id)}
                   onResetCloseRead={() => void onResetCloseRead(task.task_id)}
                   onDeletePreview={() => void previewDelete(task.task_id)}
                 />
@@ -107,8 +150,8 @@ export function TaskRail({
               </p>
               {badge ? <span className="blocking-badge">{badge}</span> : null}
               <div className="progress-stack">
-                <ProgressLine label="粗读" value={readPct} detail={`${task.read_completed}/${task.total_documents || 0}`} />
-                <ProgressLine label="精读" value={closeReadPct} detail={`${task.close_read_completed}/${task.total_documents || 0}`} />
+                <ProgressLine label="导入原文" value={readPct} detail={`${task.read_completed}/${task.total_documents || 0}`} />
+                <ProgressLine label="阅读" value={closeReadPct} detail={`${task.close_read_completed}/${task.total_documents || 0}`} />
               </div>
               <div className="task-status-grid">
                 <span>KB</span>
@@ -121,11 +164,6 @@ export function TaskRail({
           );
         })}
       </div>
-
-      <button type="button" className="secondary-button refresh-button" onClick={() => window.location.reload()}>
-        <RefreshCw size={16} aria-hidden="true" />
-        刷新
-      </button>
 
       <CreateTaskDialog open={createOpen} pending={isBusy} onClose={() => setCreateOpen(false)} onSubmit={onCreateTask} />
 

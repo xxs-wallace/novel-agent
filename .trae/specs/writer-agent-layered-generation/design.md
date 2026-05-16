@@ -133,6 +133,17 @@ Memory Query 属于 Writer Prompt Loop 的工具调用能力，而不是只在�
 
 高风险事项，例如终局秘密、主要人物身份、关系跃迁、世界规则突破和新增人物是否成立，不得被模型静默假设。用户补充后的回答应作为 `user_authorized` evidence 进入 planning notebook，再继续一小轮 research 或直接生成大纲。
 
+### Web / Chat UI 协作边界
+
+Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 Writer 层必须输出可绑定的结构化问题集，而不是要求 Web 从自然语言日志中猜测状态。
+
+- 当 sufficiency gate 输出 `needs_user_input` 时，Writer workflow 应暴露 `WriterQuestionSet` 或等价 view payload，包含 `run_id`、`question_set_id`、`stage`、`questions[]`、关联缺口 / artifact 引用和继续 action。
+- 问题集可以落盘为 `outline_research_question_set.json`，也可以嵌入 `sufficiency_decision.json`，但必须能被 Web / CLI / TUI 用同一语义恢复。
+- Web 可以把问题显示成普通 Agent 消息，并把用户回答收集在同一个聊天输入框；但回答消息必须绑定 `question_set_id`，不能作为普通聊天自动推进 workflow。
+- 继续执行必须通过 `continue_after_outline_research_input` 或等价结构化 action。payload 可同时包含自然语言 `answer_text` 和逐题 `user_answers[]`。
+- 若只有 `answer_text`，Writer 层只做最小映射并保留原文；不得编造未回答问题，不得把普通聊天当作用户授权。
+- 用户回答进入 planning notebook 时来源类型为 `user_authorized`，随后 workflow 决定继续一小轮 research、进入 `proceed_with_assumptions`，或生成规划产物。
+
 详细请求格式、`Story Detail Resolver`、事件索引要求和 research budget 见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)。
 
 ## 5. 层级职责
@@ -265,6 +276,7 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 
 - `outline_seed_packet.json`
 - `outline_research_trace.json`
+- `outline_research_question_set.json`
 - `memory_query_trace.json`
 - `memory_query_decision_log.json`
 - `planning_notebook.json`

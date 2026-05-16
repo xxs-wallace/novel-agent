@@ -73,7 +73,7 @@ class ArtifactViewService:
             ready = status.ready_map()
             return ArtifactView(
                 artifact_id=artifact_id,
-                title="Close-read 总览",
+                title="阅读总览",
                 kind="close_read_overview",
                 sections=[
                     ArtifactSection(title="建模准备度", body=self._join_pairs(ready)),
@@ -109,18 +109,10 @@ class ArtifactViewService:
                 ],
             )
         if kind == "outline":
-            return self._markdown_asset_view(
-                artifact_id=artifact_id,
-                title="故事大纲",
-                kind="outline",
-                candidates=[
-                    self.repo_root / ".memory" / "outlines" / f"{task_id}.md",
-                    self.repo_root / ".memory" / "outlines" / f"{task_id}.outline.md",
-                ],
-            )
+            return self._outline_view(artifact_id=artifact_id, task_id=task_id)
         if kind == "source_arc":
             return self._source_arc_view(artifact_id=artifact_id, task_id=task_id)
-        return self._missing_view(artifact_id, "Close-read 产物", kind)
+        return self._missing_view(artifact_id, "阅读产物", kind)
 
     def _writer_view(self, *, artifact_id: str, task_id: str, descriptor: Mapping[str, Any]) -> ArtifactView:
         kind = str(descriptor.get("kind") or "")
@@ -315,6 +307,27 @@ class ArtifactViewService:
             technical_available=True,
         )
 
+    def _outline_view(self, *, artifact_id: str, task_id: str) -> ArtifactView:
+        rows = self._chapter_rows(task_id)
+        markdown = self._outline_markdown_from_chapter_rows(task_id=task_id, rows=rows)
+        if markdown:
+            return ArtifactView(
+                artifact_id=artifact_id,
+                title="故事大纲",
+                kind="outline",
+                markdown=markdown,
+                technical_available=True,
+            )
+        return self._markdown_asset_view(
+            artifact_id=artifact_id,
+            title="故事大纲",
+            kind="outline",
+            candidates=[
+                self.repo_root / ".memory" / "outlines" / f"{task_id}.md",
+                self.repo_root / ".memory" / "outlines" / f"{task_id}.outline.md",
+            ],
+        )
+
     def _book_plan_view(self, artifact_id: str, path: Path) -> ArtifactView:
         payload = self._load_json(path)
         climax = payload.get("climax_plan") if isinstance(payload.get("climax_plan"), Mapping) else {}
@@ -457,6 +470,125 @@ class ArtifactViewService:
             technical_available=True,
         )
 
+    def _outline_markdown_from_chapter_rows(self, *, task_id: str, rows: list[dict[str, Any]]) -> str:
+        if not rows:
+            return ""
+        outline_path = next(
+            (
+                candidate
+                for candidate in [
+                    self.repo_root / ".memory" / "outlines" / f"{task_id}.md",
+                    self.repo_root / ".memory" / "outlines" / f"{task_id}.outline.md",
+                ]
+                if candidate.exists()
+            ),
+            None,
+        )
+        file_sections = self._outline_file_sections(outline_path)
+        lines = ["# 故事大纲", "", "## 主线概览"]
+        lines.extend(file_sections.get("主线概览") or ["- 待补充"])
+        lines.append("")
+        lines.append("## 分章节进度")
+        lines.extend(self._outline_chapter_lines(rows) or ["- 暂无更新"])
+        lines.append("")
+        lines.append("## 关键时间节点")
+        lines.extend(self._outline_timeline_lines(rows) or ["- 暂无更新"])
+        lines.append("")
+        lines.append("## 当前未解问题")
+        lines.extend(file_sections.get("当前未解问题") or ["- 待补充"])
+        return "\n".join(lines).strip() + "\n"
+
+    def _outline_chapter_lines(self, rows: list[dict[str, Any]]) -> list[str]:
+        lines: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            outline_update = self._json_value(row.get("outline_update_json"), {})
+            chapter_line = (
+                str(outline_update.get("chapter_line") or "").strip()
+                if isinstance(outline_update, Mapping)
+                else ""
+            )
+            if not chapter_line:
+                index = row.get("document_title_index")
+                title = str(row.get("chapter_title") or "未命名章节").strip()
+                summary = str(row.get("summary_short") or "").strip()
+                chapter_line = f"[{index}] {title}: {summary}".strip()
+            chapter_line = self._compact_text(chapter_line)
+            key = self._normalized_match_text(chapter_line)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            lines.append(f"- {chapter_line}")
+        return lines
+
+    def _outline_timeline_lines(self, rows: list[dict[str, Any]]) -> list[str]:
+        lines: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            outline_update = self._json_value(row.get("outline_update_json"), {})
+            if not isinstance(outline_update, Mapping):
+                continue
+            raw_events = outline_update.get("timeline_events")
+            events = raw_events if isinstance(raw_events, list) else []
+            if not events and str(outline_update.get("event_summary") or "").strip():
+                events = [
+                    {
+                        "label": f"{row.get('chapter_title') or '章节'}剧情进展",
+                        "summary": outline_update.get("event_summary"),
+                        "source_doc_ids": outline_update.get("source_doc_ids"),
+                        "source_doc_range": outline_update.get("source_doc_range"),
+                    }
+                ]
+            for event in events:
+                if not isinstance(event, Mapping):
+                    continue
+                line = self._render_outline_timeline_event(row=row, event=event)
+                key = self._normalized_match_text(line)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                lines.append(line)
+        return lines
+
+    def _render_outline_timeline_event(self, *, row: Mapping[str, Any], event: Mapping[str, Any]) -> str:
+        summary = self._compact_text(event.get("summary") or event.get("label") or "")
+        label = self._compact_text(event.get("label") or "") or self._compact_text(row.get("chapter_title") or "未命名事件")
+        participants = event.get("participants")
+        participant_text = ",".join(
+            self._compact_text(item)
+            for item in (participants if isinstance(participants, list) else [])
+            if self._compact_text(item)
+        )
+        source_doc_ids = self._safe_int_list(event.get("source_doc_ids"))
+        source_doc_range = self._compact_text(event.get("source_doc_range") or "") or self._doc_range_text(source_doc_ids)
+        source_parts = []
+        event_id = self._compact_text(event.get("event_id") or "")
+        if event_id:
+            source_parts.append(f"事件：{event_id}")
+        if source_doc_range:
+            source_parts.append(f"documents：{source_doc_range}")
+        source_text = f" | {' | '.join(source_parts)}" if source_parts else ""
+        return f"- {label} | 人物：{participant_text} | {summary}{source_text}".rstrip()
+
+    def _outline_file_sections(self, path: Path | None) -> dict[str, list[str]]:
+        sections = {"主线概览": [], "当前未解问题": []}
+        if path is None:
+            return sections
+        current: str | None = None
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.rstrip()
+            if line.startswith("## "):
+                heading = line[3:].strip()
+                current = heading if heading in sections else None
+                continue
+            if current is None:
+                continue
+            text = self._compact_text(line)
+            if not text or text in {"- 暂无更新", "- 待补充"}:
+                continue
+            sections[current].append(text if text.startswith("- ") else f"- {text}")
+        return sections
+
     def _chapter_rows(self, task_id: str) -> list[dict[str, Any]]:
         db_path = self.facade.db_path_for_book(task_id)
         if not db_path.exists():
@@ -522,6 +654,28 @@ class ArtifactViewService:
         if total_chars is not None:
             parts.append(f"{total_chars} 字")
         return "；".join(parts)
+
+    def _safe_int_list(self, value: object) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        cleaned: set[int] = set()
+        for item in value:
+            try:
+                cleaned.add(int(item))
+            except (TypeError, ValueError):
+                continue
+        return sorted(cleaned)
+
+    def _doc_range_text(self, doc_ids: list[int]) -> str:
+        if not doc_ids:
+            return ""
+        return str(doc_ids[0]) if len(doc_ids) == 1 else f"{doc_ids[0]}-{doc_ids[-1]}"
+
+    def _compact_text(self, value: object) -> str:
+        return " ".join(str(value or "").split())
+
+    def _normalized_match_text(self, value: object) -> str:
+        return "".join(ch for ch in self._compact_text(value).lower() if ch.isalnum())
 
     def _plain_preview(self, text: str, limit: int = 180) -> str:
         compact = " ".join(str(text or "").replace("#", "").split())

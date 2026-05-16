@@ -26,6 +26,10 @@ export function CreateTaskDialog({ open, pending = false, onClose, onSubmit }: C
       setError("请填写任务 ID。");
       return;
     }
+    if (!sourcePath.trim()) {
+      setError("请填写原文路径，创建后会立即导入原文。");
+      return;
+    }
     await onSubmit({ task_id: taskId.trim(), source_path: sourcePath.trim() });
     setTaskId("");
     setSourcePath("");
@@ -50,13 +54,14 @@ export function CreateTaskDialog({ open, pending = false, onClose, onSubmit }: C
             原文路径
             <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="/path/to/book.txt" />
           </label>
+          <p className="form-hint">创建后会立即开始导入原文，左侧进度会自动刷新。</p>
           {error ? <p className="form-error">{error}</p> : null}
           <div className="dialog-actions">
             <button type="button" className="secondary-button" onClick={onClose}>
               取消
             </button>
             <button type="submit" className="primary-button" disabled={pending}>
-              创建
+              创建并导入
             </button>
           </div>
         </form>

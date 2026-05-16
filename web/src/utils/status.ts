@@ -13,6 +13,15 @@ const INTERNAL_STAGE_LABELS: Record<string, string> = {
 };
 
 const INTERNAL_PATTERNS = [/freeze_[a-z]_review/i, /wait_[a-z_]+/i, /batch_review/i, /checkpoint/i, /artifact saved/i];
+const PUBLIC_TERM_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/粗读/g, "导入原文"],
+  [/精读/g, "阅读"],
+  [/Close-read/g, "阅读"]
+];
+
+export function normalizePublicTerms(value: string): string {
+  return PUBLIC_TERM_REPLACEMENTS.reduce((current, [pattern, replacement]) => current.replace(pattern, replacement), value);
+}
 
 export function toPublicStatusText(value: string | undefined | null, fallback = "待开始"): string {
   const normalized = String(value ?? "").trim();
@@ -26,7 +35,7 @@ export function toPublicStatusText(value: string | undefined | null, fallback = 
   if (INTERNAL_PATTERNS.some((pattern) => pattern.test(normalized))) {
     return "等待你处理下一步";
   }
-  return normalized;
+  return normalizePublicTerms(normalized);
 }
 
 export function percent(completed: number | undefined, total: number | undefined): number {

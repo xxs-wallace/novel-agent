@@ -5,8 +5,6 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from .character_mention_service import KNOWN_CHARACTER_NAMES
-
 
 @dataclass(slots=True)
 class CharacterEvidenceValidator:
@@ -29,6 +27,7 @@ class CharacterEvidenceValidator:
     )
 
     _speech_verbs = ("说", "问", "道", "喊", "叫", "答", "回道", "说道")
+    _person_action_verbs = ("抬头", "低头", "回头", "点头", "摇头", "走", "跑", "站", "坐", "看", "笑", "哭", "想")
     _honorifics = ("先生", "小姐", "同学", "学长", "学姐", "教授", "校长", "队长", "秘书")
 
     def filter_names(
@@ -43,12 +42,13 @@ class CharacterEvidenceValidator:
         if not doc_text.strip():
             return []
 
+        candidate_names = [self._norm(str(raw)).strip() for raw in names if str(raw).strip()]
         cleaned: list[str] = []
-        for raw in names:
+        for raw in candidate_names:
             name = self._norm(str(raw)).strip()
             if not name:
                 continue
-            if not self._passes_known_prefix_guard(name=name, doc_text=doc_text):
+            if not self._passes_known_prefix_guard(name=name, doc_text=doc_text, candidate_names=candidate_names):
                 continue
             aliases = self._aliases_for_name(name=name, aliases_by_name=aliases_by_name)
             evidence_list = self._get_evidence_list(evidence_map=evidence_map, name=name)
@@ -98,9 +98,6 @@ class CharacterEvidenceValidator:
                 continue
             if s not in doc_text:
                 continue
-            # For known characters, substring evidence is sufficient.
-            if any(term in KNOWN_CHARACTER_NAMES for term in matching_terms):
-                return True
             # For unknown tokens, require a personness cue in the evidence snippet.
             if not any(self._snippet_has_name_cue(name=term, snippet=s) for term in matching_terms):
                 continue
@@ -123,9 +120,9 @@ class CharacterEvidenceValidator:
             return True
         return False
 
-    def _passes_known_prefix_guard(self, *, name: str, doc_text: str) -> bool:
-        # Drop partial prefixes when a longer known name appears in the same document.
-        for known_raw in KNOWN_CHARACTER_NAMES:
+    def _passes_known_prefix_guard(self, *, name: str, doc_text: str, candidate_names: Sequence[str]) -> bool:
+        # Drop partial prefixes when a longer model candidate appears in the same document.
+        for known_raw in candidate_names:
             known = self._norm(known_raw)
             if known != name and known.startswith(name) and known in doc_text:
                 return False
@@ -156,6 +153,8 @@ class CharacterEvidenceValidator:
         if re.search(rf"{escaped}(?:{'|'.join(map(re.escape, self._honorifics))})", snippet):
             return True
         if re.search(rf"(?:{'|'.join(map(re.escape, self._honorifics))}){escaped}", snippet):
+            return True
+        if re.search(rf"{escaped}.{{0,4}}(?:{'|'.join(map(re.escape, self._person_action_verbs))})", snippet):
             return True
         return False
 

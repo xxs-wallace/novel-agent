@@ -1,0 +1,24 @@
+{
+  "run_id": "e79e4dac57214e578703f5832f84ebdc",
+  "created_at": "2026-04-20T09:08:17.153384+00:00",
+  "data": {
+    "issues": [
+      {
+        "type": "word_count_deviation",
+        "severity": "medium",
+        "message": "字数偏离：当前约 602，目标 1200（建议区间 960-1440）。",
+        "span": null,
+        "quote": null,
+        "suggested_fix": "尝试扩写到接近目标字数，并保持节奏与信息密度。"
+      },
+      {
+        "type": "high_repetition",
+        "severity": "medium",
+        "message": "重复率偏高：估算重复片段占比约 100%。",
+        "span": null,
+        "quote": "vulnerabilit",
+        "suggested_fix": "合并同义表达，删除重复句式，使用更具体的动作/感官细节替换空泛重复。"
+      }
+    ]
+  }
+}

@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from novel_agent.app.llm import InvalidJSONResponseError, JsonModelClient
+from novel_agent.app.prompts.chapter_summary_prompt import build_chapter_summary_prompt
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentRow, DocumentsRepo
-from novel_agent.app.prompts.chapter_summary_prompt import build_chapter_summary_prompt
 from novel_agent.app.runner.close_read_runner import CloseReadRunner, InvalidChapterSynopsisError
 from novel_agent.app.schemas.config_schema import CloseReadAgentConfig
 from novel_agent.app.services.chapter_assembler_service import ChapterBatch
@@ -101,6 +101,111 @@ def _plot_synopsis(
     )
 
 
+def test_close_read_runner_augments_partial_character_updates_from_source_verified_names(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-augment", sqlite_path=str(tmp_path / "augment.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "augment.db", config=config)
+
+    updates = runner._augment_character_updates_from_source_verified_names(
+        raw_character_updates=[
+            {
+                "canonical_name": "路明非",
+                "aliases": [],
+                "recent_activity": "路明非回应邀请。",
+                "relationships": [],
+            }
+        ],
+        source_verified_names=["路明非", "诺诺"],
+        summary_short="路明非和诺诺完成对话。",
+    )
+
+    assert [item["canonical_name"] for item in updates] == ["路明非", "诺诺"]
+    assert updates[1]["recent_activity"] == "路明非和诺诺完成对话。"
+    assert updates[1]["evidence_level"] == "inferred"
+
+
+def test_character_evidence_agent_reruns_with_full_roster_on_request(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-roster-loop", sqlite_path=str(tmp_path / "roster_loop.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "roster_loop.db", config=config)
+    doc = _make_document_row(
+        doc_id=1,
+        book_id="book-roster-loop",
+        title_index=1,
+        title="第一章",
+        content="远期人物重新出现并开口说话。",
+    )
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[doc],
+        chapter_doc_count=1,
+        chapter_total_chars=doc.content_chars,
+    )
+
+    class _RosterLoopModel:
+        def __init__(self) -> None:
+            self.scopes: list[str] = []
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = system_prompt, fallback_factory, use_fallback_on_error
+            payload = json.loads(str(user_prompt).split("输入数据如下：\n", 1)[1])
+            batch_payload = payload["character_evidence_batch"]
+            self.scopes.append(batch_payload["character_roster_scope"])
+            if batch_payload["character_roster_scope"] == "recent_32":
+                assert len(batch_payload["existing_character_roster"]) == 1
+                return (
+                    {
+                        "doc_id": 1,
+                        "document_title_index": 1,
+                        "request_full_roster": True,
+                        "request_full_roster_reason": "正文出现不在最近名册中的疑似旧人物。",
+                        "characters": [],
+                    },
+                    "",
+                )
+            assert len(batch_payload["existing_character_roster"]) == 2
+            return (
+                {
+                    "doc_id": 1,
+                    "document_title_index": 1,
+                    "request_full_roster": False,
+                    "request_full_roster_reason": "",
+                    "characters": [
+                        {
+                            "canonical_name": "远期人物",
+                            "aliases": [],
+                            "is_speaking_character": True,
+                            "speaking_evidence": "远期人物开口说话。",
+                            "personhood_evidence": "在完整名册中确认该人物。",
+                            "activity_or_state_evidence": "重新出现。",
+                            "relationship_evidence": "",
+                            "source_doc_ids": [1],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+
+    model = _RosterLoopModel()
+    payload = runner._generate_character_evidence_payload(  # noqa: SLF001
+        model_client=model,  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book-roster-loop",
+            "world_summary_md": "",
+            "story_outline_md": "",
+            "existing_character_roster": [{"canonical_name": "最近人物"}],
+            "full_existing_character_roster": [{"canonical_name": "最近人物"}, {"canonical_name": "远期人物"}],
+        },
+    )
+
+    assert model.scopes == ["recent_32", "full"]
+    assert payload["characters"][0]["canonical_name"] == "远期人物"
+
+
 def test_close_read_runner_retries_with_smaller_batch_after_invalid_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -143,7 +248,7 @@ def test_close_read_runner_retries_with_smaller_batch_after_invalid_json(
                 {
                     "summary_quality": "plot_synopsis",
                     "chapter_summary_md": _plot_synopsis(
-                        "路明非在雨幕中的校园场景里被推入开场处境，章节先建立地点氛围，再把人物行动和悬念压缩为后续精读可承接的事件线。",
+                        "路明非在雨幕中的校园场景里被推入开场处境，章节先建立地点氛围，再把人物行动和悬念压缩为后续阅读可承接的事件线。",
                         characters="路明非作为当前批次核心人物出现，行动状态从旁观转向进入校园。",
                         info="校园与雨幕共同提供开场背景，没有把原文句子作为梗概主体。",
                         structure="重试后的单文档批次承担开场铺垫功能。",

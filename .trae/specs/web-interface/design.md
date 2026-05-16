@@ -130,6 +130,8 @@ Web 端的主交互不是 slash command。网页上的按钮、列表点击、�
 - `MessageList`
 - `AgentProgressEvent`
 - `DecisionCard`
+- `WriterQuestionCard`
+- `WriterAnswerContext`
 - `ScopedRevisionComposer`
 - `CommandInput`
 - `CommandPalette`
@@ -142,6 +144,8 @@ Web 端的主交互不是 slash command。网页上的按钮、列表点击、�
 - 按钮、菜单、wizard 和决策卡通过 `/api/tasks/{task_id}/actions` 或具体 REST endpoint 发送。
 - Agent 进度通过 `/api/jobs/{job_id}/events` SSE 追加。
 - 当后端返回 `DecisionCard`，输入框上方展示结构化按钮。
+- 当 Writer 进入需要用户补充信息的状态时，问题以 Agent 消息中的 `WriterQuestionCard` 展示；用户仍使用同一个聊天输入框回答，但该回答必须绑定 question set，而不是普通无语义聊天。
+- `WriterAnswerContext` 负责在输入框附近提示当前回答目标、允许取消回答上下文，并在用户点击“提交回答并继续研究”时通过 action 发送结构化 payload。
 
 命令面板：
 
@@ -312,6 +316,8 @@ Writer 审阅相关 action 必须继续复用 Writer workflow / facade。Web 层
 | `request_scoped_artifact_revision` | artifact 面板“按反馈修改” | `artifact_id`, `feedback_text`, 可选 `run_id`, `target_stage`, `target_artifact_path` | `WorkflowFacade.request_scoped_artifact_revision(...)` |
 | `apply_scoped_artifact_revision` | diff 卡片“应用此修订” | `request_id`, 可选 `run_id`, `artifact_id` | `WorkflowFacade.apply_scoped_artifact_revision(...)` |
 | `discard_scoped_artifact_revision` | diff 卡片“放弃此修订” | `request_id`, 可选 `reason` | 记录候选被放弃，不修改当前 artifact |
+| `submit_outline_research_answers` | 大纲研究问题卡“提交回答并继续研究” | `run_id`, `question_set_id`, 可选 `source_message_id`, `answer_text`, 可选 `user_answers[]` | `WorkflowFacade.writer_action(..., action="continue_after_outline_research_input")` |
+| `defer_outline_research_answers` | 大纲研究问题卡“稍后继续” | `run_id`, `question_set_id`, 可选备注 | 保留等待态，不推进 Freeze A |
 | `accept_chapter` | 章节验收卡“接受本章” | `run_id`, `chapter_id`, `draft_id`, 可选 `feedback_text` | `GenerationReviewDecision.status = accepted` |
 | `revise_chapter_length` | 章节验收卡“调整字数后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, `target_chars`, `min_chars`, `max_chars` | `GenerationReviewDecision.status = revise_length` + `LengthPlanUpdate` |
 | `replan_chapter` | 章节验收卡“修改章节梗概后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, `must_preserve[]`, `must_change[]`, `forbidden_carryover[]` | `GenerationReviewDecision.status = replan_chapter` + `ChapterReplanRequest` |
@@ -407,6 +413,16 @@ Scoped Artifact Revision 的 action 语义：
 - 校验失败返回用户可读错误和恢复建议，不返回 traceback。
 - 普通 view 不返回 revised raw JSON；raw JSON 只可通过 technical endpoint 查看。
 
+Outline Research 用户补充问题的 action 语义：
+
+- 后端把 `needs_user_input` 转成聊天流中的 Agent 消息，消息携带 `WriterQuestionSet` view model。
+- `WriterQuestionSet` 至少包含 `run_id`、`question_set_id`、`stage`、`questions[]`、可选 `source_artifact_id` / `artifact_path` 和可执行 action。
+- 每个 question 必须有稳定 `question_id`、用户可读问题、是否必答、可选补充说明或关联缺口；前端不得从纯文本中猜测问题编号。
+- 用户可以在同一个聊天输入框里自然语言回答；该消息写入会话时必须附带 `channel = writer_question_answer`、`run_id` 和 `question_set_id`。
+- 点击“提交回答并继续研究”时，前端发送 `submit_outline_research_answers`，payload 携带 `answer_text` 和可选结构化 `user_answers[]`；后端负责把回答映射到 Writer 的 `continue_after_outline_research_input`。
+- 若用户只提交一段自然语言 `answer_text`，后端必须保留原文并进行最小映射；不得为了推进流程伪造未回答问题。
+- 普通聊天消息不得自动越过 `needs_user_input` 等待态；继续流程必须来自问题卡按钮或等价结构化 action。
+
 章节验收 action 语义：
 
 - `accept_chapter` 是唯一允许进入 `Freeze E` 或写回确认的分支。
@@ -469,6 +485,16 @@ Scoped Artifact Revision 的 action 语义：
 4. 详情区展示百科条目。
 5. 用户可以点击关系网络中的人物跳转到对应条目。
 
+### Flow C0: Writer 大纲研究提问
+
+1. 用户提交 Writer intent 后，后端启动 Outline Research Loop。
+2. 当 Writer 判断 `needs_user_input`，后端返回一条 Agent 消息，消息内展示大纲研究问题卡。
+3. 用户在同一个聊天输入框中回答问题；输入框处于当前 question set 的回答上下文。
+4. 用户点击消息内“提交回答并继续研究”按钮。
+5. 前端发送 `submit_outline_research_answers`，payload 携带 `run_id`、`question_set_id`、回答原文和可选逐题结构化回答。
+6. 后端将回答记录为 `user_authorized` evidence，调用共享 Writer workflow 继续 research 或生成大纲。
+7. 若用户点击“稍后继续”，后端只保留当前等待态和问题消息，不推进后续冻结点。
+
 ### Flow C: Writer 审阅
 
 1. 用户在中间输入续写方向。
@@ -509,6 +535,8 @@ Scoped Artifact Revision 的 action 语义：
 - `WebActionService` tests：
   - `request_scoped_artifact_revision` 不需要 slash command 字符串，并调用共享 facade。
   - `apply_scoped_artifact_revision` 保存候选后不自动确认当前冻结点。
+  - `submit_outline_research_answers` 调用共享 Writer workflow 的用户补充入口，并保留 `answer_text` 原文。
+  - 普通聊天消息不会自动绕过 Outline Research 的 `needs_user_input` 等待态。
   - `accept_chapter` / `revise_chapter_length` / `replan_chapter` / `discard_chapter` / `defer_chapter_acceptance` 映射到正确 contract。
   - 普通 action 响应不泄露内部 stage；technical response 可以包含 raw contract。
 - `JobManager` tests：
@@ -525,6 +553,7 @@ Scoped Artifact Revision 的 action 语义：
   - 点击 task id / task card 后切换 selected task。
   - task action menu 调用 `/api/tasks/{task_id}/actions`，不生成 slash command 字符串。
   - ConversationPane message / decision card。
+  - WriterQuestionCard 作为聊天消息渲染问题，使用同一个输入框收集回答，并通过按钮提交结构化 action。
   - ResultExplorer tree selection。
   - PersonEntryView encyclopedia layout。
 - MSW mock API：

@@ -38,6 +38,7 @@ Web 工作台 SHALL NOT：
 
 Web 工作台 SHALL 在 Writer 审阅流程中提供结构化 action：
 
+- 使用聊天式结构化决策消息承接 Writer 提问。问题可以像普通 Agent 消息一样出现在会话流中，用户也可以使用同一个聊天输入框回答；但消息和回答必须绑定 `run_id`、问题 id、checkpoint / review stage 与后端 action，不能退化为无语义的普通聊天记录。
 - 使用 `Scoped Artifact Revision` 支持用户用自然语言反馈修订当前审阅 artifact。
 - 使用章节验收决策卡支持接受、按长度重写、重做章节规划、作废和稍后决定。
 - 所有修订、验收与回写动作 SHALL 调用 `WorkflowFacade` / Writer workflow / 共享 action adapter，不得由 Web 后端直接拼 prompt、写 Memory 或改 workflow state。
@@ -125,6 +126,23 @@ slash command MAY 作为高级命令入口保留：
 
 当 Agent 等待人工确认时，中间会话区 SHALL 展示结构化决策卡片，而不是要求用户输入内部 workflow action。
 
+#### Writer 提问的聊天式结构化交互
+
+Writer 在 Outline Research Loop、人物对齐、新角色确认或其它人工补充节点提出问题时，Web SHALL 将问题渲染为会话中的 Agent 消息。该消息可以包含自然语言说明、问题列表和内联动作按钮，交互形态类似聊天产品中的“确认 / 撤销 / 打开”按钮。
+
+这类消息 SHALL 同时携带结构化 payload：
+
+- `run_id`
+- `question_set_id`
+- `stage`，例如 `outline_research_user_input`
+- `questions[]`，每项至少包含 `question_id`、用户可读问题、是否必答、可选回答提示
+- `source_artifact_id` 或 `artifact_path`
+- 推荐的继续动作，例如 `submit_outline_research_answers`
+
+用户回答 SHOULD 使用同一个聊天输入框完成。当前存在待回答问题时，输入框进入“回答当前问题”上下文；发送后生成一条普通可读的 user message，同时在 payload 中记录它回答的 `question_set_id`。用户点击“提交回答并继续研究”按钮后，前端 SHALL 调用结构化 action，而不是只保存普通 message。
+
+普通聊天消息 SHALL NOT 自动越过 Writer checkpoint。只有用户点击确认按钮或等价结构化 action，才允许后端调用 `continue_after_outline_research_input`、确认新增人物或继续后续 Writer workflow。
+
 ### 3. Right Result Explorer
 
 右侧 SHALL 展示 close-read 与 Writer 结果。
@@ -188,6 +206,12 @@ Writer 目录树 SHOULD 包含：
   - 待确认步骤
   - 产物路径
   - 下一步动作
+- 大纲研究
+  - 当前问题
+  - 已确认信息
+  - 仍缺口
+  - 可用假设
+  - Research trace 与 planning notebook 摘要
 - 全书续写规划
   - 续写目标
   - 世界观补充
@@ -272,6 +296,8 @@ Writer Web-only actions:
 
 | Web 场景 | Web 主交互 | 后端 action |
 |---|---|---|
+| Outline Research Loop 需要用户补充 | Agent 消息内问题卡 + 聊天输入回答 + “提交回答并继续研究”按钮 | `submit_outline_research_answers` |
+| Outline Research Loop 稍后回答 | 问题卡“稍后继续”按钮 | `defer_outline_research_answers` |
 | 受控修订当前审阅 artifact | “按反馈修改”表单提交 | `request_scoped_artifact_revision` |
 | 应用受控修订候选 | diff 卡片“应用此修订” | `apply_scoped_artifact_revision` |
 | 放弃受控修订候选 | diff 卡片“放弃此修订” | `discard_scoped_artifact_revision` |
@@ -346,6 +372,45 @@ Web 后端 SHALL 暴露稳定 API。
 
 `revision-request` / `revision-apply` MAY 作为 artifact 资源型别名存在；Web 主交互 SHOULD 优先通过 `POST /api/tasks/{task_id}/actions` 发送上述结构化 action，以便会话消息、决策卡、job 和状态刷新走同一套 adapter。
 
+### Conversational Writer Question Contract
+
+`POST /api/tasks/{task_id}/messages` 可以继续只负责保存用户自然语言；但当消息是对 Writer 问题卡的回答时，payload SHOULD 包含：
+
+```json
+{
+  "channel": "writer_question_answer",
+  "run_id": "run-1",
+  "question_set_id": "outline-research-run-1-001",
+  "answer_text": "第一个问题的回答……\n第二个问题的回答……"
+}
+```
+
+真正推动 Writer 继续的动作 SHALL 通过 `/actions`：
+
+```json
+{
+  "action": "submit_outline_research_answers",
+  "payload": {
+    "run_id": "run-1",
+    "question_set_id": "outline-research-run-1-001",
+    "source_message_id": "message-123",
+    "answer_text": "第一个问题的回答……\n第二个问题的回答……",
+    "user_answers": [
+      {
+        "question_id": "q1",
+        "answer_text": "第一个问题的回答……"
+      },
+      {
+        "question_id": "q2",
+        "answer_text": "第二个问题的回答……"
+      }
+    ]
+  }
+}
+```
+
+后端 SHALL 将该 action 映射为 Writer workflow 的 `continue_after_outline_research_input`。如果前端只提交 `answer_text`，后端 MAY 保留原文并生成最小 `user_answers` 映射；不得因为解析失败而伪造用户答案。用户回答必须作为 `user_authorized` evidence 进入 planning notebook 或等价 Writer artifact。
+
 ## View Models
 
 后端 SHALL 不把原始 artifact JSON 直接发给普通视图，而是转换为 view model。
@@ -360,6 +425,7 @@ Web 后端 SHALL 暴露稳定 API。
 - `ArtifactTreeNode`
 - `ArtifactView`
 - `DecisionCard`
+- `WriterQuestionSet`
 - `PersonEncyclopediaEntry`
 - `ChapterSummaryView`
 - `WriterRunView`
@@ -402,6 +468,7 @@ Web 端被认为达到 TUI parity 的条件：
 - “创建任务”是按钮 + dialog，不要求用户输入 `/new-task`。
 - 粗读、精读、Creative KB、Writer、恢复、确认、返回、保存都能通过合适的 Web 按钮 / 菜单 / 决策卡触发。
 - 中间会话可发送自然语言，能展示 Agent 进度与阻塞决策；slash command 仅作为高级兼容入口。
+- Outline Research Loop 的用户补充问题以聊天消息展示，用户可用同一输入框回答；只有点击“提交回答并继续研究”等结构化按钮时才继续 Writer workflow。
 - 右侧目录树可浏览 close-read 与 Writer 结果，详细内容不直接展示 JSON。
 - 人物资料以百科条目展示，支持二级目录树。
 - 后端 API 复用 `WorkflowFacade`、`StatusPresenter`、`ArtifactPresenter` 等共享语义。

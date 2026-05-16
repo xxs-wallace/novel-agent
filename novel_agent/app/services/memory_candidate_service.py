@@ -396,23 +396,8 @@ class MemoryCandidateService:
         canonical_name: str,
         relationship_evidence: str,
     ) -> list[dict[str, str]]:
-        if not relationship_evidence:
-            return []
-        target_names = [
-            name
-            for name in self.character_mention_service.extract_local_candidates(relationship_evidence, limit=6)
-            if name != canonical_name
-        ]
-        if not target_names:
-            return []
-        return [
-            {
-                "target_name": target_names[0],
-                "relation_type": "互动",
-                "sentiment_state": "",
-                "status_summary": relationship_evidence,
-            }
-        ]
+        _ = canonical_name, relationship_evidence
+        return []
 
     def _group_character_evidence(self, evidence_payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         grouped: dict[str, list[dict[str, Any]]] = {}

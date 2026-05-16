@@ -612,7 +612,7 @@ def test_interactive_pipeline_resume_smoke_with_couple_txt(
         first_doc_id = documents_repo.insert_document(
             conn,
             {
-                "content": "第一段已有粗读内容。",
+                "content": "第一段已有导入原文内容。",
                 "book_id": book_id,
                 "path": source_path.as_posix(),
                 "scope": "chapter",
@@ -628,7 +628,7 @@ def test_interactive_pipeline_resume_smoke_with_couple_txt(
         second_doc_id = documents_repo.insert_document(
             conn,
             {
-                "content": "第二段等待精读内容。",
+                "content": "第二段等待阅读内容。",
                 "book_id": book_id,
                 "path": source_path.as_posix(),
                 "scope": "chapter",

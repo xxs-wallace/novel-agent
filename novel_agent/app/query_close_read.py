@@ -372,7 +372,7 @@ def _format_summary_markdown(payload: dict[str, Any]) -> str:
 
 def _format_total_summary_markdown(payload: dict[str, Any]) -> str:
     lines = [
-        f"# 当前精读总览：{payload.get('book_id', '')}",
+        f"# 当前阅读总览：{payload.get('book_id', '')}",
         "",
         f"- chapter_count: {payload.get('chapter_count', 0)}",
         f"- document_title_index_range: {payload.get('document_title_index_start')}-{payload.get('document_title_index_end')}",
@@ -383,7 +383,7 @@ def _format_total_summary_markdown(payload: dict[str, Any]) -> str:
     chapters = [item for item in payload.get("chapters", []) if isinstance(item, dict)]
     if not chapters:
         return "\n".join([*lines, "未找到章节摘要。"]).rstrip()
-    lines.append("## 已精读章节摘要")
+    lines.append("## 已阅读章节摘要")
     for chapter in chapters:
         summary = str(chapter.get("summary_short") or chapter.get("summary_md") or "").strip()
         if not summary:

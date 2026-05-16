@@ -40,10 +40,10 @@ export function TaskActionMenu({
       {open ? (
         <div className="action-menu" role="menu">
           <button type="button" role="menuitem" onClick={() => run(() => onAction("start_read", { requested_from: "task_menu" }))}>
-            开始粗读
+            导入原文
           </button>
           <button type="button" role="menuitem" onClick={() => run(() => onAction("start_close_read", { requested_from: "task_menu" }))}>
-            运行精读
+            开始阅读
           </button>
           <button type="button" role="menuitem" onClick={() => run(() => onAction("build_creative_kb", { requested_from: "task_menu" }))}>
             构建 Creative KB
@@ -52,7 +52,7 @@ export function TaskActionMenu({
             开始续写
           </button>
           <button type="button" role="menuitem" onClick={() => run(onResetCloseRead)}>
-            重置精读
+            重置阅读
           </button>
           <button type="button" role="menuitem" className="danger-menu-item" onClick={() => run(onDeletePreview)}>
             <Trash2 size={15} aria-hidden="true" />

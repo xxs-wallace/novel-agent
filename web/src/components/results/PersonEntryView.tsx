@@ -1,4 +1,5 @@
 import type { ArtifactView } from "../../api/types";
+import { normalizePublicTerms } from "../../utils/status";
 
 interface PersonEntryViewProps {
   view: ArtifactView;
@@ -14,14 +15,14 @@ export function PersonEntryView({ view }: PersonEntryViewProps) {
     <article className="person-entry-view">
       <header>
         <span>人物百科</span>
-        <h2>{view.title}</h2>
+        <h2>{normalizePublicTerms(view.title)}</h2>
       </header>
       <div className="person-section-grid">
         {[...sections, ...extras].map((section) =>
           section ? (
             <section key={section.title} className="artifact-section">
-              <h3>{section.title}</h3>
-              <p>{section.body || "暂无明确记录。"}</p>
+              <h3>{normalizePublicTerms(section.title)}</h3>
+              <p>{normalizePublicTerms(section.body || "暂无明确记录。")}</p>
             </section>
           ) : null
         )}

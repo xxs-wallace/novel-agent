@@ -107,10 +107,15 @@ export function WorkspaceShell() {
 
   const createMutation = useMutation({
     mutationFn: (request: CreateTaskRequest) => createTask(request),
-    onSuccess: (task) => {
+    onSuccess: async (task) => {
       setSelectedTaskId(task.task_id);
       setMobilePanel("conversation");
-      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      const result = await postAction(task.task_id, {
+        action: "start_read",
+        payload: { requested_from: "create_task" }
+      });
+      rememberActionResult(result);
     }
   });
 
@@ -184,6 +189,17 @@ export function WorkspaceShell() {
     return actionMutation.mutateAsync({ taskId: selectedTask.task_id, action, payload });
   }
 
+  async function handleTaskAction(taskId: string, action: string, payload: Record<string, unknown> = {}) {
+    return actionMutation.mutateAsync({ taskId, action, payload });
+  }
+
+  async function refreshTasks() {
+    await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    if (selectedTask?.task_id) {
+      refreshTaskArtifacts(selectedTask.task_id);
+    }
+  }
+
   async function handleResetCloseRead(taskId: string) {
     return resetMutation.mutateAsync(taskId);
   }
@@ -252,10 +268,11 @@ export function WorkspaceShell() {
             isBusy={createMutation.isPending || selectMutation.isPending || actionMutation.isPending}
             onCreateTask={(request) => createMutation.mutateAsync(request)}
             onSelectTask={handleSelectTask}
-            onAction={(action, payload) => handleAction(action, payload)}
+            onAction={(taskId, action, payload) => handleTaskAction(taskId, action, payload)}
             onStartWriter={openWriterWizard}
             onResetCloseRead={handleResetCloseRead}
             onDeleteTask={handleDeletePreview}
+            onRefresh={refreshTasks}
           />
         </section>
 

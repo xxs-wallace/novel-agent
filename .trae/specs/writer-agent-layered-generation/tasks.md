@@ -707,3 +707,49 @@
 - Task 57 depends on Task 56
 - Task 58 depends on Task 56, Task 57
 - Task 59 depends on Task 55, Task 56, Task 57, Task 58 and Agentic Benchmark OR-11 / OR-12
+
+## Group K: Web Chat Question and Writer Workflow Bridge
+
+- [ ] Task 60: 定义 Outline Research 问题集 contract 与落盘 / 恢复策略
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [`../web-interface/spec.md`](.trae/specs/web-interface/spec.md), [`../web-interface/design.md`](.trae/specs/web-interface/design.md)
+  - `建议只读`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] 定义 `WriterQuestionSet` 或等价 schema，包含 `question_set_id`、`questions[]`、关联 gaps、必答状态、用户可见问题和恢复引用
+  - [ ] 明确其与 `SufficiencyDecision.user_questions`、`outline_research_checkpoint.json`、`sufficiency_decision.json` 的关系
+  - [ ] 支持 `outline_research_question_set.json` 独立落盘或在 sufficiency decision 中可追踪引用
+  - [ ] 问题 id 必须稳定，便于 Web / CLI / TUI 用同一语义提交回答
+  - [ ] 测试覆盖 `needs_user_input` 产物可恢复，且不需要解析自然语言日志
+
+- [ ] Task 61: 实现 Web 结构化回答到 `continue_after_outline_research_input` 的桥接
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [`../web-interface/design.md`](.trae/specs/web-interface/design.md)
+  - `依赖`: Task 60
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/run_interactive.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 继续入口接受 `question_set_id`、可选 `source_message_id`、`answer_text`、`user_answers[]`
+  - [ ] 保留用户原始回答文本，并把可映射内容作为 `user_authorized` evidence 写入 planning notebook
+  - [ ] 若必答问题缺失，不得伪造用户回答；应保持等待态或返回用户可读补充提示
+  - [ ] 普通聊天消息不得自动触发 workflow 继续
+  - [ ] 保持 CLI / TUI 既有回答路径兼容，可映射为同一结构化入口
+
+- [ ] Task 62: 对齐 WriterStatusPresenter 与 Web action / decision card 映射
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [`../web-interface/spec.md`](.trae/specs/web-interface/spec.md)
+  - `依赖`: Task 60, Task 61
+  - `建议只关注代码文件`: `novel_agent/app/presenters/`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/app/web/services/artifact_view_service.py`
+  - [ ] `needs_user_input` 对外显示为用户可理解的问题消息与“提交回答并继续研究 / 稍后继续”动作
+  - [ ] 普通用户视图不显示 `needs_user_input`、checkpoint id、workflow action 名或 artifact path
+  - [ ] technical/debug 响应可以保留 raw decision、checkpoint 和 artifact path
+  - [ ] Web action 结果能刷新右侧大纲研究 / planning notebook / 问题集视图
+
+- [ ] Task 63: Web bridge 回归测试与验收
+  - `来源`: [tasks.md](.trae/specs/writer-agent-layered-generation/tasks.md), [`../web-interface/tasks.md`](.trae/specs/web-interface/tasks.md)
+  - `依赖`: Task 60, Task 61, Task 62
+  - `建议只关注代码文件`: `novel_agent/tests/test_writer_outline_research.py`, `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_web_action_service.py`
+  - [ ] 单元测试覆盖问题集生成、回答提交、回答原文保留、缺失必答问题处理
+  - [ ] 工作流测试覆盖用户回答后继续一小轮 research 或直接生成大纲
+  - [ ] Web action service 测试覆盖 `submit_outline_research_answers` 与 `defer_outline_research_answers`
+  - [ ] 回归测试确认不会把普通聊天消息当作用户授权
+  - [ ] 回归测试确认未回答问题不会被模型或后端伪造为 `user_authorized` evidence
+
+- Task 60 depends on Task 47, Task 52, Task 53
+- Task 61 depends on Task 60
+- Task 62 depends on Task 60, Task 61 and Task 16
+- Task 63 depends on Task 60, Task 61, Task 62

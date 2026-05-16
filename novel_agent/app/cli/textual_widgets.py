@@ -708,10 +708,10 @@ class CommandPalette(ModalScreen[CommandInvocation | None]):
     KEYWORDS = {
         "zhuangtai": "status",
         "状态": "status",
-        "粗读": "read",
-        "精读": "close-read",
+        "导入原文": "read",
+        "阅读": "close-read",
         "查询": "query-close-read",
-        "精读产物": "query-close-read",
+        "阅读产物": "query-close-read",
         "续写": "writer",
         "保存": "save",
         "确认": "confirm",

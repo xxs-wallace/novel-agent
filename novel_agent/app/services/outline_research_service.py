@@ -12,6 +12,12 @@ from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
 from ..repos.documents_repo import DocumentsRepo
 from ..repos.fragment_cards_repo import FragmentCardsRepo
+from ..schemas.narrative_memory_schema import (
+    MemoryCandidateSelection,
+    MemoryEvidenceBundle,
+    MemoryQueryBudget,
+    MemoryQueryState,
+)
 from ..schemas.orchestration_schema import (
     ChapterSummaryIndex,
     ChapterSummaryIndexEntry,
@@ -30,12 +36,6 @@ from ..schemas.orchestration_schema import (
     StoryDetailResult,
     SufficiencyDecision,
     TraceableSource,
-)
-from ..schemas.narrative_memory_schema import (
-    MemoryCandidateSelection,
-    MemoryEvidenceBundle,
-    MemoryQueryBudget,
-    MemoryQueryState,
 )
 from .character_mention_service import CharacterMentionService
 from .narrative_memory_query_service import NarrativeMemoryQueryService
@@ -96,14 +96,11 @@ class CharacterMentionExtractor:
 
     def extract(self, payload: Mapping[str, Any]) -> ExtractedCharacterMentions:
         segments = self._payload_segments(payload)
-        raw_text = "\n".join(text for text in segments if text)
         names = self.mention_service.clean_names([str(item) for item in (payload.get("major_characters") or [])])
-        names.extend(self.mention_service.extract_local_candidates(raw_text, limit=24))
-        hints = self._extract_new_character_hints(raw_text)
 
         mentions: list[ExtractedCharacterMention] = []
         seen: set[str] = set()
-        raw_names = [*names, *hints]
+        raw_names = list(names)
         ordered_names = sorted(
             enumerate(raw_names),
             key=lambda item: (-len(_normalize_text(item[1])), item[0]),
@@ -116,13 +113,12 @@ class CharacterMentionExtractor:
                 continue
             seen.add(text)
             source_text = self._source_snippet_for(text, segments)
-            mention_type = "new_character_hint" if text in hints else "name"
             mentions.append(
                 ExtractedCharacterMention(
                     text=text,
-                    mention_type=mention_type,  # type: ignore[arg-type]
+                    mention_type="name",
                     source_text=source_text,
-                    confidence=0.86 if mention_type == "name" else 0.72,
+                    confidence=0.86,
                     possible_role_hint=self._role_hint(text, source_text),
                 )
             )
@@ -140,19 +136,6 @@ class CharacterMentionExtractor:
                 if text:
                     segments.append(text)
         return segments
-
-    def _extract_new_character_hints(self, text: str) -> list[str]:
-        hints: list[str] = []
-        patterns = (
-            r"(?:新角色|新人物|新增人物|大反派|幕后黑手|反派)\s*([A-Za-z0-9_\-\u4e00-\u9fff]{1,12})",
-            r"([A-Za-z0-9_\-\u4e00-\u9fff]{1,12})\s*(?:作为|担任)(?:新角色|反派|幕后黑手)",
-        )
-        for pattern in patterns:
-            for match in re.findall(pattern, text):
-                hint = _normalize_text(match)
-                if hint and hint not in {"作为", "担任", "压力位", "功能位", "角色", "人物"}:
-                    hints.append(hint)
-        return hints
 
     def _source_snippet_for(self, name: str, segments: Sequence[str]) -> str:
         for segment in segments:

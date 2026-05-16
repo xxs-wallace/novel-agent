@@ -33,10 +33,10 @@ from .textual_widgets import (
 HOME_ACTIONS: tuple[tuple[str, str, str], ...] = (
     ("1", "选择或创建任务", "/tasks"),
     ("2", "继续上次会话", "/resume"),
-    ("3", "导入/粗读原文", "/read"),
-    ("4", "运行精读建模", "/close-read"),
+    ("3", "导入原文", "/read"),
+    ("4", "开始阅读建模", "/close-read"),
     ("5", "查看建模状态", "/status"),
-    ("6", "查看精读产物", "/query-close-read summary"),
+    ("6", "查看阅读产物", "/query-close-read summary"),
     ("7", "构建 Creative KB", "/kb"),
     ("8", "运行最小续写回归", "/benchmark"),
     ("9", "开始或恢复 Writer", "/writer"),
@@ -418,9 +418,9 @@ class WorkbenchScreen(Screen[None]):
             return
         if close_only:
             batch_scope = (
-                "全部剩余精读 batch"
+                "全部剩余阅读 batch"
                 if max_close_batches is None
-                else f"最多 {max_close_batches} 个精读 batch"
+                else f"最多 {max_close_batches} 个阅读 batch"
             )
             self._append_message(
                 "系统",
@@ -430,14 +430,14 @@ class WorkbenchScreen(Screen[None]):
         elif max_read_kb is None and max_close_batches is None:
             self._append_message(
                 "系统",
-                f"本轮 /read --all 将完整粗读原文、精读全部已粗读 documents，并创建/更新 Creative KB；"
-                f"每个精读 batch 按约 {close_document_chars_budget} 字文档预算组装。",
+                f"本轮 /read --all 将完整导入原文、阅读全部已导入 documents，并创建/更新 Creative KB；"
+                f"每个阅读 batch 按约 {close_document_chars_budget} 字文档预算组装。",
             )
         if source_path is not None:
             self.session.config.source_path = str(source_path)
             self.session.facade.ensure_task(book_id=self.session.config.book_id, source_path=str(source_path))
         self._start_worker(
-            "精读建模" if close_only else "粗读/精读",
+            "阅读建模" if close_only else "导入原文/阅读",
             lambda: self.session.facade.start_read_pipeline(
                 book_id=self.session.config.book_id,
                 source_path=resolved_source_path or self.session.repo_root / "couple.txt",
@@ -460,14 +460,14 @@ class WorkbenchScreen(Screen[None]):
         return (
             "/read [source_path] [--all] [--read-kb KB] [--batches N] "
             "[--document-budget CHARS|--document-kb KB]；"
-            "默认粗读约 64KB 并精读 1 个 batch；--all 会完整粗读、精读并更新 Creative KB。"
+            "默认导入约 64KB 原文并阅读 1 个 batch；--all 会完整导入原文、阅读并更新 Creative KB。"
         )
 
     @staticmethod
     def _close_read_usage() -> str:
         return (
             "/close-read [source_path] [--batches N] [--document-budget CHARS|--document-kb KB]；"
-            f"默认跑完全部剩余已粗读 documents，单 batch 约 {DEFAULT_CLOSE_READ_DOC_BUDGET} 字文档预算，从最近 checkpoint 继续。"
+            f"默认跑完全部剩余已导入 documents，单 batch 约 {DEFAULT_CLOSE_READ_DOC_BUDGET} 字文档预算，从最近 checkpoint 继续。"
         )
 
     def _parse_read_options(self, args: tuple[str, ...]) -> dict[str, object]:

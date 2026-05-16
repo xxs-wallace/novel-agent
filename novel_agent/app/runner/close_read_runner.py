@@ -36,10 +36,15 @@ from ..services.chapter_assembler_service import (
     ChapterAssemblerService,
     ChapterBatch,
 )
+from ..services.chapter_event_list_service import ChapterEventListService
+from ..services.chapter_event_summary_service import ChapterEventSummaryService
+from ..services.character_canonical_name_service import CharacterCanonicalNameService
 from ..services.character_evidence_batch_assembler_service import CharacterEvidenceBatchAssemblerService
 from ..services.character_evidence_validator import CharacterEvidenceValidator
+from ..services.character_identity_resolution_service import CharacterIdentityResolutionService
 from ..services.character_mention_service import CharacterMentionService
 from ..services.character_profile_service import CharacterProfileService
+from ..services.character_roster_service import CharacterRosterService
 from ..services.debug_export_service import DebugExportService
 from ..services.memory_candidate_service import MemoryCandidateService
 from ..services.outline_event_summary_service import OutlineEventSummaryService
@@ -110,6 +115,7 @@ WORLD_EVIDENCE_KEYWORDS = (
     "契约",
     "超自然",
 )
+CHARACTER_EVIDENCE_FAST_ROSTER_LIMIT = 32
 
 
 @dataclass(slots=True)
@@ -124,6 +130,8 @@ class CloseReadRunnerResult:
 class _PreparedCloseReadExtraction:
     batch: ChapterBatch
     prompt_input: CloseReadPromptInput
+    existing_character_roster: list[dict[str, Any]]
+    full_existing_character_roster: list[dict[str, Any]]
 
 
 @dataclass(slots=True)
@@ -201,6 +209,9 @@ class CloseReadRunner:
         chapters_repo = ChaptersRepo()
         profiles_repo = CharacterProfilesRepo()
         profile_service = CharacterProfileService(profiles_repo=profiles_repo)
+        identity_resolution_service = CharacterIdentityResolutionService(profiles_repo=profiles_repo)
+        canonical_name_service = CharacterCanonicalNameService(profiles_repo=profiles_repo)
+        roster_service = CharacterRosterService(profiles_repo=profiles_repo)
         assembler = ChapterAssemblerService(
             documents_repo=documents_repo,
             progress_repo=progress_repo,
@@ -273,6 +284,7 @@ class CloseReadRunner:
                             outline_path=Path(str(assets["outline_markdown_path"])),
                             world_summary_path=Path(str(assets["world_summary_path"])),
                             profile_service=profile_service,
+                            roster_service=roster_service,
                         )
                         for batch in batches
                     ]
@@ -325,6 +337,7 @@ class CloseReadRunner:
                         outline_path=Path(str(assets["outline_markdown_path"])),
                         world_summary_path=Path(str(assets["world_summary_path"])),
                         profile_service=profile_service,
+                        roster_service=roster_service,
                     ).prompt_input
                     payload = self._run_close_read_memory_agents(
                         model_client=model_client,
@@ -341,9 +354,12 @@ class CloseReadRunner:
                             batch=persist_batch,
                             payload=persist_payload,
                             run_id=run_id,
+                            model_client=model_client,
                             documents_repo=documents_repo,
                             chapters_repo=chapters_repo,
                             profile_service=profile_service,
+                            identity_resolution_service=identity_resolution_service,
+                            canonical_name_service=canonical_name_service,
                             world_service=world_service,
                             outline_service=outline_service,
                         )
@@ -456,8 +472,9 @@ class CloseReadRunner:
         outline_path: Path,
         world_summary_path: Path,
         profile_service: CharacterProfileService,
+        roster_service: CharacterRosterService,
     ) -> _PreparedCloseReadExtraction:
-        local_character_hints = self.character_mention_service.extract_document_mentions(batch.documents)
+        local_character_hints: dict[int, list[str]] = {}
         return _PreparedCloseReadExtraction(
             batch=batch,
             prompt_input=self._build_prompt_input(
@@ -468,6 +485,12 @@ class CloseReadRunner:
                 world_summary_path=world_summary_path,
                 profile_service=profile_service,
             ),
+            existing_character_roster=roster_service.load_recent_roster(
+                conn,
+                book_id=self.config.book_id,
+                max_names=CHARACTER_EVIDENCE_FAST_ROSTER_LIMIT,
+            ),
+            full_existing_character_roster=roster_service.load_recent_roster(conn, book_id=self.config.book_id),
         )
 
     def _split_batch_for_retry(self, batch: ChapterBatch) -> ChapterBatch | None:
@@ -504,8 +527,9 @@ class CloseReadRunner:
         world_summary_path: Path,
         profile_service: CharacterProfileService,
     ) -> CloseReadPromptInput:
+        _ = local_character_hints
         token_budget = CloseReadTokenBudget(document_chars_budget=self.config.runtime.document_chars_budget)
-        names = sorted({name for keywords in local_character_hints.values() for name in keywords})
+        names: list[str] = []
         character_profiles = [
             CloseReadInputCharacterProfile(**item)
             for item in self._load_character_profiles_with_budget(
@@ -531,7 +555,7 @@ class CloseReadRunner:
                     doc_id=doc.doc_id,
                     document_title_index=doc.document_title_index,
                     content=doc.content,
-                    character_keywords=list(local_character_hints.get(doc.doc_id, [])),
+                    character_keywords=[],
                     content_tags=doc.content_tags,
                 )
                 for doc in batch.documents
@@ -561,6 +585,8 @@ class CloseReadRunner:
                 _PreparedCloseReadExtraction(
                     batch=batch,
                     prompt_input=prompt_input,
+                    existing_character_roster=[],
+                    full_existing_character_roster=[],
                 )
             ],
         )[0]
@@ -590,6 +616,8 @@ class CloseReadRunner:
             for index, prepared in enumerate(prepared_extractions):
                 batch = prepared.batch
                 prompt_dict = prepared.prompt_input.to_dict()
+                prompt_dict["existing_character_roster"] = prepared.existing_character_roster
+                prompt_dict["full_existing_character_roster"] = prepared.full_existing_character_roster
                 summary_futures[index] = executor.submit(
                     self._generate_chapter_summary_payload,
                     model_client=model_client,
@@ -603,18 +631,10 @@ class CloseReadRunner:
                         (
                             int(doc.doc_id),
                             executor.submit(
-                                self._generate_agent_payload,
+                                self._generate_character_evidence_payload,
                                 model_client=model_client,
                                 batch=doc_batch,
-                                prompt_input=self._build_character_evidence_input(
-                                    batch=doc_batch,
-                                    prompt_input=prompt_dict,
-                                ),
-                                agent_name="character_evidence",
-                                prompt_builder=build_character_evidence_prompt,
-                                fallback_factory=lambda doc_batch=doc_batch: (
-                                    self._fallback_character_evidence_output(doc_batch)
-                                ),
+                                prompt_input=prompt_dict,
                             ),
                         )
                     )
@@ -837,17 +857,59 @@ class CloseReadRunner:
                 outputs.append(future.result())
         return self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
 
+    def _generate_character_evidence_payload(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        fast_input = dict(prompt_input)
+        fast_input["existing_character_roster"] = [
+            item for item in prompt_input.get("existing_character_roster", []) if isinstance(item, dict)
+        ]
+        fast_input["character_roster_scope"] = "recent_32"
+        fast_input["can_request_full_roster"] = True
+        payload = self._generate_agent_payload(
+            model_client=model_client,
+            batch=batch,
+            prompt_input=self._build_character_evidence_input(
+                batch=batch,
+                prompt_input=fast_input,
+            ),
+            agent_name="character_evidence",
+            prompt_builder=build_character_evidence_prompt,
+            fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
+        )
+        if not bool(payload.get("request_full_roster")):
+            return payload
+        full_roster = [
+            item for item in prompt_input.get("full_existing_character_roster", []) if isinstance(item, dict)
+        ]
+        if len(full_roster) <= len(fast_input["existing_character_roster"]):
+            return payload
+        full_input = dict(prompt_input)
+        full_input["existing_character_roster"] = full_roster
+        full_input["character_roster_scope"] = "full"
+        full_input["can_request_full_roster"] = False
+        return self._generate_agent_payload(
+            model_client=model_client,
+            batch=batch,
+            prompt_input=self._build_character_evidence_input(
+                batch=batch,
+                prompt_input=full_input,
+            ),
+            agent_name="character_evidence_full_roster",
+            prompt_builder=build_character_evidence_prompt,
+            fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
+        )
+
     def _build_character_evidence_input(
         self,
         *,
         batch: ChapterBatch,
         prompt_input: dict[str, Any],
     ) -> dict[str, Any]:
-        local_character_hints = {
-            int(item.get("doc_id")): list(item.get("character_keywords", []))
-            for item in prompt_input.get("documents", [])
-            if isinstance(item, dict) and item.get("doc_id") is not None
-        }
         context_parts = [
             str(prompt_input.get("world_summary_md", "")).strip(),
             str(prompt_input.get("story_outline_md", "")).strip(),
@@ -858,7 +920,11 @@ class CloseReadRunner:
             book_id=self.config.book_id,
             documents=batch.documents,
             existing_context_summary="\n\n".join(part for part in context_parts if part),
-            local_character_hints=local_character_hints,
+            existing_character_roster=[
+                item for item in prompt_input.get("existing_character_roster", []) if isinstance(item, dict)
+            ],
+            character_roster_scope=str(prompt_input.get("character_roster_scope") or "recent_32"),
+            can_request_full_roster=bool(prompt_input.get("can_request_full_roster")),
         )
         return {"character_evidence_batch": evidence_batch.to_dict()}
 
@@ -930,6 +996,95 @@ class CloseReadRunner:
                 return fallback if isinstance(fallback, dict) else {}
             raise RuntimeError(f"{agent_name} returned a non-dict JSON payload")
         return payload
+
+    def _generate_chapter_event_list(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        summary_md: str,
+        summary_short: str,
+        outline_update: object,
+    ) -> dict[str, Any]:
+        existing_outline_update = outline_update if isinstance(outline_update, dict) else {}
+        started_at = time.perf_counter()
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "chapter_event_list",
+                "event": "prompt_start",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+            }
+        )
+        generated = ChapterEventListService(model_client=model_client).build_outline_update(
+            book_id=self.config.book_id,
+            document_title_index=batch.document_title_index,
+            chapter_title=batch.chapter_title,
+            summary_md=summary_md,
+            chapter_summary_short=summary_short,
+            source_doc_range=self._doc_range_text([doc.doc_id for doc in batch.documents]),
+            existing_outline_update=existing_outline_update,
+        )
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "chapter_event_list",
+                "event": "prompt_end",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "duration_seconds": round(time.perf_counter() - started_at, 3),
+            }
+        )
+        merged = dict(existing_outline_update)
+        merged.update({key: value for key, value in generated.items() if value not in (None, "", [], {})})
+        return merged
+
+    def _generate_chapter_event_summary(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        summary_md: str,
+        summary_short: str,
+        outline_update: object,
+    ) -> str:
+        raw_events = outline_update.get("timeline_events") if isinstance(outline_update, dict) else []
+        timeline_events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
+        started_at = time.perf_counter()
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "chapter_event_summary",
+                "event": "prompt_start",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+            }
+        )
+        event_summary = ChapterEventSummaryService(model_client=model_client).summarize(
+            book_id=self.config.book_id,
+            document_title_index=batch.document_title_index,
+            chapter_title=batch.chapter_title,
+            summary_md=summary_md,
+            chapter_summary_short=summary_short,
+            source_doc_range=self._doc_range_text([doc.doc_id for doc in batch.documents]),
+            chapter_event_list=timeline_events,
+        )
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "chapter_event_summary",
+                "event": "prompt_end",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "duration_seconds": round(time.perf_counter() - started_at, 3),
+            }
+        )
+        return event_summary
 
     def _generate_chapter_summary_payload(
         self,
@@ -1103,22 +1258,12 @@ class CloseReadRunner:
 
     def _fallback_close_read_output(self, batch: ChapterBatch) -> dict[str, Any]:
         full_text = "\n".join(doc.content for doc in batch.documents)
-        evidence_by_doc_id: dict[int, dict[str, list[str]]] = {}
-        for doc in batch.documents:
-            per_doc = {}
-            for name in self.character_mention_service.extract_local_candidates(doc.content):
-                idx = doc.content.find(name)
-                if idx != -1:
-                    start = max(0, idx - 18)
-                    end = min(len(doc.content), idx + len(name) + 18)
-                    per_doc[name] = [doc.content[start:end]]
-            evidence_by_doc_id[int(doc.doc_id)] = per_doc
         document_character_mentions = [
             {
                 "doc_id": doc.doc_id,
-                "character_keywords": self.character_mention_service.extract_local_candidates(doc.content),
+                "character_keywords": [],
                 "speaking_character_keywords": [],
-                "character_evidence": evidence_by_doc_id.get(int(doc.doc_id), {}),
+                "character_evidence": {},
                 "speaking_evidence": {},
             }
             for doc in batch.documents
@@ -1186,40 +1331,11 @@ class CloseReadRunner:
         return self._disallowed_summary_fallback(batch)
 
     def _fallback_character_evidence_output(self, batch: ChapterBatch) -> dict[str, Any]:
-        characters: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        full_text = "\n".join(doc.content for doc in batch.documents)
-        for doc in batch.documents:
-            for name in self.character_mention_service.extract_local_candidates(doc.content):
-                if name in seen:
-                    continue
-                seen.add(name)
-                speaking = self._name_has_speaking_cue(name=name, text=full_text)
-                source_doc_ids = [item.doc_id for item in batch.documents if name in str(item.content or "")]
-                source_title_indexes = sorted(
-                    {item.document_title_index for item in batch.documents if name in str(item.content or "")}
-                )
-                characters.append(
-                    {
-                        "canonical_name": name,
-                        "aliases": [],
-                        "is_speaking_character": speaking,
-                        "speaking_evidence": "batch 中存在姓名附近的说话/问答提示。" if speaking else "",
-                        "personhood_evidence": "本地人名候选服务识别为人物名，且在 batch 文本中出现。",
-                        "activity_or_state_evidence": self._sentence_with_name(name=name, text=full_text),
-                        "relationship_evidence": "",
-                        "source_doc_ids": source_doc_ids,
-                        "source_title_indexes": source_title_indexes,
-                        "candidate_type": "character",
-                        "confidence": 0.65 if not speaking else 0.75,
-                        "uncertainty_reason": "本地 fallback 基于启发式候选，未经过模型复核。",
-                    }
-                )
         doc_ids = [doc.doc_id for doc in batch.documents]
         payload = {
             "doc_ids": doc_ids,
             "document_title_indexes": batch.title_indexes,
-            "characters": characters,
+            "characters": [],
         }
         if len(doc_ids) == 1:
             payload["doc_id"] = doc_ids[0]
@@ -1924,9 +2040,12 @@ class CloseReadRunner:
         batch: ChapterBatch,
         payload: dict[str, Any],
         run_id: str,
+        model_client: JsonModelClient,
         documents_repo: DocumentsRepo,
         chapters_repo: ChaptersRepo,
         profile_service: CharacterProfileService,
+        identity_resolution_service: CharacterIdentityResolutionService,
+        canonical_name_service: CharacterCanonicalNameService,
         world_service: WorldStateService,
         outline_service: OutlineService,
     ) -> int:
@@ -1972,6 +2091,21 @@ class CloseReadRunner:
             summary_short = self._compute_short_summary(final_summary or current_summary)
         elif not summary_short:
             summary_short = self._compute_short_summary(current_summary)
+        summary_for_event = final_summary or current_summary
+        generated_outline_update = self._generate_chapter_event_list(
+            model_client=model_client,
+            batch=batch,
+            summary_md=summary_for_event,
+            summary_short=summary_short,
+            outline_update=payload.get("outline_update", {}),
+        )
+        event_summary = self._generate_chapter_event_summary(
+            model_client=model_client,
+            batch=batch,
+            summary_md=summary_for_event,
+            summary_short=summary_short,
+            outline_update=generated_outline_update,
+        )
         document_mentions = self._normalize_document_character_mentions(batch=batch, payload=payload)
         speaking_mentions = self._normalize_document_speaking_mentions(batch=batch, payload=payload)
         for doc_id, names in speaking_mentions.items():
@@ -2002,13 +2136,15 @@ class CloseReadRunner:
         )
         current_outline_update = self._enrich_outline_update_with_sources(
             batch=batch,
-            outline_update=payload.get("outline_update", {}),
+            outline_update=generated_outline_update,
             summary_short=summary_short,
+            event_summary=event_summary,
             fallback_participants=mentioned_characters,
         )
         outline_update = self._merge_outline_updates(
             existing=self._load_json_dict(existing["outline_update_json"]) if existing else {},
             current=current_outline_update,
+            prefer_current_event_summary=batch.is_complete_chapter,
         )
         chapter_id = chapters_repo.upsert(
             conn,
@@ -2041,6 +2177,8 @@ class CloseReadRunner:
             },
         )
         raw_character_updates = [item for item in payload.get("character_updates", []) if isinstance(item, dict)]
+        source_verified_names = sorted({name for values in document_mentions.values() for name in values})
+        source_verified_speakers = sorted({name for values in speaking_mentions.values() for name in values})
         if not raw_character_updates:
             raw_character_updates = [
                 {
@@ -2048,11 +2186,31 @@ class CloseReadRunner:
                     "aliases": [],
                     "personality": [],
                     "occupations": [],
-                    "recent_activity": payload.get("chapter_summary_short", ""),
+                    "recent_activity": summary_short,
                     "relationships": [],
                 }
                 for name in mentioned_characters
             ]
+        else:
+            raw_character_updates = self._augment_character_updates_from_source_verified_names(
+                raw_character_updates=raw_character_updates,
+                source_verified_names=source_verified_names,
+                summary_short=summary_short,
+            )
+        raw_character_updates = identity_resolution_service.resolve_updates(
+            conn,
+            book_id=self.config.book_id,
+            model_client=model_client,
+            updates=raw_character_updates,
+            source_verified_names=source_verified_names,
+            source_verified_speakers=source_verified_speakers,
+        )
+        raw_character_updates = canonical_name_service.resolve_updates(
+            conn,
+            book_id=self.config.book_id,
+            model_client=model_client,
+            updates=raw_character_updates,
+        )
         profile_service.merge_updates(
             conn,
             book_id=self.config.book_id,
@@ -2073,27 +2231,63 @@ class CloseReadRunner:
             )
         return chapter_id
 
+    def _augment_character_updates_from_source_verified_names(
+        self,
+        *,
+        raw_character_updates: list[dict[str, Any]],
+        source_verified_names: list[str],
+        summary_short: str,
+    ) -> list[dict[str, Any]]:
+        update_names: set[str] = set()
+        for update in raw_character_updates:
+            canonical_name = str(update.get("canonical_name") or "").strip()
+            if canonical_name:
+                update_names.add(canonical_name)
+            aliases = update.get("aliases")
+            if isinstance(aliases, list):
+                update_names.update(str(alias).strip() for alias in aliases if str(alias).strip())
+        augmented = list(raw_character_updates)
+        for name in source_verified_names:
+            if name in update_names:
+                continue
+            update_names.add(name)
+            augmented.append(
+                {
+                    "canonical_name": name,
+                    "aliases": [],
+                    "personality": [],
+                    "occupations": [],
+                    "recent_activity": summary_short,
+                    "relationships": [],
+                    "evidence_level": "inferred",
+                }
+            )
+        return augmented
+
     def _enrich_outline_update_with_sources(
         self,
         *,
         batch: ChapterBatch,
         outline_update: object,
         summary_short: str,
+        event_summary: str = "",
         fallback_participants: list[str] | None = None,
     ) -> dict[str, Any]:
         raw = dict(outline_update) if isinstance(outline_update, dict) else {}
+        event_summary = str(event_summary or "").strip()
         doc_ids = [doc.doc_id for doc in batch.documents]
         doc_range = self._doc_range_text(doc_ids)
         title_indexes = sorted({doc.document_title_index for doc in batch.documents})
         fallback_participants = self.character_mention_service.clean_names(fallback_participants or [])
         raw_events = raw.get("timeline_events")
         event_items = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-        if not event_items and summary_short:
+        fallback_event_summary = event_summary or summary_short
+        if not event_items and fallback_event_summary:
             event_items = [
                 {
                     "label": f"{batch.chapter_title}剧情进展",
                     "participants": [],
-                    "summary": summary_short,
+                    "summary": fallback_event_summary,
                 }
             ]
         enriched_events: list[dict[str, Any]] = []
@@ -2131,7 +2325,7 @@ class CloseReadRunner:
                 }
             )
         raw["timeline_events"] = enriched_events
-        raw["event_summary"] = self._outline_event_summary(enriched_events, fallback=summary_short)
+        raw["event_summary"] = event_summary or self._outline_event_summary(enriched_events, fallback=summary_short)
         raw["source_doc_ids"] = doc_ids
         raw["source_doc_range"] = doc_range
         raw["source_title_indexes"] = title_indexes
@@ -2160,7 +2354,13 @@ class CloseReadRunner:
                 )
         return grouped
 
-    def _merge_outline_updates(self, *, existing: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    def _merge_outline_updates(
+        self,
+        *,
+        existing: dict[str, Any],
+        current: dict[str, Any],
+        prefer_current_event_summary: bool = False,
+    ) -> dict[str, Any]:
         if not existing:
             return dict(current)
         if not current:
@@ -2227,10 +2427,15 @@ class CloseReadRunner:
         merged["source_doc_ids"] = source_doc_ids
         merged["source_doc_range"] = self._doc_range_text(source_doc_ids)
         merged["source_title_indexes"] = source_title_indexes
-        merged["event_summary"] = self._outline_event_summary(
-            timeline_events,
-            fallback=str(current.get("event_summary") or existing.get("event_summary") or ""),
-        )
+        existing_event_summary = str(existing.get("event_summary") or "").strip()
+        current_event_summary = str(current.get("event_summary") or "").strip()
+        if prefer_current_event_summary and current_event_summary:
+            merged_event_summary = current_event_summary
+        else:
+            merged_event_summary = self._join_distinct_event_summaries(
+                [existing_event_summary, current_event_summary],
+            )
+        merged["event_summary"] = merged_event_summary or self._outline_event_summary(timeline_events, fallback="")
         return merged
 
     def _outline_event_key(self, event: dict[str, Any]) -> str:
@@ -2273,6 +2478,20 @@ class CloseReadRunner:
         summaries = [str(item.get("summary") or item.get("label") or "").strip() for item in events]
         joined = "；".join(item for item in summaries if item)
         return joined or fallback
+
+    def _join_distinct_event_summaries(self, summaries: list[str]) -> str:
+        parts: list[str] = []
+        seen: set[str] = set()
+        for summary in summaries:
+            text = re.sub(r"\s+", " ", str(summary or "")).strip()
+            if not text:
+                continue
+            normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", text).lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            parts.append(text)
+        return " ".join(parts)
 
     def _doc_range_text(self, doc_ids: list[int]) -> str:
         if not doc_ids:
@@ -2482,6 +2701,16 @@ class CloseReadRunner:
         if plot_text.strip():
             return safe_excerpt(plot_text, 120)
         return safe_excerpt(summary_md, 120)
+
+    def _flatten_summary_event_chain(self, summary_md: str) -> str:
+        summary_sections = self._parse_summary_sections(summary_md)
+        plot_items: list[str] = []
+        for item in summary_sections["剧情事件链"]:
+            text = item[2:] if item.startswith("- ") else item
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                plot_items.append(text)
+        return " ".join(plot_items)
 
     def _merge_related_chapters(self, existing: Any, current: Any) -> list[dict[str, Any]]:
         merged: dict[int, dict[str, Any]] = {}

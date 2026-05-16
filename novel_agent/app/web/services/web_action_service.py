@@ -6,8 +6,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ...cli.status import WriterStatusPresenter
 from ...cli.events import RunEvent
+from ...cli.status import WriterStatusPresenter
 from ..schemas import DecisionCard, WebActionRequest, WebActionResult
 from .artifact_view_service import ArtifactViewService
 from .job_manager import JobContext, JobManager
@@ -30,6 +30,7 @@ class WebActionService:
         "start_writer": "writer",
         "resume": "writer_resume",
     }
+    _EXCLUSIVE_TASK_JOB_TYPES = {"read", "close_read", "kb", "writer", "writer_resume"}
 
     _WRITER_REVIEW_ACTIONS = {
         "confirm_current_step",
@@ -145,14 +146,18 @@ class WebActionService:
             job_type=job_type,
             payload={"action": action, **payload},
             runner=runner,
+            conflict_job_types=self._EXCLUSIVE_TASK_JOB_TYPES,
         )
-        message = {
-            "start_read": "已准备开始粗读，进度会通过后台事件更新。",
-            "start_close_read": "已准备运行精读，进度会通过后台事件更新。",
-            "build_creative_kb": "已准备构建 Creative KB，进度会通过后台事件更新。",
-            "start_writer": "已准备启动 Writer 分层生成，后续审阅会以决策卡呈现。",
-            "resume": "已准备恢复最近一次未完成流程。",
-        }[action]
+        if job.type != job_type:
+            message = "已有后台任务正在运行，已复用现有任务；请等它结束后再触发当前动作。"
+        else:
+            message = {
+                "start_read": "已准备开始导入原文，进度会通过后台事件更新。",
+                "start_close_read": "已准备开始阅读，进度会通过后台事件更新。",
+                "build_creative_kb": "已准备构建 Creative KB，进度会通过后台事件更新。",
+                "start_writer": "已准备启动 Writer 分层生成，后续审阅会以决策卡呈现。",
+                "resume": "已准备恢复最近一次未完成流程。",
+            }[action]
         decision_cards = self._writer_decision_cards(task_id=task_id) if action in {"start_writer", "resume"} else []
         self.session_service.append_message(task_id, role="assistant", content=message, payload={"job_id": job.job_id})
         return WebActionResult(
@@ -190,7 +195,7 @@ class WebActionService:
         payload = context.payload
 
         if read_only:
-            context.emit("progress", "开始完整粗读原文并写入索引。")
+            context.emit("progress", "开始完整导入原文并写入索引。")
             result = await self._call_facade_with_events(
                 context,
                 lambda: self.session_service.facade.start_read_pipeline(
@@ -212,10 +217,10 @@ class WebActionService:
                     should_stop=context.should_cancel,
                 ),
             )
-            context.emit("progress", "粗读本轮已完成，任务状态会刷新。", payload=self._progress_payload(context.task_id))
+            context.emit("progress", "原文导入本轮已完成，任务状态会刷新。", payload=self._progress_payload(context.task_id))
             return dict(result)
 
-        context.emit("progress", "开始运行精读建模。")
+        context.emit("progress", "开始运行阅读建模。")
         result = await self._call_facade_with_events(
             context,
             lambda: self.session_service.facade.start_read_pipeline(
@@ -243,7 +248,7 @@ class WebActionService:
                 should_stop=context.should_cancel,
             ),
         )
-        context.emit("progress", "精读本轮已完成，右侧结果浏览器会刷新。", payload=self._progress_payload(context.task_id))
+        context.emit("progress", "阅读本轮已完成，右侧结果浏览器会刷新。", payload=self._progress_payload(context.task_id))
         return dict(result)
 
     async def _run_creative_kb(self, context: JobContext) -> dict[str, Any]:
@@ -251,7 +256,7 @@ class WebActionService:
         snapshot = self.session_service.facade.task_snapshot(book_id=context.task_id)
         db_path = snapshot.db_path or self.session_service.facade.db_path_for_book(context.task_id)
         if not db_path.exists():
-            raise FileNotFoundError("还没有任务索引，请先运行粗读和精读。")
+            raise FileNotFoundError("还没有任务索引，请先导入原文并完成阅读。")
         context.emit("progress", "开始构建 Creative KB。")
         result = await self._call_facade_with_events(
             context,
@@ -421,8 +426,12 @@ class WebActionService:
             job_type="writer_resume",
             payload=normalized_payload,
             runner=runner,
+            conflict_job_types=self._EXCLUSIVE_TASK_JOB_TYPES,
         )
-        message = self._public_action_message(action)
+        if job.type != "writer_resume":
+            message = "已有后台任务正在运行，已复用现有任务；请等它结束后再触发当前动作。"
+        else:
+            message = self._public_action_message(action)
         self.session_service.append_message(
             task_id,
             role="assistant",

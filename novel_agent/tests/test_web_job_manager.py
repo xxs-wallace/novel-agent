@@ -64,7 +64,7 @@ def test_job_manager_reuses_active_job_for_same_task_and_type(tmp_path: Path) ->
         second = await manager.create_job(task_id="book-one", job_type="read", runner=slow_runner)
 
         assert second.job_id == first.job_id
-        assert second.message == "已有同类后台任务正在运行"
+        assert second.message == "已有后台任务正在运行"
         assert calls == 0
         events = manager.events(first.job_id)
         assert any(event.payload.get("deduplicated") is True for event in events)
@@ -72,6 +72,40 @@ def test_job_manager_reuses_active_job_for_same_task_and_type(tmp_path: Path) ->
         done = await manager.wait(first.job_id)
         assert done.status == "succeeded"
         assert calls == 1
+
+    asyncio.run(run())
+
+
+def test_job_manager_reuses_conflicting_task_job(tmp_path: Path) -> None:
+    async def run() -> None:
+        manager = JobManager(repo_root=tmp_path)
+        calls: list[str] = []
+
+        async def slow_read(_context: JobContext) -> dict[str, object]:
+            calls.append("read")
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+
+        async def close_read(_context: JobContext) -> dict[str, object]:
+            calls.append("close_read")
+            return {"ok": True}
+
+        first = await manager.create_job(task_id="book-one", job_type="read", runner=slow_read)
+        second = await manager.create_job(
+            task_id="book-one",
+            job_type="close_read",
+            runner=close_read,
+            conflict_job_types={"read", "close_read"},
+        )
+
+        assert second.job_id == first.job_id
+        assert second.type == "read"
+        assert second.message == "已有后台任务正在运行"
+        assert any(event.payload.get("requested_type") == "close_read" for event in manager.events(first.job_id))
+
+        done = await manager.wait(first.job_id)
+        assert done.status == "succeeded"
+        assert calls == ["read"]
 
     asyncio.run(run())
 

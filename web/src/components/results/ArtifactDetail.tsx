@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 
 import type { ArtifactView } from "../../api/types";
+import { normalizePublicTerms } from "../../utils/status";
 import { PersonEntryView } from "./PersonEntryView";
 import { TechnicalDetailsDrawer } from "./TechnicalDetailsDrawer";
 import { WriterArtifactView } from "./WriterArtifactView";
@@ -37,14 +38,14 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
   return (
     <article className="artifact-detail">
       <header className="artifact-detail-header">
-        <span>{view.kind}</span>
-        <h2>{view.title}</h2>
+        <span>{normalizePublicTerms(view.kind)}</span>
+        <h2>{normalizePublicTerms(view.title)}</h2>
       </header>
       <div className="artifact-section-grid">
         {view.sections.map((section) => (
           <section className="artifact-section" key={section.title}>
-            <h3>{section.title}</h3>
-            <p>{section.body || "暂无内容。"}</p>
+            <h3>{normalizePublicTerms(section.title)}</h3>
+            <p>{normalizePublicTerms(section.body || "暂无内容。")}</p>
           </section>
         ))}
       </div>
@@ -52,13 +53,13 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
         <div className="artifact-card-grid">
           {view.cards.map((card) => (
             <article className="artifact-card" key={`${card.title}:${card.subtitle}`}>
-              <h3>{card.title}</h3>
-              {card.subtitle ? <p className="muted">{card.subtitle}</p> : null}
-              {card.body ? <p>{card.body}</p> : null}
+              <h3>{normalizePublicTerms(card.title)}</h3>
+              {card.subtitle ? <p className="muted">{normalizePublicTerms(card.subtitle)}</p> : null}
+              {card.body ? <p>{normalizePublicTerms(card.body)}</p> : null}
               {Object.entries(card.fields).map(([key, value]) => (
                 <dl key={key}>
-                  <dt>{key}</dt>
-                  <dd>{value}</dd>
+                  <dt>{normalizePublicTerms(key)}</dt>
+                  <dd>{normalizePublicTerms(value)}</dd>
                 </dl>
               ))}
             </article>
@@ -67,12 +68,12 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
       ) : null}
       {view.tables.map((table) => (
         <div className="artifact-table-wrap" key={table.title}>
-          <h3>{table.title}</h3>
+          <h3>{normalizePublicTerms(table.title)}</h3>
           <table>
             <thead>
               <tr>
                 {table.columns.map((column) => (
-                  <th key={column}>{column}</th>
+                  <th key={column}>{normalizePublicTerms(column)}</th>
                 ))}
               </tr>
             </thead>
@@ -80,7 +81,7 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
               {table.rows.map((row, index) => (
                 <tr key={index}>
                   {table.columns.map((column) => (
-                    <td key={column}>{row[column]}</td>
+                    <td key={column}>{normalizePublicTerms(row[column])}</td>
                   ))}
                 </tr>
               ))}
@@ -90,7 +91,7 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
       ))}
       {view.markdown ? (
         <div className="markdown-body">
-          <ReactMarkdown>{view.markdown}</ReactMarkdown>
+          <ReactMarkdown>{normalizePublicTerms(view.markdown)}</ReactMarkdown>
         </div>
       ) : null}
       <TechnicalDetailsDrawer artifactId={view.artifact_id} available={view.technical_available} />

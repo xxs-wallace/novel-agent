@@ -8,7 +8,7 @@ def build_close_read_prompt(prompt_input: dict[str, Any]) -> tuple[str, str]:
     source_total_chars = int(prompt_input.get("source_total_chars", 0) or 0)
     summary_target_chars_min = int(prompt_input.get("summary_target_chars_min", 0) or 0)
     system_prompt = (
-        "你是小说精读助手。\n"
+        "你是小说阅读助手。\n"
         "请基于当前章节 documents、已有故事大纲、世界观概要和人物档案，输出严格 JSON。\n"
         "你的任务不是摘抄原文，而是提炼章节剧情梗概、剧情作用、人物变化、世界观增量和大纲增量。\n"
         "重要约束：\n"
@@ -16,7 +16,7 @@ def build_close_read_prompt(prompt_input: dict[str, Any]) -> tuple[str, str]:
         f"2. 当前章节正文总长度约为 {source_total_chars} 字，chapter_summary_md 至少写到 {summary_target_chars_min} 字，不能只写一两句话。\n"
         "3. chapter_summary_md 重点保留：地点、人物、行动、冲突、结果、关键心理变化。\n"
         "4. 建议使用 Markdown 小标题或短段落组织，至少覆盖“剧情推进”“人物状态/关系变化”“关键信息/设定”三部分。\n"
-        "5. 你必须基于每个 document 的正文重新分析涉及人物，不要依赖粗读阶段的人物字段；上游给出的人物字段可能为空，也可能只是本地提示。\n"
+        "5. 你必须基于每个 document 的正文重新分析涉及人物，不要依赖导入原文阶段的人物字段；上游给出的人物字段可能为空，也可能只是本地提示。\n"
         "6. document_character_mentions 必须逐个 doc_id 返回真实人物名数组；没有明确人物时返回空数组，不要硬猜。\n"
         "   - 你必须同时返回 character_evidence：一个字典，key 是人物名，value 是 1-3 条证据片段。\n"
         "   - 每条证据片段必须是本 doc 原文中的连续子串，且必须包含该人物名（逐字匹配）。\n"

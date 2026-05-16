@@ -91,7 +91,7 @@ class CommandRouter:
     def _default_commands() -> list[CommandSpec]:
         return [
             CommandSpec("status", "查看当前项目建模、知识库与 Writer 状态", "当前步骤推荐动作", "show_status"),
-            CommandSpec("tasks", "列出所有任务及粗读/精读进度", "当前步骤推荐动作", "list_tasks"),
+            CommandSpec("tasks", "列出所有任务及导入原文/阅读进度", "当前步骤推荐动作", "list_tasks"),
             CommandSpec("task", "进入指定 task id", "当前步骤推荐动作", "select_task", aliases=("use-task",)),
             CommandSpec("new-task", "创建新任务并记录原文路径", "当前步骤推荐动作", "create_task", aliases=("create-task",)),
             CommandSpec(
@@ -103,22 +103,22 @@ class CommandRouter:
             ),
             CommandSpec(
                 "reset-close-read",
-                "清空当前任务的精读进度并允许重做",
+                "清空当前任务的阅读进度并允许重做",
                 "read pipeline",
                 "reset_close_read",
                 aliases=("clear-close-read", "reset-closeread"),
             ),
-            CommandSpec("read", "导入或继续粗读原文；/read --all 完整粗读、精读并更新 KB", "read pipeline", "start_read"),
+            CommandSpec("read", "导入或继续原文；/read --all 完整导入原文、阅读并更新 KB", "read pipeline", "start_read"),
             CommandSpec(
                 "close-read",
-                "运行精读；用法 /close-read [source_path] [--batches N] [--document-kb KB]，默认跑完全部剩余已粗读 documents",
+                "开始阅读；用法 /close-read [source_path] [--batches N] [--document-kb KB]，默认跑完全部剩余已导入 documents",
                 "read pipeline",
                 "start_close_read",
                 aliases=("closeread",),
             ),
             CommandSpec(
                 "query-close-read",
-                "查看精读产物：summary、character、outline、source_arc",
+                "查看阅读产物：summary、character、outline、source_arc",
                 "read pipeline",
                 "query_close_read",
                 aliases=("query", "close-read-query", "inspect-close-read"),

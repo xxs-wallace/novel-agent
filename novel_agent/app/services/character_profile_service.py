@@ -123,7 +123,10 @@ class CharacterProfileService:
             for row in matched_rows:
                 all_known_names.append(self._normalize_name(row["canonical_name"]))
                 all_known_names.extend(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
-            canonical_name = self._choose_canonical_name(all_known_names)
+            canonical_name = self._choose_canonical_name(
+                all_known_names,
+                preferred_name=update.get("preferred_canonical_name"),
+            )
             base_profile = self._merge_existing_rows(matched_rows)
             mentioned_doc_ids_for_update = self._doc_ids_for_names(
                 mentioned_doc_ids_by_name or {},
@@ -174,14 +177,7 @@ class CharacterProfileService:
             )
             relationships = self._merge_relationship_items(
                 base_profile["relationships"],
-                [
-                    *self._as_list(update.get("relationships")),
-                    *self._relationship_items_from_lightweight_evidence(
-                        subject_name=canonical_name,
-                        relationship_evidence=update.get("relationship_evidence"),
-                        chapter_index=chapter_index,
-                    ),
-                ],
+                self._as_list(update.get("relationships")),
                 subject_name=canonical_name,
                 chapter_index=chapter_index,
                 doc_ids=doc_ids,
@@ -704,38 +700,6 @@ class CharacterProfileService:
                 items.append(value)
         return items
 
-    def _relationship_items_from_lightweight_evidence(
-        self,
-        *,
-        subject_name: str,
-        relationship_evidence: object,
-        chapter_index: int,
-    ) -> list[dict[str, Any]]:
-        evidence = self._normalize_text(relationship_evidence)
-        if not evidence or not self._is_fact_like_text(evidence):
-            return []
-        target_names = self._extract_relationship_targets(evidence=evidence, subject_name=subject_name)
-        return [
-            {
-                "target_name": target_name,
-                "relation_type": "互动",
-                "sentiment_state": "",
-                "status_summary": evidence,
-                "field_type": "fact",
-                "evidence_level": "explicit",
-                "last_updated_chapter_index": chapter_index,
-            }
-            for target_name in target_names
-        ]
-
-    def _extract_relationship_targets(self, *, evidence: str, subject_name: str) -> list[str]:
-        names: list[str] = []
-        for token in re.findall(r"(?:与|和|跟|对|向)([\u4e00-\u9fffA-Za-z·]{2,12})", evidence):
-            normalized = self._normalize_name(token)
-            if normalized and normalized != subject_name and normalized not in names:
-                names.append(normalized)
-        return names[:4]
-
     def _merge_speaking_character_status(
         self,
         current_status: object,
@@ -1163,10 +1127,13 @@ class CharacterProfileService:
             self._as_list(source.get("source_doc_ids")),
         )
 
-    def _choose_canonical_name(self, names: list[Any]) -> str:
+    def _choose_canonical_name(self, names: list[Any], *, preferred_name: object = None) -> str:
         normalized = [name for name in (self._normalize_name(item) for item in names) if name]
         if not normalized:
             return ""
+        preferred = self._normalize_name(preferred_name)
+        if preferred and preferred in normalized:
+            return preferred
         return min(normalized, key=self._canonical_name_sort_key)
 
     def _canonical_name_sort_key(self, name: str) -> tuple[int, int, str]:

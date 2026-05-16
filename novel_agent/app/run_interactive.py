@@ -430,10 +430,10 @@ def run_writer_workflow_action(
 
 def _modeling_missing_guidance(missing_steps: list[str]) -> list[str]:
     guidance_by_step = {
-        "documents.not_indexed": "先运行粗读/分段 pipeline，把原文切入 documents 表。",
-        "memory.character_profiles": "先运行精读/记忆流程，生成角色档案。",
-        "memory.story_outline": "补齐 story outline 资产，可通过精读摘要或手工大纲生成。",
-        "memory.world_summary": "补齐 world summary 资产，可通过精读摘要或手工世界观整理生成。",
+        "documents.not_indexed": "先运行导入原文/分段 pipeline，把原文切入 documents 表。",
+        "memory.character_profiles": "先运行阅读/记忆流程，生成角色档案。",
+        "memory.story_outline": "补齐 story outline 资产，可通过阅读摘要或手工大纲生成。",
+        "memory.world_summary": "补齐 world summary 资产，可通过阅读摘要或手工世界观整理生成。",
         "creative_kb.fragment_cards": "运行 Creative KB 构建，生成 fragment_cards / fragment_clusters。",
         "memory.source_arc_map": "运行 post-close-read Source Arc Mapping，生成 .memory/arcs/<book_id>.source_arc_map.json。",
         "creative_kb.narrative_structure_patterns": "运行 KB 结构模式沉淀，生成 NarrativeStructurePattern / ArcPatternCard。",
@@ -1796,17 +1796,17 @@ def _run_pipeline(
 def main() -> int:
     repo_root = resolve_repo_root()
     print("小说续写工作台")
-    print("统一入口可承载粗读、精读、Creative KB、Writer 与恢复流程。")
+    print("统一入口可承载导入原文、阅读、Creative KB、Writer 与恢复流程。")
     entry_mode = _prompt_choice(
         "请选择下一步动作",
         choices={
             "resume": "继续上次会话",
-            "read": "导入/粗读原文",
-            "close-read": "运行精读建模",
+            "read": "导入原文",
+            "close-read": "开始阅读建模",
             "status": "查看建模状态",
             "kb": "构建 Creative KB",
             "writer": "开始或恢复 Writer",
-            "pipeline": "兼容 smoke：旧粗读/精读 pipeline",
+            "pipeline": "兼容 smoke：旧导入原文/阅读 pipeline",
         },
         default="read",
     )
@@ -1834,7 +1834,7 @@ def main() -> int:
     db_path = resolve_db_path(repo_root, str(repo_root / ".indexes" / f"{book_id}.db"))
     if entry_mode == "kb":
         if not db_path.exists():
-            raise SystemExit(f"构建 Creative KB 需要已有粗读数据库，但当前不存在：{db_path}")
+            raise SystemExit(f"构建 Creative KB 需要已有原文数据库，但当前不存在：{db_path}")
         kb_result = _build_creative_kb(db_path=db_path, book_id=book_id, api_key=api_key)
         print("Creative KB 已可用：")
         print(json.dumps(kb_result.to_dict(), ensure_ascii=False, indent=2))
@@ -1852,26 +1852,26 @@ def main() -> int:
         default="fresh",
     )
     max_read_kb = _prompt_optional_int(
-        "请输入本轮粗读最多额外读取多少 KB（resume 模式下表示在 checkpoint 之后再读多少 KB）",
+        "请输入本轮导入原文最多额外读取多少 KB（resume 模式下表示在 checkpoint 之后再读多少 KB）",
         default=50,
         min_value=1,
     )
     max_close_batches = _prompt_optional_int(
-        "请输入本轮精读最多处理多少轮（按章节 batch 计）",
+        "请输入本轮阅读最多处理多少轮（按章节 batch 计）",
         default=12,
         min_value=1,
     )
     segment_step_kb = _prompt_optional_int(
-        "请输入每轮粗读步长 KB（建议 16-32，默认 32）",
+        "请输入每轮导入原文步长 KB（建议 16-32，默认 32）",
         default=DEFAULT_PIPELINE_SEGMENT_STEP_KB,
         min_value=1,
     )
     close_step_batches = _prompt_optional_int(
-        "请输入每轮精读步长 batch（建议 1，默认 1）",
+        "请输入每轮阅读步长 batch（建议 1，默认 1）",
         default=DEFAULT_PIPELINE_CLOSE_STEP_BATCHES,
         min_value=1,
     )
-    build_creative_kb = _prompt_yes_no("是否在粗读/精读后构建 Creative KB 桥段知识库", default=True)
+    build_creative_kb = _prompt_yes_no("是否在导入原文/阅读后构建 Creative KB 桥段知识库", default=True)
 
     if run_mode == "fresh" and db_path.exists():
         db_path.unlink()
@@ -1962,7 +1962,7 @@ def main() -> int:
             print("Creative KB 已可用：")
             print(json.dumps(kb_result.to_dict(), ensure_ascii=False, indent=2))
         elif follow_up == "writer":
-            print("精读记忆已可用，接下来进入 Writer。")
+            print("阅读记忆已可用，接下来进入 Writer。")
             return _run_writer_workflow_interactive(repo_root=repo_root)
     return 0
 

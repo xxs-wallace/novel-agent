@@ -13,6 +13,7 @@ from novel_agent.app.schemas.character_profile_schema import (
     ProfileAttributeItem,
 )
 from novel_agent.app.services.character_profile_service import CharacterProfileService
+from novel_agent.app.services.character_roster_service import CharacterRosterService
 
 
 def _load_json(row: sqlite3.Row, field_name: str) -> list[object]:
@@ -27,6 +28,44 @@ def _fetch_profile_row(conn: sqlite3.Connection, *, book_id: str, canonical_name
     row = CharacterProfilesRepo().get(conn, book_id=book_id, canonical_name=canonical_name)
     assert row is not None
     return row
+
+
+def _profile_payload(
+    *,
+    book_id: str,
+    canonical_name: str,
+    aliases: list[str] | None = None,
+    age_timeline: list[dict[str, object]] | None = None,
+    last_seen_doc_id: int | None = None,
+    last_seen_title_index: int | None = None,
+) -> dict[str, object]:
+    return {
+        "book_id": book_id,
+        "canonical_name": canonical_name,
+        "aliases": aliases or [],
+        "profile_summary_md": f"# {canonical_name}\n",
+        "speaking_character_status": "unknown",
+        "personhood_evidence_summary": "",
+        "evidence_level": "inferred",
+        "personality": [],
+        "occupations": [],
+        "age_timeline": age_timeline or [],
+        "abilities": [],
+        "recent_activity": [],
+        "relationships": [],
+        "story_events": [],
+        "chapter_indexes": [],
+        "mentioned_doc_ids": [],
+        "speaking_doc_ids": [],
+        "first_seen_doc_id": last_seen_doc_id,
+        "last_seen_doc_id": last_seen_doc_id,
+        "first_seen_title_index": last_seen_title_index,
+        "last_seen_title_index": last_seen_title_index,
+        "importance_score": 0,
+        "profile_version": 1,
+        "created_at": "now",
+        "updated_at": "now",
+    }
 
 
 def test_character_profile_snapshot_to_dict_contains_evidence_contract() -> None:
@@ -108,6 +147,60 @@ def test_character_profile_snapshot_to_dict_contains_evidence_contract() -> None
     assert payload["relationships"][0]["last_updated_chapter_index"] == 5
 
 
+def test_character_roster_uses_recent_profiles_with_compact_identity_fields(tmp_path) -> None:
+    db = NovelAgentDB(tmp_path / "character_roster.db")
+    repo = CharacterProfilesRepo()
+    service = CharacterRosterService(profiles_repo=repo, max_names=2)
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        repo.upsert(
+            conn,
+            _profile_payload(
+                book_id="book-1",
+                canonical_name="旧人物",
+                aliases=["旧称"],
+                last_seen_doc_id=1,
+                last_seen_title_index=1,
+            ),
+        )
+        repo.upsert(
+            conn,
+            _profile_payload(
+                book_id="book-1",
+                canonical_name="新人物",
+                aliases=["新称"],
+                age_timeline=[
+                    {
+                        "label": "二十岁左右",
+                        "chapter_range": "2",
+                        "reason": "",
+                        "field_type": "inference",
+                        "evidence_level": "inferred",
+                    }
+                ],
+                last_seen_doc_id=9,
+                last_seen_title_index=3,
+            ),
+        )
+        repo.upsert(
+            conn,
+            _profile_payload(
+                book_id="book-1",
+                canonical_name="中间人物",
+                last_seen_doc_id=5,
+                last_seen_title_index=2,
+            ),
+        )
+
+        roster = service.load_recent_roster(conn, book_id="book-1")
+
+    assert [item["canonical_name"] for item in roster] == ["新人物", "中间人物"]
+    assert roster[0]["aliases"] == ["新称"]
+    assert roster[0]["age_labels"] == ["二十岁左右"]
+    assert roster[0]["last_seen_doc_id"] == 9
+
+
 def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) -> None:
     db = NovelAgentDB(tmp_path / "character_profiles.db")
     service = _build_service()
@@ -160,8 +253,8 @@ def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) 
     assert personality[0]["evidence_level"] == "inferred"
     assert recent_activity[-1]["value"] == "在雨夜赶往医院"
     assert recent_activity[-1]["field_type"] == "fact"
-    assert "## 已确认事实" in str(row["profile_summary_md"])
-    assert "## 审慎推断" in str(row["profile_summary_md"])
+    assert "## 基本属性/关系/能力" in str(row["profile_summary_md"])
+    assert "## 剧情时间线" in str(row["profile_summary_md"])
 
 
 def test_merge_updates_resolves_relationship_conflicts_and_alias_targets(tmp_path) -> None:

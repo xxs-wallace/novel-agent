@@ -247,7 +247,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        section_title = QtWidgets.QLabel("粗读 / 精读 Pipeline")
+        section_title = QtWidgets.QLabel("导入原文 / 阅读 Pipeline")
         section_title.setObjectName("SectionTitle")
         layout.addWidget(section_title)
 
@@ -289,10 +289,10 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("小说路径", path_row)
         form.addRow("DeepSeek API Key", self.api_key_status_label if self._env_api_key_available else self.api_key_input)
         form.addRow("运行模式", self.run_mode_input)
-        form.addRow("粗读上限 KB", self.max_read_input)
-        form.addRow("精读轮数", self.max_close_input)
-        form.addRow("粗读步长 KB", self.segment_step_input)
-        form.addRow("精读步长 batch", self.close_step_input)
+        form.addRow("导入原文上限 KB", self.max_read_input)
+        form.addRow("阅读轮数", self.max_close_input)
+        form.addRow("导入原文步长 KB", self.segment_step_input)
+        form.addRow("阅读步长 batch", self.close_step_input)
         form.addRow("", self.creative_kb_input)
         layout.addLayout(form)
         return page

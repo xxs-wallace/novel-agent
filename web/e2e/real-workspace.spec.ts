@@ -44,7 +44,7 @@ const smokeTimeoutMs = 30 * 60 * 1000;
 
 test.setTimeout(smokeTimeoutMs);
 
-test("real workspace flow clicks real read, close-read and Creative KB jobs", async ({ page, request }) => {
+test("real workspace flow imports, reads and builds Creative KB jobs", async ({ page, request }) => {
   test.skip(!hasDeepSeekApiKey(), "DEEPSEEK_API_KEY was not found after sourcing ~/.bash_profile.");
   expect(process.env.NOVEL_AGENT_WEB_JOB_MODE ?? "").not.toBe("fake");
 
@@ -60,22 +60,30 @@ test("real workspace flow clicks real read, close-read and Creative KB jobs", as
     await expect(createDialog).toBeVisible();
     await createDialog.getByLabel("任务 ID").fill(taskId);
     await createDialog.getByLabel("原文路径").fill(sourcePath);
-    await createDialog.getByRole("button", { name: "创建", exact: true }).click();
+    const importResponsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().includes(`/api/tasks/${encodeURIComponent(taskId)}/actions`) &&
+        requestBodyAction(response.request().postData()) === "start_read",
+    );
+    await createDialog.getByRole("button", { name: "创建并导入", exact: true }).click();
+    const importResponse = await importResponsePromise;
+    expect(importResponse.ok(), "auto import action response should be ok").toBe(true);
+    const readAction = (await importResponse.json()) as WebActionResponse;
 
     await expect(page.getByRole("button", { name: taskId, exact: true })).toBeVisible();
     await page.getByRole("button", { name: taskId, exact: true }).click();
 
-    const readAction = await triggerTaskAction(page, taskId, "开始粗读", "start_read");
-    await expectRealModelEvent(request, readAction.job!.job_id, "粗读模型调用");
+    await expectRealModelEvent(request, readAction.job!.job_id, "导入原文模型调用");
     await waitForProgress(request, taskId, (progress) => {
       const read = progress.read_progress ?? {};
       return Number(read.total ?? 0) > 0 && Number(read.completed ?? 0) >= Number(read.total ?? 0);
     });
     await waitForJobTerminal(request, readAction.job!.job_id);
-    await expect(page.getByText(/后台任务已完成|粗读本轮已完成/).last()).toBeVisible();
+    await expect(page.getByText(/后台任务已完成|原文导入本轮已完成/).last()).toBeVisible();
 
-    const closeReadAction = await triggerTaskAction(page, taskId, "运行精读", "start_close_read");
-    await expectRealModelEvent(request, closeReadAction.job!.job_id, "精读模型调用");
+    const closeReadAction = await triggerTaskAction(page, taskId, "开始阅读", "start_close_read");
+    await expectRealModelEvent(request, closeReadAction.job!.job_id, "阅读模型调用");
     const closeReadStatus = await waitForProgress(request, taskId, (progress) => {
       const read = progress.read_progress ?? {};
       const close = progress.close_read_progress ?? {};
@@ -89,7 +97,7 @@ test("real workspace flow clicks real read, close-read and Creative KB jobs", as
     await expect(page.getByRole("button", { name: taskId, exact: true })).toBeVisible();
     await page.getByRole("button", { name: taskId, exact: true }).click();
     await page.getByRole("button", { name: "总览", exact: true }).click();
-    await expect(page.getByText("Close-read 总览")).toBeVisible();
+    await expect(page.getByText("阅读总览")).toBeVisible();
     await expect(page.getByText("建模准备度")).toBeVisible();
     await expect(page.getByText("raw_json")).toHaveCount(0);
 

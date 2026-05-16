@@ -60,7 +60,7 @@ class RunEventStream:
     def progress_callback(self, event: Mapping[str, Any]) -> None:
         stage = str(event.get("stage") or event.get("agent") or "runner").strip()
         if stage == "segmentation":
-            message = "正在粗读并切分原文"
+            message = "正在导入原文并切分"
         elif stage == "close_reading":
             message = self._close_read_message(event)
         elif stage == "creative_kb":
@@ -195,11 +195,11 @@ class RunEventStream:
             title = str(event.get("chapter_title") or "").strip()
             label = f"：{title}" if title else ""
             suffix = f" · {progress}" if progress else ""
-            return f"正在精读{label}（doc {doc_range}）{suffix}"
+            return f"正在阅读{label}（doc {doc_range}）{suffix}"
         if event_name == "batch_done":
             batch_index = event.get("batch_index")
             doc_range = RunEventStream._doc_range(event)
-            prefix = f"精读 batch {batch_index} 完成" if batch_index else "精读 batch 完成"
+            prefix = f"阅读 batch {batch_index} 完成" if batch_index else "阅读 batch 完成"
             suffix = f" · {progress}" if progress else ""
             return f"{prefix}（doc {doc_range}）{suffix}"
         if event_name == "prompt_start":
@@ -243,4 +243,4 @@ class RunEventStream:
             "world_evidence": "世界观证据",
             "character_reduce": "人物记忆归并",
             "global_memory": "全局记忆归并",
-        }.get(agent, agent or "精读")
+        }.get(agent, agent or "阅读")

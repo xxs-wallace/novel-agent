@@ -103,7 +103,7 @@ class TuiApp:
             result = self.facade.reset_close_read_task(book_id=self.config.book_id)
             deleted = result["deleted"] if isinstance(result.get("deleted"), dict) else {}
             return (
-                f"已清空任务 {self.config.book_id} 的精读进度，可以重新执行 /close-read。\n"
+                f"已清空任务 {self.config.book_id} 的阅读进度，可以重新执行 /close-read。\n"
                 f"清理：chapters={deleted.get('chapters', 0)}，人物档案={deleted.get('character_profiles', 0)}，"
                 f"进度={deleted.get('close_read_progress', 0)}，文件={deleted.get('files', 0)}"
             )
@@ -225,7 +225,7 @@ class TuiApp:
         output_format = "json" if "--json" in args or "--format=json" in args else "markdown"
         positional = tuple(arg for arg in args if arg not in {"--json", "--format=json"})
         if not positional:
-            return "请输入要查看的精读产物类型：summary、character、outline 或 source_arc。"
+            return "请输入要查看的阅读产物类型：summary、character、outline 或 source_arc。"
         query_type = positional[0]
         book_id = self.config.book_id
         if query_type not in QUERY_TYPES and len(positional) >= 2 and positional[1] in QUERY_TYPES:
@@ -235,7 +235,7 @@ class TuiApp:
         else:
             character_name = " ".join(positional[1:])
         if query_type not in QUERY_TYPES:
-            return "未知精读产物类型。可用类型：summary、character、outline、source_arc。"
+            return "未知阅读产物类型。可用类型：summary、character、outline、source_arc。"
         summary_selector = self._parse_summary_selector(positional[1:]) if query_type == "summary" else {}
         if query_type == "summary":
             character_name = ""

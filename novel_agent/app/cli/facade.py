@@ -39,7 +39,7 @@ class ModelingStatusSnapshot:
     def ready_map(self) -> dict[str, bool]:
         return {
             "原文": self.documents_ready,
-            "精读记忆": self.close_read_ready,
+            "阅读记忆": self.close_read_ready,
             "人物档案": self.character_profiles_ready,
             "世界观": self.world_summary_ready,
             "故事大纲": self.story_outline_ready,
@@ -66,10 +66,10 @@ class TuiTaskSnapshot:
     def render_status_line(self, *, active: bool = False) -> str:
         marker = "* " if active else "  "
         source = f" · source={self.source_path}" if self.source_path else ""
-        close_status = "精读完成" if self.close_read_done else f"精读至 doc {self.close_read_completed_doc_id or 0}/{self.max_doc_id or 0}"
+        close_status = "阅读完成" if self.close_read_done else f"阅读至 doc {self.close_read_completed_doc_id or 0}/{self.max_doc_id or 0}"
         return (
             f"{marker}{self.book_id} · documents={self.documents_count} · chapters={self.chapters_count} · "
-            f"粗读至 doc {self.segmentation_completed_doc_id or 0}/{self.max_doc_id or 0} · {close_status}{source}"
+            f"导入原文至 doc {self.segmentation_completed_doc_id or 0}/{self.max_doc_id or 0} · {close_status}{source}"
         )
 
 
@@ -240,7 +240,7 @@ class WorkflowFacade:
             if path.exists():
                 path.unlink()
                 deleted["files"] = int(deleted["files"]) + 1
-        self.event_stream.emit("系统", f"已清空任务 {normalized} 的精读进度", payload=deleted)
+        self.event_stream.emit("系统", f"已清空任务 {normalized} 的阅读进度", payload=deleted)
         return {"book_id": normalized, "deleted": deleted}
 
     def modeling_status(self, *, book_id: str, db_path: Path | None = None) -> ModelingStatusSnapshot:
@@ -318,7 +318,7 @@ class WorkflowFacade:
     ) -> dict[str, object]:
         from .. import run_interactive
 
-        self.event_stream.emit("系统", "开始在统一工作台中运行粗读/精读")
+        self.event_stream.emit("系统", "开始在统一工作台中运行导入原文/阅读")
         with self.event_stream.capture_stdout(ingest_progress=False):
             result = run_interactive._run_pipeline(  # noqa: SLF001 - facade intentionally delegates to legacy runner.
                 repo_root=self.repo_root,
@@ -337,7 +337,7 @@ class WorkflowFacade:
                 should_stop=should_stop,
                 progress_callback=self.event_stream.progress_callback,
             )
-        self.event_stream.emit("系统", "粗读/精读本轮已完成", payload=result)
+        self.event_stream.emit("系统", "导入原文/阅读本轮已完成", payload=result)
         return result
 
     def build_creative_kb(self, *, db_path: Path, book_id: str, api_key: str) -> dict[str, object]:

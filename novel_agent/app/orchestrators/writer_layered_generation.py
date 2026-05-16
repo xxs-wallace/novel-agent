@@ -332,8 +332,8 @@ class WriterLayeredGenerationOrchestrator:
                 str(payload.get("preferred_outcome") or ""),
             ]
         )
-        extracted = self.mention_service.extract_local_candidates(raw_text, limit=16)
-        character_candidates = self.mention_service.clean_names([*raw_major_characters, *extracted])
+        _ = raw_text
+        character_candidates = self.mention_service.clean_names(raw_major_characters)
         major_characters: list[str] = []
         for _, candidate in sorted(enumerate(character_candidates), key=lambda item: (-len(item[1]), item[0])):
             if any(len(existing) > len(candidate) and candidate in existing for existing in major_characters):
@@ -1192,13 +1192,7 @@ class WriterLayeredGenerationOrchestrator:
                 if text:
                     known_name_map[text] = canonical
 
-        raw_names = [
-            *intent.major_characters,
-            *self.mention_service.extract_local_candidates(
-                "\n".join([*intent.desired_actions, intent.preferred_outcome, intent.notes]),
-                limit=20,
-            ),
-        ]
+        raw_names = list(intent.major_characters)
         cleaned_names = self.mention_service.clean_names(raw_names)
         unconfirmed_missing_names: set[str] = set()
         confirmed_missing_names: set[str] = set()

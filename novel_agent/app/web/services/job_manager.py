@@ -96,16 +96,19 @@ class JobManager:
         job_type: str,
         payload: dict[str, Any] | None = None,
         runner: JobRunner | None = None,
+        conflict_job_types: set[str] | None = None,
     ) -> JobSummary:
         active_record = self._active_record(task_id=task_id, job_type=job_type)
+        if active_record is None and conflict_job_types is not None:
+            active_record = self._active_record_for_task(task_id=task_id, job_types=conflict_job_types)
         if active_record is not None:
-            active_record.message = "已有同类后台任务正在运行"
+            active_record.message = "已有后台任务正在运行"
             active_record.updated_at = _utc_now()
             self.emit_event(
                 active_record.job_id,
                 "progress",
-                "已有同类后台任务正在运行，本次点击已复用现有任务。",
-                payload={"deduplicated": True, "type": job_type},
+                "已有后台任务正在运行，本次点击已复用现有任务。",
+                payload={"deduplicated": True, "type": active_record.type, "requested_type": job_type},
             )
             return self.summary(active_record.job_id)
         job_id = uuid.uuid4().hex
@@ -127,6 +130,14 @@ class JobManager:
     def _active_record(self, *, task_id: str, job_type: str) -> JobRecord | None:
         for record in self._records.values():
             if record.task_id != task_id or record.type != job_type:
+                continue
+            if record.status not in self.TERMINAL_STATUSES:
+                return record
+        return None
+
+    def _active_record_for_task(self, *, task_id: str, job_types: set[str]) -> JobRecord | None:
+        for record in self._records.values():
+            if record.task_id != task_id or record.type not in job_types:
                 continue
             if record.status not in self.TERMINAL_STATUSES:
                 return record
@@ -173,7 +184,7 @@ class JobManager:
         *,
         payload: dict[str, Any] | None = None,
     ) -> JobEventView:
-        record = self._require_record(job_id)
+        self._require_record(job_id)
         events = self._events.setdefault(job_id, [])
         event = JobEventView(
             event_id=f"{len(events) + 1:06d}",

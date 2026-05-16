@@ -9,7 +9,7 @@ def build_chapter_summary_prompt(prompt_input: dict[str, Any]) -> tuple[str, str
     summary_target_chars_min = int(prompt_input.get("summary_target_chars_min", 0) or 0)
     title_indexes = _title_indexes(prompt_input)
     system_prompt = (
-        "你是小说精读 Reading Agent，只负责章节级剧情梗概（plot synopsis）。\n"
+        "你是小说阅读 Reading Agent，只负责章节级剧情梗概（plot synopsis）。\n"
         "请基于 documents 输出严格 JSON；不要更新人物档案、世界观文档或故事大纲。\n"
         "要求：\n"
         "1. chapter_summary_md 必须是压缩后的剧情梗概，不是原文摘要、不是摘录、不是读后感，也不是 document 开头/结尾的前缀裁剪。\n"

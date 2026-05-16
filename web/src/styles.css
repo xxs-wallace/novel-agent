@@ -25,10 +25,14 @@
   box-sizing: border-box;
 }
 
+html,
 body {
+  height: 100%;
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 button,
@@ -48,13 +52,16 @@ button:disabled {
 }
 
 #root {
-  min-height: 100vh;
+  height: 100%;
+  min-height: 0;
 }
 
 .workspace-shell {
-  min-height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .top-bar {
@@ -142,17 +149,18 @@ button:disabled {
 
 .workspace-grid {
   min-height: 0;
-  height: calc(100vh - 64px);
+  height: 100%;
   display: grid;
   grid-template-columns: minmax(250px, 18rem) minmax(420px, 1fr) minmax(370px, 31rem);
   gap: 1px;
   background: var(--panel-border);
+  overflow: hidden;
 }
 
 .workspace-panel {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   background: var(--panel-bg);
 }
 
@@ -190,9 +198,11 @@ button:disabled {
 .task-rail,
 .conversation-pane,
 .result-explorer {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .task-rail {
@@ -202,8 +212,15 @@ button:disabled {
 
 .rail-header,
 .pane-title-row {
+  flex: 0 0 auto;
   justify-content: space-between;
   gap: 12px;
+}
+
+.rail-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 h1,
@@ -300,8 +317,14 @@ h3 {
 }
 
 .task-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
   display: grid;
+  align-content: start;
   gap: 10px;
+  padding-right: 2px;
 }
 
 .task-card {
@@ -429,8 +452,23 @@ h3 {
   border-radius: 8px;
 }
 
-.refresh-button {
-  margin-top: auto;
+.task-switch-prompt {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #efd7a7;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.task-switch-prompt p {
+  color: #4b3513;
+  font-weight: 700;
+}
+
+.task-switch-prompt div {
+  display: flex;
+  gap: 8px;
 }
 
 .dialog-backdrop {
@@ -502,6 +540,11 @@ textarea {
   color: var(--danger);
 }
 
+.form-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .preview-box,
 .technical-json {
   max-height: 340px;
@@ -521,6 +564,7 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -600,11 +644,16 @@ textarea {
 }
 
 .floating-decision-stack {
+  flex: 0 0 auto;
+  max-height: 24%;
+  overflow: auto;
+  overscroll-behavior: contain;
   display: grid;
   gap: 10px;
 }
 
 .scoped-revision-composer {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: 150px 1fr auto;
   gap: 8px;
@@ -616,6 +665,7 @@ textarea {
 }
 
 .composer {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 10px;
@@ -682,6 +732,7 @@ textarea {
 .detail-shell {
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
@@ -908,7 +959,7 @@ th {
   }
 
   .workspace-grid {
-    height: calc(100vh - 116px);
+    height: 100%;
     display: block;
     background: var(--panel-bg);
   }

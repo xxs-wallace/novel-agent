@@ -20,6 +20,13 @@ def _find_node(nodes: list[dict[str, Any]], label: str) -> dict[str, Any]:
     return {}
 
 
+FULL_TIMELINE_SUMMARY = (
+    "主角在雨夜收到匿名线索后回到旧码头，先确认信件来源与失踪证人的路径有关，"
+    "再根据现场残留物把旧案重新串联起来。随后同伴补充新的目击证词，使调查方向"
+    "从单一嫌疑人转向更大的利益网络，主角也意识到后续行动必须同时保护证人与追踪幕后联系人。"
+)
+
+
 def _seed_close_read_db(repo_root: Path, task_id: str) -> None:
     db = NovelAgentDB(repo_root / ".indexes" / f"{task_id}.db")
     with db.connect() as conn:
@@ -46,7 +53,24 @@ def _seed_close_read_db(repo_root: Path, task_id: str) -> None:
                 "雨夜获得线索。",
                 json.dumps(["沈青状态：开始主动追查"], ensure_ascii=False),
                 json.dumps({"地点": "旧码头首次出现"}, ensure_ascii=False),
-                json.dumps({"伏笔": "匿名信来源未明"}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "伏笔": "匿名信来源未明",
+                        "chapter_line": "[1] 雨夜线索: 主角获得线索并重新串联旧案。",
+                        "event_summary": FULL_TIMELINE_SUMMARY,
+                        "timeline_events": [
+                            {
+                                "event_id": "chapter-1:event-01-rain-clue",
+                                "label": "雨夜线索推进",
+                                "participants": ["沈青", "顾迟"],
+                                "summary": FULL_TIMELINE_SUMMARY,
+                                "source_doc_ids": [1, 2],
+                                "source_doc_range": "1-2",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 "2026-01-01T00:00:00Z",
                 "2026-01-01T00:00:00Z",
             ),
@@ -129,6 +153,29 @@ def test_chapter_view_is_user_readable_not_raw_json(tmp_path: Path) -> None:
     assert "匿名信来源未明" in rendered
     assert "raw_json" not in view
     assert "mentioned_characters_json" not in rendered
+
+
+def test_outline_view_uses_structured_timeline_events_not_stale_markdown(tmp_path: Path) -> None:
+    task_id = "book-one"
+    _seed_close_read_db(tmp_path, task_id)
+    outline_path = tmp_path / ".memory" / "outlines" / f"{task_id}.outline.md"
+    outline_path.parent.mkdir(parents=True)
+    outline_path.write_text(
+        "# 故事大纲\n\n## 关键时间节点\n- 雨夜线索推进 | 人物：沈青 | 旧的截断摘要...\n",
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(repo_root=tmp_path))
+    client.post("/api/tasks", json={"task_id": task_id, "source_path": ""})
+
+    tree = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=close-read").json()
+    outline = _find_node(tree, "故事大纲")
+    view = client.get(f"/api/artifacts/{outline['id']}/view").json()
+
+    assert view["kind"] == "outline"
+    assert "## 关键时间节点" in view["markdown"]
+    assert FULL_TIMELINE_SUMMARY in view["markdown"]
+    assert "旧的截断摘要..." not in view["markdown"]
+    assert "chapter-1:event-01-rain-clue" in view["markdown"]
 
 
 def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path) -> None:

@@ -96,13 +96,13 @@ def _most_relevant_active_job(active_jobs: list[JobSummary]) -> JobSummary | Non
 
 _ACTIVE_JOB_PROGRESS = {
     "read": {
-        "flow": "粗读",
-        "step": "正在粗读并切分原文",
-        "next_action": "完成后可进入精读",
+        "flow": "导入原文",
+        "step": "正在导入原文并切分",
+        "next_action": "完成后可进入阅读",
     },
     "close_read": {
-        "flow": "精读",
-        "step": "正在精读章节",
+        "flow": "阅读",
+        "step": "正在阅读章节",
         "next_action": "整理人物、世界观与大纲",
     },
     "kb": {

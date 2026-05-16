@@ -94,7 +94,7 @@ class SemanticAliasExtractorService:
             for document in documents
         ]
         system_prompt = (
-            "你是小说精读/创作知识库 Agent。任务是从抽样原文中抽取语义等价词、指代词和表达变体。"
+            "你是小说阅读/创作知识库 Agent。任务是从抽样原文中抽取语义等价词、指代词和表达变体。"
             "只输出 JSON，不要解释。不要发明没有文本依据的专有名词。"
         )
         user_prompt = json.dumps(

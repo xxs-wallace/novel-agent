@@ -10,7 +10,7 @@ _FALLBACK_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]{2,}")
 
 class ChineseTextAnalyzer:
     def __init__(self) -> None:
-        self._jieba, self._jieba_posseg = _load_jieba_modules()
+        self._jieba = _load_jieba_module()
 
     @property
     def is_available(self) -> bool:
@@ -21,24 +21,18 @@ class ChineseTextAnalyzer:
             return [token.strip() for token in self._jieba.cut(text, HMM=True) if token.strip()]
         return _fallback_segment(text)
 
-    def pos_tag(self, text: str) -> list[tuple[str, str]]:
-        if self._jieba_posseg is not None:
-            return [(item.word.strip(), item.flag) for item in self._jieba_posseg.cut(text) if item.word.strip()]
-        return [(token, "") for token in _fallback_segment(text)]
-
     def token_counter(self, text: str) -> Counter[str]:
         return Counter(self.segment(text))
 
 
 @lru_cache(maxsize=1)
-def _load_jieba_modules():
+def _load_jieba_module():
     try:
         import jieba  # type: ignore
-        import jieba.posseg as pseg  # type: ignore
     except ImportError:
-        return None, None
+        return None
     _prime_jieba_dictionary(jieba)
-    return jieba, pseg
+    return jieba
 
 
 def _prime_jieba_dictionary(jieba_module) -> None:

@@ -93,13 +93,13 @@ class PipelineRunConfig:
         if self.run_mode not in {"fresh", "resume"}:
             raise ValueError("运行模式必须是 fresh 或 resume。")
         if self.max_read_kb < 1:
-            raise ValueError("粗读 KB 必须大于 0。")
+            raise ValueError("导入原文 KB 必须大于 0。")
         if self.max_close_batches < 1:
-            raise ValueError("精读轮数必须大于 0。")
+            raise ValueError("阅读轮数必须大于 0。")
         if self.segment_step_kb < 1:
-            raise ValueError("粗读步长必须大于 0。")
+            raise ValueError("导入原文步长必须大于 0。")
         if self.close_step_batches < 1:
-            raise ValueError("精读步长必须大于 0。")
+            raise ValueError("阅读步长必须大于 0。")
         if not self.source_path.expanduser().exists():
             raise ValueError(f"小说路径不存在：{self.source_path}")
 

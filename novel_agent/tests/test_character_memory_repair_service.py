@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from novel_agent.app.constants import DEFAULT_CLOSE_READING_STAGE
+from novel_agent.app.llm import JsonModelClient
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentsRepo
@@ -12,7 +13,7 @@ from novel_agent.app.schemas.config_schema import CloseReadAgentConfig, CloseRea
 from novel_agent.app.services.character_memory_repair_service import CharacterMemoryRepairService
 
 
-def test_character_memory_repair_backfills_profiles_without_rewriting_summary(tmp_path: Path) -> None:
+def test_character_memory_repair_backfills_profiles_without_rewriting_summary(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / ".indexes" / "book.db"
     db = NovelAgentDB(db_path)
     with db.connect() as conn:
@@ -90,6 +91,73 @@ def test_character_memory_repair_backfills_profiles_without_rewriting_summary(tm
             },
         )
         conn.commit()
+
+    def fake_generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory,
+        use_fallback_on_error: bool = False,
+    ):
+        _ = self, use_fallback_on_error
+        if "Character Evidence Agent" in system_prompt:
+            if "沈青说今晚继续调查" in user_prompt:
+                return (
+                    {
+                        "doc_id": doc_1,
+                        "document_title_index": 1,
+                        "request_full_roster": False,
+                        "request_full_roster_reason": "",
+                        "characters": [
+                            {
+                                "canonical_name": "沈青",
+                                "aliases": [],
+                                "is_speaking_character": True,
+                                "speaking_evidence": "沈青说今晚继续调查。",
+                                "personhood_evidence": "沈青发言并推进调查。",
+                                "activity_or_state_evidence": "沈青继续调查旧案。",
+                                "relationship_evidence": "",
+                                "source_doc_ids": [doc_1],
+                                "source_title_indexes": [1],
+                                "candidate_type": "character",
+                                "confidence": 0.9,
+                                "uncertainty_reason": "",
+                            }
+                        ],
+                    },
+                    "",
+                )
+            return (
+                {
+                    "doc_id": doc_2,
+                    "document_title_index": 1,
+                    "request_full_roster": False,
+                    "request_full_roster_reason": "",
+                    "characters": [
+                        {
+                            "canonical_name": "沈青",
+                            "aliases": [],
+                            "is_speaking_character": False,
+                            "speaking_evidence": "",
+                            "personhood_evidence": "沈青随后赶到。",
+                            "activity_or_state_evidence": "沈青赶到现场。",
+                            "relationship_evidence": "",
+                            "source_doc_ids": [doc_2],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.88,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Character Reduce Agent" in system_prompt:
+            return fallback_factory(), ""
+        return fallback_factory(), ""
+
+    monkeypatch.setattr(JsonModelClient, "generate_json", fake_generate_json)
 
     result = CharacterMemoryRepairService(
         repo_root=tmp_path,

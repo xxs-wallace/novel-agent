@@ -114,6 +114,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - `outline_research_trace.json`
 - `planning_notebook.json`
 - `SufficiencyDecision`
+- 可恢复的 `WriterQuestionSet` 或等价问题集 payload
 
 要求：
 
@@ -129,6 +130,11 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - 每轮 research 必须维护或更新 `planning_notebook`
 - 若达到预算上限仍缺少关键授权边界，系统 SHALL 向用户提出少量阻塞问题，而不是静默假设高风险剧情
 - `SufficiencyDecision` SHALL 明确区分模型可生成内容、需要用户补充的知识、可安全假设的低风险缺口和必须先补建模的阻塞项
+- 当 `SufficiencyDecision.status = needs_user_input` 时，系统 SHALL 产出结构化问题集，至少包含 `question_set_id`、`questions[]`、问题与缺口的关联、是否必答、来源 artifact / checkpoint 引用和继续执行 action
+- 用户界面 MAY 以聊天消息展示问题，并 MAY 使用同一个聊天输入框收集回答；但用户回答 SHALL 绑定对应 `question_set_id`，不能退化为无语义普通消息
+- 系统 SHALL 仅在收到 `continue_after_outline_research_input` 或等价结构化 action 后继续 workflow；普通聊天消息不得自动绕过 `needs_user_input`
+- 用户回答 SHALL 以原始 `answer_text` 保留，并在可行时映射为逐题 `user_answers[]`；系统不得伪造用户未回答的内容
+- 用户确认后的回答进入 `planning_notebook` 时来源类型 SHALL 标记为 `user_authorized`
 
 #### Memory / Writer 分工
 
@@ -436,6 +442,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - **THEN** 系统询问用户是否将其作为新增人物
 - **AND** 只有用户确认新增后，系统才要求补充最小人物档案
 - **AND** 未经确认的人物不得直接写入 `CharacterCastPlan` 或正式 Character Memory
+- **AND** 若该确认通过 Web 聊天消息承载，也必须绑定具体问题或确认项，而不是从普通聊天中推断用户授权
 
 #### Scenario: 模型提出 story_detail 查询
 - **WHEN** 模型需要了解历史剧情细节
@@ -453,6 +460,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - **WHEN** 本地资料无法回答关键授权边界，或预算耗尽后仍存在阻塞缺口
 - **THEN** 模型输出 `needs_user_input`
 - **AND** 系统向用户提出少量具体问题，问题应能直接补齐大纲生成所需知识
+- **AND** 系统输出可恢复的 `WriterQuestionSet` 或等价 payload，包含稳定 `question_set_id` 与逐题 `question_id`
 - **AND** 不得对高风险剧情、终局秘密、关系跃迁或世界规则突破做静默假设
 
 #### Scenario: 预算耗尽后继续生成草案
@@ -469,8 +477,10 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 #### Scenario: 用户补充知识进入 research
 - **WHEN** 用户回答 `needs_user_input` 中的问题
-- **THEN** 系统将用户回答记录为 `user_authorized` evidence
+- **THEN** 用户回答通过 `continue_after_outline_research_input` 或等价结构化 action 提交
+- **AND** 系统将用户回答记录为 `user_authorized` evidence
 - **AND** 将其加入 `planning_notebook`
+- **AND** 系统保留回答原文；若回答无法覆盖全部必答问题，不得伪造缺失答案
 - **AND** 系统 MAY 继续一小轮 research 或直接生成大纲
 
 ### Requirement: story_detail 必须通过本地 Resolver 解析
@@ -668,6 +678,7 @@ Writer 层主要产物：
 
 - `outline_seed_packet.json`
 - `outline_research_trace.json`
+- `outline_research_question_set.json`（`needs_user_input` 时的问题集，可嵌入或引用在 `sufficiency_decision.json` 中）
 - `memory_query_trace.json`（来自 BTree descent / Memory page query，可嵌入或引用在 `outline_research_trace.json` 中）
 - `memory_query_decision_log.json`（Writer 模型对 Memory candidates 的结构化选择记录，可选独立落盘）
 - `planning_notebook.json`

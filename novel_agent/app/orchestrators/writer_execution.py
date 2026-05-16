@@ -28,7 +28,6 @@ from ..services.rerank_service import RerankService
 from ..services.world_state_service import WorldStateService
 
 
-UNKNOWN_NEW_CHARACTER_MAX_OCCURRENCES = 1
 NARRATION_CONSISTENCY_RULES = (
     "必须识别并延续原作已建立的叙事视角、叙述者身份、信息可见性和视角切换习惯。",
     "如果原作采用固定第一人称或固定限知视角，续写不得擅自更换第一人称叙述者或改成另一名角色自述。",
@@ -1312,7 +1311,17 @@ class RestrictedWriterExecutor:
     ) -> dict[str, Any]:
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
         chapter_id = str(execution_input.get("chapter_id") or "")
-        mentioned_characters = self.mention_service.extract_local_candidates(draft_text, limit=20)
+        planned_names = [
+            str(item.get("canonical_name") or "")
+            for item in execution_input.get("planned_character_constraints", [])
+            if isinstance(item, dict) and str(item.get("canonical_name") or "")
+        ]
+        mentioned_characters = self.mention_service.clean_names(
+            [
+                *_normalize_string_list(chapter_brief.get("must_include")),
+                *planned_names,
+            ]
+        )
         relationship_changes: list[StateChange] = []
         for item in chapter_brief.get("relationship_targets") or []:
             if not isinstance(item, dict):
@@ -1328,10 +1337,7 @@ class RestrictedWriterExecutor:
                         reason=str(chapter_brief.get("goal") or ""),
                     )
                 )
-        character_changes = [
-            StateChange(subject=name, to_state="本章出场并推进当前剧情", reason=str(chapter_brief.get("goal") or ""))
-            for name in mentioned_characters[:4]
-        ]
+        character_changes: list[StateChange] = []
         timeline_label = str(execution_input.get("chapter_title") or chapter_brief.get("title") or chapter_id)
         state_delta = StateDelta(
             chapter_id=chapter_id,
@@ -1692,6 +1698,7 @@ class RestrictedWriterExecutor:
         draft_text: str,
         planned_character_constraints: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        _ = draft_text
         issues: list[ContinuityIssue] = []
         known_names = {
             str(row["canonical_name"])
@@ -1702,14 +1709,8 @@ class RestrictedWriterExecutor:
             for item in planned_character_constraints
             if str(item.get("canonical_name") or "")
         }
-        mentioned = self.mention_service.extract_local_candidates(draft_text, limit=20)
+        mentioned: list[str] = []
         unknown_mentions: list[str] = []
-        for name in mentioned:
-            if name in known_names or name in planned_names:
-                continue
-            if draft_text.count(name) <= UNKNOWN_NEW_CHARACTER_MAX_OCCURRENCES:
-                continue
-            unknown_mentions.append(name)
         blocked = bool(unknown_mentions)
         if unknown_mentions:
             issues.append(

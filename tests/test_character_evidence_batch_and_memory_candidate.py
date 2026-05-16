@@ -104,6 +104,9 @@ def test_character_evidence_batch_joins_consecutive_documents_without_chapter_bi
         documents=documents,
         existing_context_summary="已有世界观概要",
         local_character_hints={1: ["路明非"], 2: ["诺诺"], 3: ["楚子航"]},
+        existing_character_roster=[
+            {"canonical_name": "路明非", "aliases": ["明非"], "last_seen_doc_id": 1},
+        ],
     )
 
     assert batch.character_evidence_batch_id == "book-1:character-evidence:1-3"
@@ -111,7 +114,10 @@ def test_character_evidence_batch_joins_consecutive_documents_without_chapter_bi
     assert batch.document_title_indexes == [1, 2]
     assert "[DOC doc_id=1 title_index=1 title=第一章]" in batch.batch_text
     assert "[DOC doc_id=3 title_index=2 title=第二章]" in batch.batch_text
-    assert batch.documents[1]["local_character_hints"] == ["诺诺"]
+    assert "local_character_hints" not in batch.documents[1]
+    assert batch.existing_character_roster == [
+        {"canonical_name": "路明非", "aliases": ["明非"], "last_seen_doc_id": 1},
+    ]
 
 
 def test_character_evidence_prompt_is_batch_level_and_excludes_offsets() -> None:
@@ -126,6 +132,8 @@ def test_character_evidence_prompt_is_batch_level_and_excludes_offsets() -> None
     assert "personhood_evidence" in user_prompt
     assert "activity_or_state_evidence" in user_prompt
     assert "relationship_evidence" in user_prompt
+    assert "local_character_hints" not in user_prompt
+    assert "existing_character_roster" in user_prompt
     assert "document_character_mentions" in system_prompt
     assert "不要逐 doc_id 返回人物列表" in system_prompt
     assert "mention_offsets" in system_prompt
@@ -234,9 +242,7 @@ def test_character_profile_service_consumes_lightweight_character_evidence(tmp_p
     assert row["personhood_evidence_summary"] == "被称呼并发言，执行具体行动。"
     assert row["evidence_level"] == "explicit"
     assert json.loads(row["recent_activity_json"])[0]["value"] == "路明非决定进入学院。"
-    relationships = json.loads(row["relationships_json"])
-    assert relationships[0]["target_name"] == "楚子航"
-    assert relationships[0]["status_summary"] == "与楚子航 直接对话并建立信任。"
+    assert json.loads(row["relationships_json"]) == []
     assert "发言状态：confirmed_speaking" in row["profile_summary_md"]
     assert "人物性证据：被称呼并发言，执行具体行动。" in row["profile_summary_md"]
 

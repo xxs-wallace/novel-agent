@@ -14,7 +14,7 @@ def build_plot_summary_unit_prompt(
     fallback_payload: dict[str, Any],
 ) -> tuple[str, str]:
     system_prompt = (
-        "你是小说精读后的剧情梗概压缩 Agent。\n"
+        "你是小说阅读后的剧情梗概压缩 Agent。\n"
         "你的任务是把连续 document/chapter 级梗概压缩成一个更精简的剧情单元，用于后续篇章节奏分析。\n"
         "只输出严格 JSON，不要输出 Markdown 代码块、解释或额外字段。\n"
         "要求：保留主线事件、人物状态变化、关系推进、设定揭示、伏笔、转折边界和与相邻单元的衔接钩子。\n"

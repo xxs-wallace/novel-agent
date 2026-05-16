@@ -1,13 +1,15 @@
-# Writer Agent Review Contracts
+# Writer Agent Review and User Input Contracts
 
 ## 1. 目的
 
-本文件用于冻结 Writer Agent 章节验收与返工环节的跨模块对象，供以下文档共同遵循：
+本文件用于冻结 Writer Agent 章节验收、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
 
 - [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
 - [design.md](.trae/specs/writer-agent-layered-generation/design.md)
+- [../web-interface/spec.md](.trae/specs/web-interface/spec.md)
+- [../web-interface/design.md](.trae/specs/web-interface/design.md)
 
-本 contract 只定义模块间如何传递“章节验收决策”“长度调整请求”“章节重规划请求”，不替代各层内部实现。
+本 contract 只定义模块间如何传递“章节验收决策”“长度调整请求”“章节重规划请求”“大纲研究补充问题与回答”，不替代各层内部实现。
 
 ## 2. Design Principles
 
@@ -29,6 +31,8 @@
 - `draft_id`: 当前待审草稿版本标识
 - `run_id`: 一次生成运行的标识
 - `reviewer_type`: 发起决策的主体类型
+- `question_set_id`: 一组待用户回答问题的稳定标识
+- `question_id`: 问题集内单个问题的稳定标识
 
 ### 3.2 时间与路径
 
@@ -41,6 +45,7 @@
 - `revise_length` 只允许回到 `wait_length_review`
 - `replan_chapter` 只允许回到 `wait_chapter_review`
 - `discarded` 只允许进入 `halted` 或等待用户下一步显式动作
+- `needs_user_input` 只允许通过 `continue_after_outline_research_input` 或等价结构化 action 继续
 
 ## 4. Contract A: GenerationReviewDecision
 
@@ -262,9 +267,110 @@
 - 它不直接产出新的章节梗概，只提供重规划约束
 - 它不允许越过章节梗概层直接重写正文
 
-## 7. Object Relationships
+## 7. Contract D: OutlineResearchQuestionSet
 
-### 7.1 Decision to Update Mapping
+### 7.1 用途
+
+- 表达 Outline Research Loop 在 `needs_user_input` 时需要用户补充的问题集
+- 供 Web / CLI / TUI 用同一语义展示问题、收集回答并恢复等待态
+- 驱动用户回答后继续 research 或生成大纲
+
+### 7.2 Frozen Fields
+
+```json
+{
+  "schema_version": "1.0",
+  "question_set_id": "outline-research-run-20260503-001-001",
+  "run_id": "run-20260503-001",
+  "stage": "outline_research_user_input",
+  "status": "pending",
+  "source_artifact_id": "writer:run-20260503-001:sufficiency-decision",
+  "artifact_path": "runs/writer/run-20260503-001/outline_research_question_set.json",
+  "questions": [
+    {
+      "question_id": "q1",
+      "prompt": "这个新增角色是否应视为正式登场人物，还是只作为传闻中的名字？",
+      "required": true,
+      "hint": "这会影响后续人物补充和章节规划。",
+      "gap_id": "gap-new-character-authorization",
+      "risk_level": "high"
+    }
+  ],
+  "actions": {
+    "submit": "continue_after_outline_research_input",
+    "defer": "defer_outline_research_answers"
+  },
+  "created_at": "2026-05-03T12:10:00Z"
+}
+```
+
+### 7.3 Required Fields
+
+- `schema_version`
+- `question_set_id`
+- `run_id`
+- `stage`
+- `status`
+- `questions`
+- `actions`
+- `created_at`
+
+### 7.4 Required Rules
+
+- `questions` 必须至少包含一项
+- 每个问题必须包含稳定 `question_id`、用户可读 `prompt` 和 `required`
+- `stage`、`artifact_path` 和 workflow action 名不得作为普通用户界面的主状态展示；只能用于 action payload、恢复和 technical/debug 视图
+- `actions.submit` 的语义必须等价于 `continue_after_outline_research_input`
+- 普通聊天消息不得自动继续该问题集；必须收到结构化 submit action
+- 问题集必须可通过落盘 artifact 或 `sufficiency_decision.json` 引用恢复
+
+### 7.5 Answer Submission
+
+```json
+{
+  "schema_version": "1.0",
+  "submission_id": "outline-answer-run-20260503-001-001",
+  "question_set_id": "outline-research-run-20260503-001-001",
+  "run_id": "run-20260503-001",
+  "source_message_id": "message-123",
+  "answer_text": "作为正式登场人物，但先只在传闻里出现，第三章前不要正面登场。",
+  "user_answers": [
+    {
+      "question_id": "q1",
+      "answer_text": "作为正式登场人物，但先只在传闻里出现，第三章前不要正面登场。"
+    }
+  ],
+  "reviewer_type": "user",
+  "created_at": "2026-05-03T12:15:00Z"
+}
+```
+
+提交对象的必填字段：
+
+- `schema_version`
+- `submission_id`
+- `question_set_id`
+- `run_id`
+- `answer_text`
+- `reviewer_type`
+- `created_at`
+
+提交规则：
+
+- `answer_text` 必须保留用户原始回答
+- `user_answers` 是可选结构化映射；若无法可靠映射，不得伪造缺失问题的答案
+- 必答问题缺失时，workflow 应保持等待态或返回可读补充提示
+- 被接受的回答进入 `planning_notebook` 或等价 artifact 时，来源类型必须是 `user_authorized`
+
+### 7.6 Boundary Notes
+
+- `OutlineResearchQuestionSet` 是用户补充问题对象，不是正式 Memory 事实对象
+- 用户回答成为 Writer planning evidence，不等于直接写入 Character Memory / World KB
+- 新增人物、关系跃迁和世界规则突破仍需遵守对应规划与确认规则
+
+## 8. Object Relationships
+
+### 8.1 Decision to Update Mapping
 
 ```text
 GenerationReviewDecision.status = accepted
@@ -282,28 +388,37 @@ GenerationReviewDecision.status = replan_chapter
 GenerationReviewDecision.status = discarded
   -> no writeback
   -> no automatic next chapter
+
+OutlineResearchQuestionSet.status = pending
+  -> submit answer via continue_after_outline_research_input
+  -> accepted answers become user_authorized evidence
+  -> may continue research or generate outline
 ```
 
-### 7.2 Writeback Boundary
+### 8.2 Writeback Boundary
 
 - 只有 `GenerationReviewDecision.status = accepted` 的草稿允许进入 `Freeze E`
 - `revise_length`、`replan_chapter`、`discarded` 都不得触发正式 Memory / KB 回写
 
-## 8. Recommended Storage Targets
+## 9. Recommended Storage Targets
 
 建议运行期至少落盘以下文件：
 
 - `generation_review_decision.json`
 - `length_plan_update.json`
 - `chapter_replan_request.json`
+- `outline_research_question_set.json`
+- `outline_research_answer_submission.json`
 
-## 9. Breaking Change Rules
+## 10. Breaking Change Rules
 
 以下变更视为 breaking change：
 
 - 删除必填字段
 - 改变 `status` 或 `reason_code` 的既有语义
 - 改变状态与检查点之间的映射关系
+- 改变 `question_set_id` / `question_id` 的稳定性要求
+- 改变用户回答必须保留原文并作为 `user_authorized` evidence 的语义
 
 以下变更视为兼容扩展：
 
