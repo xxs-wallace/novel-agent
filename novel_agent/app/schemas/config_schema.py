@@ -133,6 +133,7 @@ class CloseReadRuntimeConfig:
     debug_markdown_path: str | None = None
     close_read_extraction_window_count: int = 1
     close_read_extraction_max_workers: int = 4
+    character_evidence_coverage_audit: bool = True
     character_reduce_max_workers: int = 4
     world_evidence_signal_threshold: int = 70
 

@@ -17,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=str, default=None)
     parser.add_argument("--db", type=str, default=None)
     parser.add_argument("--book-id", type=str, required=True)
+    parser.add_argument("--min-title-index", type=int, default=None)
     parser.add_argument("--max-doc-id", type=int, default=None)
     parser.add_argument("--model-type", type=str, default="OpenAIModel")
     parser.add_argument("--model-name", type=str, default="deepseek-chat")
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         db_path=db_path,
         config=config,
         progress_callback=emit,
-    ).run(max_doc_id=args.max_doc_id)
+    ).run(min_title_index=args.min_title_index, max_doc_id=args.max_doc_id)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0
 

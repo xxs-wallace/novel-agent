@@ -14,6 +14,7 @@ from typing import Any, Callable
 from ..constants import DEFAULT_CLOSE_READING_STAGE
 from ..llm import InvalidJSONResponseError, JsonModelClient, ModelSettings
 from ..prompts.chapter_summary_prompt import build_chapter_summary_prompt
+from ..prompts.character_evidence_coverage_prompt import build_character_evidence_coverage_prompt
 from ..prompts.character_evidence_prompt import build_character_evidence_prompt
 from ..prompts.character_reduce_prompt import build_character_reduce_prompt
 from ..prompts.global_memory_prompt import build_global_memory_prompt
@@ -667,6 +668,16 @@ class CloseReadRunner:
                         for doc_id, future in evidence_futures[index]
                     ],
                 )
+                prompt_dict = prepared.prompt_input.to_dict()
+                prompt_dict["existing_character_roster"] = prepared.existing_character_roster
+                prompt_dict["full_existing_character_roster"] = prepared.full_existing_character_roster
+                evidence_payloads[index] = self._augment_character_evidence_with_coverage(
+                    model_client=model_client,
+                    batch=batch,
+                    prompt_input=prompt_dict,
+                    summary_payload=summary_payloads[index],
+                    evidence_payload=evidence_payloads[index],
+                )
 
             for index, prepared in enumerate(prepared_extractions):
                 if index in world_futures:
@@ -903,6 +914,167 @@ class CloseReadRunner:
             prompt_builder=build_character_evidence_prompt,
             fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
         )
+
+    def _augment_character_evidence_with_coverage(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+        summary_payload: dict[str, Any],
+        evidence_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not bool(getattr(self.config.runtime, "character_evidence_coverage_audit", True)):
+            return evidence_payload
+        if not str(summary_payload.get("chapter_summary_md") or summary_payload.get("chapter_summary_short") or "").strip():
+            return evidence_payload
+        coverage_payload = self._generate_agent_payload(
+            model_client=model_client,
+            batch=batch,
+            prompt_input=self._build_character_evidence_coverage_input(
+                batch=batch,
+                prompt_input=prompt_input,
+                summary_payload=summary_payload,
+                evidence_payload=evidence_payload,
+            ),
+            agent_name="character_evidence_coverage",
+            prompt_builder=build_character_evidence_coverage_prompt,
+            fallback_factory=lambda: {"coverage_gap_found": False, "coverage_notes": "", "characters": []},
+        )
+        return self._merge_character_evidence_coverage(
+            evidence_payload=evidence_payload,
+            coverage_payload=coverage_payload,
+        )
+
+    def _build_character_evidence_coverage_input(
+        self,
+        *,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+        summary_payload: dict[str, Any],
+        evidence_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        context_parts = [
+            str(prompt_input.get("world_summary_md", "")).strip(),
+            str(prompt_input.get("story_outline_md", "")).strip(),
+        ]
+        roster = [
+            item for item in prompt_input.get("full_existing_character_roster", []) if isinstance(item, dict)
+        ] or [
+            item for item in prompt_input.get("existing_character_roster", []) if isinstance(item, dict)
+        ]
+        evidence_batch = CharacterEvidenceBatchAssemblerService(
+            document_chars_budget=self.config.runtime.document_chars_budget,
+        ).build_batch(
+            book_id=self.config.book_id,
+            documents=batch.documents,
+            existing_context_summary="\n\n".join(part for part in context_parts if part),
+            existing_character_roster=roster,
+            character_roster_scope="full" if roster else "none",
+            can_request_full_roster=False,
+        )
+        return {
+            "book_id": self.config.book_id,
+            "chapter_summary": {
+                "chapter_summary_md": summary_payload.get("chapter_summary_md", ""),
+                "chapter_summary_short": summary_payload.get("chapter_summary_short", ""),
+                "chapter_summaries": summary_payload.get("chapter_summaries", []),
+            },
+            "character_evidence_batch": evidence_batch.to_dict(),
+            "existing_character_evidence": self._compact_character_evidence_payload(evidence_payload),
+            "existing_character_roster": roster,
+        }
+
+    def _compact_character_evidence_payload(self, evidence_payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "doc_ids": self._safe_int_list(evidence_payload.get("doc_ids")),
+            "document_title_indexes": self._safe_int_list(evidence_payload.get("document_title_indexes")),
+            "characters": [
+                {
+                    "canonical_name": item.get("canonical_name", ""),
+                    "aliases": item.get("aliases", []),
+                    "source_doc_ids": self._safe_int_list(item.get("source_doc_ids")),
+                    "source_title_indexes": self._safe_int_list(item.get("source_title_indexes")),
+                    "candidate_type": item.get("candidate_type", ""),
+                    "confidence": item.get("confidence", 0),
+                }
+                for item in self._flatten_character_evidence_items(evidence_payload)
+                if isinstance(item, dict)
+            ],
+        }
+
+    def _merge_character_evidence_coverage(
+        self,
+        *,
+        evidence_payload: dict[str, Any],
+        coverage_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_characters = coverage_payload.get("characters", [])
+        if not isinstance(raw_characters, list) or not raw_characters:
+            return evidence_payload
+        merged = dict(evidence_payload)
+        existing_names = {
+            self.memory_candidate_service.clean_evidence_name(item.get("canonical_name"), character=item)
+            for item in self._flatten_character_evidence_items(merged)
+            if isinstance(item, dict)
+        }
+        existing_names.discard("")
+        additions: list[dict[str, Any]] = []
+        for raw_character in raw_characters:
+            if not isinstance(raw_character, dict):
+                continue
+            character = dict(raw_character)
+            name = self.memory_candidate_service.clean_evidence_name(character.get("canonical_name"), character=character)
+            if not name or name in existing_names:
+                continue
+            character["canonical_name"] = name
+            character.setdefault("candidate_type", "character")
+            character.setdefault("confidence", 0.75)
+            character.setdefault("source_doc_ids", self._safe_int_list(merged.get("doc_ids")))
+            character.setdefault("source_title_indexes", self._safe_int_list(merged.get("document_title_indexes")))
+            additions.append(character)
+            existing_names.add(name)
+        if not additions:
+            return evidence_payload
+
+        batches = merged.get("character_evidence_batches")
+        if isinstance(batches, list):
+            normalized_batches = [dict(item) for item in batches if isinstance(item, dict)]
+            if not normalized_batches:
+                normalized_batches.append(
+                    {
+                        "doc_ids": self._safe_int_list(merged.get("doc_ids")),
+                        "document_title_indexes": self._safe_int_list(merged.get("document_title_indexes")),
+                        "characters": [],
+                    }
+                )
+            for character in additions:
+                target = self._find_evidence_batch_for_character(
+                    evidence_batches=normalized_batches,
+                    character=character,
+                )
+                target.setdefault("characters", [])
+                if isinstance(target["characters"], list):
+                    target["characters"].append(character)
+            merged["character_evidence_batches"] = normalized_batches
+            return merged
+
+        characters = merged.get("characters")
+        merged["characters"] = [*(characters if isinstance(characters, list) else []), *additions]
+        return merged
+
+    def _find_evidence_batch_for_character(
+        self,
+        *,
+        evidence_batches: list[dict[str, Any]],
+        character: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_doc_ids = set(self._safe_int_list(character.get("source_doc_ids")))
+        for evidence_batch in evidence_batches:
+            batch_doc_ids = set(self._safe_int_list(evidence_batch.get("doc_ids")))
+            if source_doc_ids and batch_doc_ids and source_doc_ids.intersection(batch_doc_ids):
+                return evidence_batch
+        return evidence_batches[0]
 
     def _build_character_evidence_input(
         self,

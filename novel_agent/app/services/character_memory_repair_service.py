@@ -28,6 +28,7 @@ from .world_state_service import WorldStateService
 @dataclass(slots=True)
 class CharacterMemoryRepairResult:
     book_id: str
+    min_title_index: int | None
     max_doc_id: int | None
     processed_batches: int = 0
     processed_documents: int = 0
@@ -40,6 +41,7 @@ class CharacterMemoryRepairResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "book_id": self.book_id,
+            "min_title_index": self.min_title_index,
             "max_doc_id": self.max_doc_id,
             "processed_batches": self.processed_batches,
             "processed_documents": self.processed_documents,
@@ -73,7 +75,7 @@ class CharacterMemoryRepairService:
         self.config = config
         self.progress_callback = progress_callback
 
-    def run(self, *, max_doc_id: int | None = None) -> CharacterMemoryRepairResult:
+    def run(self, *, min_title_index: int | None = None, max_doc_id: int | None = None) -> CharacterMemoryRepairResult:
         runner = CloseReadRunner(
             repo_root=self.repo_root,
             db_path=self.db_path,
@@ -94,9 +96,15 @@ class CharacterMemoryRepairService:
         with db.connect() as conn:
             db.init_schema(conn)
             effective_max_doc_id = max_doc_id or self._close_read_max_doc_id(conn, progress_repo=progress_repo)
-            target_documents = self._target_documents(conn, documents_repo=documents_repo, max_doc_id=effective_max_doc_id)
+            target_documents = self._target_documents(
+                conn,
+                documents_repo=documents_repo,
+                min_title_index=min_title_index,
+                max_doc_id=effective_max_doc_id,
+            )
             result = CharacterMemoryRepairResult(
                 book_id=self.config.book_id,
+                min_title_index=min_title_index,
                 max_doc_id=effective_max_doc_id,
                 profile_count_before=self._profile_count(conn),
                 run_id=run_id,
@@ -139,6 +147,13 @@ class CharacterMemoryRepairService:
                     model_client=model_client,
                     batch=batch,
                     prompt_dict=prompt_dict,
+                )
+                evidence_payload = runner._augment_character_evidence_with_coverage(  # noqa: SLF001
+                    model_client=model_client,
+                    batch=batch,
+                    prompt_input=prompt_dict,
+                    summary_payload=summary_payload,
+                    evidence_payload=evidence_payload,
                 )
                 character_reduce_payload = runner._run_character_reduce_agents(  # noqa: SLF001
                     model_client=model_client,
@@ -399,9 +414,16 @@ class CharacterMemoryRepairService:
         conn,
         *,
         documents_repo: DocumentsRepo,
+        min_title_index: int | None,
         max_doc_id: int | None,
     ) -> list[DocumentRow]:
         documents = documents_repo.fetch_after_doc_id(conn, book_id=self.config.book_id, doc_id=None)
+        if min_title_index is not None:
+            documents = [
+                doc
+                for doc in documents
+                if int(doc.document_title_index) >= int(min_title_index)
+            ]
         if max_doc_id is None:
             return documents
         return [doc for doc in documents if int(doc.doc_id) <= int(max_doc_id)]

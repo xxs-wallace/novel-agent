@@ -182,3 +182,61 @@ def test_character_memory_repair_backfills_profiles_without_rewriting_summary(tm
     assert str(chapter["summary_md"] or "") == ""
     assert {row["canonical_name"] for row in profiles} >= {"沈青"}
     assert any("沈青" in keywords for keywords in doc_keywords)
+
+
+def test_character_memory_repair_target_documents_can_start_from_title_index(tmp_path: Path) -> None:
+    db_path = tmp_path / ".indexes" / "book.db"
+    db = NovelAgentDB(db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        docs = DocumentsRepo()
+        docs.insert_document(
+            conn,
+            {
+                "book_id": "book",
+                "path": "source.txt",
+                "scope": "chapter",
+                "title": "第二十七章",
+                "document_title": "第二十七章",
+                "document_title_index": 27,
+                "content": "林初整理线索。",
+                "content_chars": len("林初整理线索。"),
+                "source_path": "source.txt",
+                "source_file_name": "source.txt",
+                "source_start_offset": 0,
+                "source_end_offset": 10,
+                "created_at": "2026-05-15T00:00:00+00:00",
+                "updated_at": "2026-05-15T00:00:00+00:00",
+            },
+        )
+        doc_28 = docs.insert_document(
+            conn,
+            {
+                "book_id": "book",
+                "path": "source.txt",
+                "scope": "chapter",
+                "title": "第二十八章",
+                "document_title": "第二十八章",
+                "document_title_index": 28,
+                "content": "周衡重新出现。",
+                "content_chars": len("周衡重新出现。"),
+                "source_path": "source.txt",
+                "source_file_name": "source.txt",
+                "source_start_offset": 10,
+                "source_end_offset": 20,
+                "created_at": "2026-05-15T00:00:00+00:00",
+                "updated_at": "2026-05-15T00:00:00+00:00",
+            },
+        )
+        selected = CharacterMemoryRepairService(
+            repo_root=tmp_path,
+            db_path=db_path,
+            config=CloseReadAgentConfig(book_id="book"),
+        )._target_documents(  # noqa: SLF001
+            conn,
+            documents_repo=docs,
+            min_title_index=28,
+            max_doc_id=doc_28,
+        )
+
+    assert [doc.document_title_index for doc in selected] == [28]

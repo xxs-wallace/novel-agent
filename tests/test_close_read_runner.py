@@ -206,6 +206,157 @@ def test_character_evidence_agent_reruns_with_full_roster_on_request(tmp_path: P
     assert payload["characters"][0]["canonical_name"] == "远期人物"
 
 
+def test_close_read_coverage_audit_adds_model_detected_missing_character(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "coverage_audit.db"
+    db = NovelAgentDB(db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        _insert_document(
+            conn,
+            doc_id=1,
+            book_id="coverage-book",
+            title_index=1,
+            title="第一章",
+            content="林初推门进来。周衡站起身说：“我等你很久了。”周衡随后带她去旧剧院。",
+        )
+        conn.commit()
+
+    calls: list[str] = []
+
+    def fake_generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory,
+        use_fallback_on_error: bool = False,
+    ):
+        _ = self, user_prompt, use_fallback_on_error
+        if "Character Evidence Coverage Agent" in system_prompt:
+            calls.append("coverage")
+            return (
+                {
+                    "coverage_gap_found": True,
+                    "coverage_notes": "第一轮人物证据漏掉了一个有明确发言和行动的人物。",
+                    "characters": [
+                        {
+                            "canonical_name": "周衡",
+                            "aliases": [],
+                            "is_speaking_character": True,
+                            "speaking_evidence": "周衡站起身说他等了很久。",
+                            "personhood_evidence": "周衡被姓名指称并明确发言。",
+                            "activity_or_state_evidence": "周衡与林初会面并带她前往旧剧院。",
+                            "relationship_evidence": "周衡与林初发生直接对话和同行。",
+                            "source_doc_ids": [1],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.93,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Character Evidence Agent" in system_prompt:
+            calls.append("evidence")
+            return (
+                {
+                    "doc_id": 1,
+                    "document_title_index": 1,
+                    "request_full_roster": False,
+                    "request_full_roster_reason": "",
+                    "characters": [
+                        {
+                            "canonical_name": "林初",
+                            "aliases": [],
+                            "is_speaking_character": False,
+                            "speaking_evidence": "",
+                            "personhood_evidence": "林初被姓名指称并进入场景。",
+                            "activity_or_state_evidence": "林初推门进来。",
+                            "relationship_evidence": "林初与周衡会面。",
+                            "source_doc_ids": [1],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                            "uncertainty_reason": "",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Chapter Event List Agent" in system_prompt:
+            return (
+                {
+                    "chapter_line": "[1] 第一章: 林初与周衡会面。",
+                    "timeline_events": [
+                        {
+                            "label": "会面",
+                            "participants": ["林初", "周衡"],
+                            "summary": "林初进入场景后与周衡会面，周衡带她前往旧剧院。",
+                        }
+                    ],
+                },
+                "",
+            )
+        if "Chapter Event Summary Agent" in system_prompt:
+            return {"event_summary": "林初与周衡会面，周衡随后带她去旧剧院。", "compression_notes": ""}, ""
+        if (
+            "Character Reduce Agent" in system_prompt
+            or "Global Memory Agent" in system_prompt
+            or "Character Identity Resolution Agent" in system_prompt
+            or "Character Canonical Name Agent" in system_prompt
+        ):
+            return fallback_factory(), ""
+        return (
+            {
+                "summary_quality": "plot_synopsis",
+                "chapter_summary_md": _plot_synopsis(
+                    "林初进入场景，与周衡会面；周衡明确发言并带她前往旧剧院。",
+                    characters="林初进入场景；周衡从等待者转为行动者，并与林初建立直接互动。",
+                ),
+                "chapter_summary_short": "林初与周衡会面，周衡带她去旧剧院。",
+                "importance_score": 70,
+                "importance_reason": "新人物行动和关系明确。",
+                "related_chapters": [],
+                "world_signal_score": 0,
+                "world_evidence_candidates": [],
+            },
+            "",
+        )
+
+    monkeypatch.setattr(JsonModelClient, "generate_json", fake_generate_json)
+
+    config = CloseReadAgentConfig(book_id="coverage-book", sqlite_path=str(db_path))
+    config.runtime.dry_run = True
+    config.runtime.max_chapters = 1
+    config.runtime.export_debug_markdown = False
+
+    result = CloseReadRunner(repo_root=tmp_path, db_path=db_path, config=config).run()
+
+    assert result.processed_batches == 1
+    assert calls[:2] == ["evidence", "coverage"]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        profile_names = [
+            row["canonical_name"]
+            for row in conn.execute(
+                "SELECT canonical_name FROM character_profiles WHERE book_id = ? ORDER BY canonical_name",
+                ("coverage-book",),
+            ).fetchall()
+        ]
+        doc_keywords = conn.execute(
+            "SELECT character_keywords_json FROM documents WHERE book_id = ?",
+            ("coverage-book",),
+        ).fetchone()[0]
+
+    assert profile_names == ["周衡", "林初"]
+    assert "周衡" in doc_keywords
+    assert "林初" in doc_keywords
+
+
 def test_close_read_runner_retries_with_smaller_batch_after_invalid_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
