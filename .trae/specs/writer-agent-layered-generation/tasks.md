@@ -6,9 +6,10 @@
 - 只有涉及章节验收对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
 - 只有涉及跨层输入对象时才读 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)。
 - 当前尚未拆出的规划域与人物补充域，暂时继续以 [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 和 [design.md](.trae/specs/writer-agent-layered-generation/design.md) 为主。
-- 涉及 terminal 展示、确认点、长度计划交互与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及 terminal 展示、artifact review gate、章节验收与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
 - 涉及正文草稿审阅、`draft.md` 预览和验收分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
 - 涉及 `NarrativeStructurePattern` / `ArcPatternCard` 如何进入 Writer 输入，或 `SourceArcMap` 如何作为源作品定位事实可选进入上下文时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 与 [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)。
+- 本文件中部分已完成历史任务仍记录旧流程实现状态；新增实现必须以当前 `spec.md` / `design.md` / `contracts.md` 的 Agent Loop 与 artifact review gate 语义为准，旧式独立长度确认和写作材料确认由 Group L 负责迁移移除。
 
 ## Group A: 主总览 / 待拆分规划域
 
@@ -97,23 +98,19 @@
   - [ ] 在交互界面完整展示 `ChapterPackage`
   - [ ] 支持退回批次层重规划
 
-- [ ] Task 7A: 建立 ChapterLengthPlan 章节长度规划层
-  - `来源`: 拆自 `spec.md` / `design.md` 中 `Freeze C -> ChapterLengthPlan -> Freeze D` 的正式预算层要求
+- [ ] Task 7A: 建立章节梗概通过后的 WritingGuidance 内部组装层
+  - `来源`: 当前 `spec.md` / `design.md` 中 `ChapterPackage review -> supplement_text -> chapter writing guidance -> draft generation` 的 Agent Loop 要求
   - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
-  - [ ] 定义 `ChapterLengthPlan` 与单章 `ChapterLengthBudget` 运行时 schema
-  - [ ] 在 `Freeze C` 后基于 `ChapterPackage` 生成 `chapter_length_plan.json`
-  - [ ] 输出默认章节长度、重点章节、高潮章节与单章 `target/min/max` override
-  - [ ] 在 Assist / Batch 模式下进入 `wait_length_review`，允许用户修改长度计划文件后继续
-  - [ ] 在交互界面完整展示 `ChapterLengthPlan`
-  - [ ] 在 `wait_length_review` 明确询问用户是否需要调整章节长度
-  - [ ] 支持用户直接输入默认长度覆盖值或单章 override，并写回 `chapter_length_plan.json`
-  - [ ] 确认长度计划后，将 `chapter_length_plan.json` 作为进入 `Freeze D` 的前置输入
-  - [ ] `prepare_execution` / `Freeze D` 加载并冻结当前章对应长度预算与重点展开标记
-  - [ ] 正文执行 prompt 消费已确认的长度预算，而不是临时猜测目标长度
-  - [ ] `revise_length` 分支能基于 `length_plan_update.json` 更新或重新确认 `ChapterLengthPlan` 后重写当前章
-  - [ ] 增加从 `Freeze C -> wait_length_review -> Freeze D` 的最小流程测试
-  - [ ] 增加 `revise_length -> wait_length_review -> 更新长度预算 -> 重写当前章` 的回归测试
+  - [ ] 定义 `ChapterWritingGuidance` 与单章 `ChapterLengthBudget` 运行时 schema，明确其为内部派生产物而非独立用户确认节点
+  - [ ] 在用户通过 `ChapterPackage` / `ChapterBrief` review gate 后，收集并落盘原始 `supplement_text`
+  - [ ] 基于章节梗概、用户补充、上游规划、Memory / KB evidence 和风格参考生成 `chapter_writing_guidance.json`
+  - [ ] 内部输出默认章节长度、重点展开段落、节奏偏好、风格要求与禁止项
+  - [ ] 将 `chapter_writing_guidance.json` 与 `chapter_length_budget.json` 装配进 `chapter_execution_input.json`
+  - [ ] 正文执行 prompt 消费已通过章节 brief、用户补充原文和派生写作指导，而不是临时猜测目标长度或风格
+  - [ ] 不再在 Assist / Batch 模式下进入独立长度确认或写作材料确认主状态
+  - [ ] 增加 `ChapterPackage approved + supplement_text -> writing guidance -> draft generation` 的最小流程测试
+  - [ ] 增加用户在 `supplement_text` 中提出字数 / 风格要求后被写入 prompt 输入的回归测试
 
 - [x] Task 13: 支持三种产品模式
   - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
@@ -753,3 +750,127 @@
 - Task 61 depends on Task 60
 - Task 62 depends on Task 60, Task 61 and Task 16
 - Task 63 depends on Task 60, Task 61, Task 62
+
+## Group L: Agent Loop Workflow Simplification
+
+- [ ] Task 64: 重构 Writer workflow 小状态机
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 7A, Task 60, Task 61
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/presenters/`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 定义新旧状态映射表，明确哪些旧状态只作为恢复兼容存在
+  - [ ] 将运行期主状态收敛为 `agent_running / reviewing_artifact / needs_user_input / generating_draft / reviewing_draft / writeback_review / completed / halted / error`
+  - [ ] `workflow_state.json` 中保留可恢复的 technical stage，但用户可见 presenter 只输出自然语言 review gate
+  - [ ] 移除普通用户必须处理的独立长度确认和写作材料确认主状态
+  - [ ] 保留必要的旧状态恢复兼容映射，但普通 UI 不显示旧内部状态名
+  - [ ] 增加恢复测试，覆盖旧 runs 仍可迁移到最近 review artifact
+
+- [ ] Task 65: 实现 `ArtifactReviewDecision` 与通用 review action
+  - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `依赖`: Task 64
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/runs/writer.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 定义并导出 `ArtifactReviewDecision`
+  - [ ] 支持 `approved + supplement_text`，原文落盘并进入后续模型输入
+  - [ ] 支持 `revision_requested + revision_feedback`，驱动模型修订同一 artifact 并回到同一 review gate
+  - [ ] 支持 `deferred`，保持可恢复暂停态
+  - [ ] 每次 review action 都写入稳定 `artifact_review_decision.json` 或按 review id 归档的等价记录
+  - [ ] downstream dependency invalidation 使用 artifact 版本依赖，不使用 Freeze 级联作为主语义
+  - [ ] 测试覆盖 supplement 原文保留、revision feedback 原文保留、deferred 不推进 workflow
+
+- [ ] Task 66: 重构章节梗概通过后的正文准备链路
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 7A, Task 65
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] `ChapterPackage` / `ChapterBrief` 通过后直接组装 `chapter_writing_guidance.json` 与 `chapter_execution_input.json`
+  - [ ] 字数、风格、节奏和重点展开要求从 `supplement_text` 进入正文 prompt
+  - [ ] 不再要求用户单独审阅长度计划或写作材料后才生成正文
+  - [ ] 测试覆盖通过章节梗概后直接进入正文生成准备
+
+- [ ] Task 67: 重构章节草稿验收分支
+  - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 64, Task 66
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/cli/decisions.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 将 `GenerationReviewDecision` 分支对齐为 `accepted / rewrite_requested / replan_requested / discarded`
+  - [ ] `rewrite_requested` 使用用户反馈和当前已通过 brief 重写正文，不正式回写
+  - [ ] `replan_requested` 使用用户反馈修订章节梗概，并回到章节梗概 review gate
+  - [ ] 字数不足、风格不符和节奏问题都通过 `feedback_text` 交给 Agent Loop，而不是进入独立长度分支
+  - [ ] 测试覆盖不接受草稿不会写回、accepted-only writeback 仍成立
+
+- [ ] Task 68: 更新 CLI / Web / GUI 用户提示与动作
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [`../web-interface/design.md`](.trae/specs/web-interface/design.md)
+  - `依赖`: Task 65, Task 67
+  - `建议只关注代码文件`: `novel_agent/app/run_interactive.py`, `novel_agent/app/gui/main.py`, `novel_agent/app/web/services/web_action_service.py`, `web/src/components/`
+  - [ ] review gate 中提示用户审阅当前 artifact，并说明通过时可补充 prompt 信息
+  - [ ] review gate 中提供“不通过并调整”动作，要求输入修订反馈
+  - [ ] 普通 UI 不把 checkpoint id、artifact path、workflow stage/action 名当作主状态展示
+  - [ ] 技术详情继续保留 raw stage、artifact path、run id 和 action payload
+
+- [ ] Task 69: Agent Loop 简化流程验收测试
+  - `来源`: Group L
+  - `依赖`: Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74
+  - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_web_action_service.py`, `novel_agent/tests/test_run_interactive_pipeline.py`
+  - [ ] 测试用户通过章节梗概并输入补充信息后，补充原文进入正文输入
+  - [ ] 测试用户拒绝章节梗概后，模型修订 artifact 并回到同一 review gate
+  - [ ] 测试用户不接受草稿时不会触发正式写回
+  - [ ] 测试普通聊天消息不会绕过 `needs_user_input`
+  - [ ] 测试 Web / CLI 主状态不展示内部技术字段
+
+- [ ] Task 70: 定义 Writer Agent Loop 事件与执行步
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的核心流程
+  - `依赖`: Task 64
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 定义 `WriterLoopEvent` / `WriterLoopStep` 或等价内部对象，覆盖 local tool call、user question、artifact generated、artifact review、draft review、writeback review
+  - [ ] Agent Loop 每一步都能落盘 trace，供恢复和 debug 使用
+  - [ ] 模型返回信息不足时只允许走结构化 tool call：本地查询或 `WriterQuestionSet`
+  - [ ] 普通用户消息只能成为下一轮 prompt 输入或 review feedback，不得直接改 workflow state
+  - [ ] 测试覆盖 local query、user question、artifact ready 三类出口
+
+- [ ] Task 71: 实现 review feedback 到模型 prompt 的组装边界
+  - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 65, Task 70
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] `approved + supplement_text` 组装为下一阶段模型输入，包含 artifact 摘要、上游约束、planning notebook 和用户补充原文
+  - [ ] `revision_requested + revision_feedback` 组装为 artifact 修订 prompt，要求模型输出同类型 artifact
+  - [ ] 修订 prompt 不允许 Web / CLI 直接拼接；只能由 Writer 层统一装配
+  - [ ] 模型修订后必须重新校验 schema、保存新版 artifact、回到同一 review gate
+  - [ ] 测试覆盖用户补充进入下一阶段 prompt、用户反馈进入修订 prompt、修订后不自动继续
+
+- [ ] Task 72: 移除旧长度确认 / 写作材料确认的主流程入口
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 的 `wait_length_review` / `freeze_d_review` 移除要求
+  - `依赖`: Task 64, Task 66, Task 67
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/run_interactive.py`, `novel_agent/app/gui/main.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/`
+  - [ ] 移除新 runs 中进入 `wait_length_review` 和 `freeze_d_review` 的普通推进路径
+  - [ ] 旧 runs 恢复时将相关状态迁移到最近章节梗概 review 或正文生成准备，不丢失已存在 artifact
+  - [ ] CLI / GUI / Web 按钮不再暴露独立长度确认和写作材料确认
+  - [ ] 保留 `chapter_length_budget` 作为内部派生产物和 technical artifact
+  - [ ] 测试覆盖新流程不会生成旧主状态，旧状态仍可恢复
+
+- [ ] Task 73: 对齐共享 action adapter 与 Web action 名
+  - `来源`: [`../web-interface/tasks.md`](../web-interface/tasks.md) Group B / C
+  - `依赖`: Task 65, Task 67, Task 72
+  - `建议只关注代码文件`: `novel_agent/app/web/services/web_action_service.py`, `novel_agent/app/run_interactive.py`, `novel_agent/app/cli/decisions.py`, `novel_agent/tests/test_web_action_service.py`
+  - [ ] 支持 `approve_writer_artifact / request_writer_artifact_revision / defer_writer_artifact_review`
+  - [ ] 支持 `accept_chapter / rewrite_chapter / replan_chapter / discard_chapter / defer_chapter_acceptance`
+  - [ ] 所有 action 都映射到 Writer contract，不暴露内部 stage/action 名给普通 UI
+  - [ ] CLI / TUI 可复用同一 action adapter 或等价 contract mapping
+  - [ ] 测试覆盖 Web action 与 Writer workflow 的 contract 对齐
+
+- [ ] Task 74: 清理旧 contract 和 artifact 兼容层
+  - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `依赖`: Task 67, Task 72, Task 73
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 新 contract 不再要求 `LengthPlanUpdate` / `ChapterReplanRequest` 作为正式跨层对象
+  - [ ] 如保留旧 schema，必须标记为 legacy / migration-only，不进入新流程主路径
+  - [ ] runs 写入目标更新为 `artifact_review_decision.json`、`user_supplement.json`、`chapter_writing_guidance.json`
+  - [ ] 测试覆盖旧 artifact 存在时不会被误当作新流程主决策
+
+- Task 64 depends on Task 7A, Task 60, Task 61
+- Task 65 depends on Task 64
+- Task 66 depends on Task 7A, Task 65
+- Task 67 depends on Task 64, Task 66
+- Task 68 depends on Task 65, Task 67
+- Task 69 depends on Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74
+- Task 70 depends on Task 64
+- Task 71 depends on Task 65, Task 70
+- Task 72 depends on Task 64, Task 66, Task 67
+- Task 73 depends on Task 65, Task 67, Task 72
+- Task 74 depends on Task 67, Task 72, Task 73

@@ -60,7 +60,9 @@ class CharacterCanonicalNameService:
             fallback_factory=fallback_factory,
             use_fallback_on_error=model_client.settings.dry_run,
         )
-        return dict(payload) if isinstance(payload, dict) else dict(fallback_factory())
+        if not isinstance(payload, dict):
+            raise RuntimeError("Character canonical name model returned a non-object JSON payload")
+        return dict(payload)
 
     def _apply_decision(
         self,

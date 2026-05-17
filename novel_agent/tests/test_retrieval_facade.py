@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
@@ -9,6 +10,31 @@ from novel_agent.app.repos.fragment_clusters_repo import FragmentClustersRepo
 from novel_agent.app.schemas.creative_kb_schema import FragmentCard, FragmentCluster, SceneBrief, StyleFeatures
 from novel_agent.app.schemas.orchestration_schema import CreativeKBRetrievalInput, RetrievalContext
 from novel_agent.app.services.retrieval_facade import RetrievalFacade
+from novel_agent.app.services.rerank_service import RerankService
+from novel_agent.app.services.scene_brief_service import SceneBriefService
+
+
+class _FakeRetrievalModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, use_fallback_on_error
+        payload = fallback_factory()
+        return payload, ""
+
+
+def _facade(
+    *,
+    fragment_cards_repo: FragmentCardsRepo | None = None,
+    fragment_clusters_repo: FragmentClustersRepo | None = None,
+) -> RetrievalFacade:
+    model_client = _FakeRetrievalModel()
+    return RetrievalFacade(
+        scene_brief_service=SceneBriefService(model_client=model_client),  # type: ignore[arg-type]
+        rerank_service=RerankService(model_client=model_client),  # type: ignore[arg-type]
+        fragment_cards_repo=fragment_cards_repo,
+        fragment_clusters_repo=fragment_clusters_repo,
+    )
 
 
 def _card(
@@ -95,10 +121,7 @@ def test_retrieval_facade_default_mainflow_returns_scene_brief_and_rerank_only(t
     db = NovelAgentDB(tmp_path / "retrieval_facade_default.db")
     cards_repo = FragmentCardsRepo()
     clusters_repo = FragmentClustersRepo()
-    facade = RetrievalFacade(
-        fragment_cards_repo=cards_repo,
-        fragment_clusters_repo=clusters_repo,
-    )
+    facade = _facade(fragment_cards_repo=cards_repo, fragment_clusters_repo=clusters_repo)
     rep_card = _card(
         fragment_id="frag-rep",
         doc_id="doc-1",
@@ -188,10 +211,7 @@ def test_retrieval_facade_can_include_debug_and_expanded_reference_fields(tmp_pa
     db = NovelAgentDB(tmp_path / "retrieval_facade_expanded.db")
     cards_repo = FragmentCardsRepo()
     clusters_repo = FragmentClustersRepo()
-    facade = RetrievalFacade(
-        fragment_cards_repo=cards_repo,
-        fragment_clusters_repo=clusters_repo,
-    )
+    facade = _facade(fragment_cards_repo=cards_repo, fragment_clusters_repo=clusters_repo)
     first_card = _card(
         fragment_id="frag-a",
         doc_id="doc-1",
@@ -279,7 +299,7 @@ def test_retrieval_facade_can_include_debug_and_expanded_reference_fields(tmp_pa
 
 def test_retrieval_context_cannot_bypass_fragment_card_main_path(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "retrieval_facade_context_only.db")
-    facade = RetrievalFacade()
+    facade = _facade()
 
     with db.connect() as conn:
         db.init_schema(conn)

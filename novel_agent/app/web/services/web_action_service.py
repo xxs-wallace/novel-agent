@@ -4,7 +4,7 @@ import asyncio
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ...cli.events import RunEvent
 from ...cli.status import WriterStatusPresenter
@@ -18,6 +18,12 @@ def _model_dump(model: Any) -> dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是", "允许", "需要", "开"}
 
 
 class WebActionService:
@@ -34,27 +40,37 @@ class WebActionService:
 
     _WRITER_REVIEW_ACTIONS = {
         "confirm_current_step",
+        "approve_writer_artifact",
+        "request_writer_artifact_revision",
+        "defer_writer_artifact_review",
         "request_scoped_artifact_revision",
         "apply_scoped_artifact_revision",
         "discard_scoped_artifact_revision",
         "reject_scoped_artifact_revision",
         "accept_chapter",
+        "rewrite_chapter",
         "revise_chapter_length",
         "replan_chapter",
         "discard_chapter",
         "approve_writeback",
+        "submit_outline_research_answers",
     }
 
     _DIRECT_WRITER_WORKFLOW_ACTIONS = {
+        "approve_writer_artifact",
+        "request_writer_artifact_revision",
+        "defer_writer_artifact_review",
         "request_scoped_artifact_revision",
         "apply_scoped_artifact_revision",
         "discard_scoped_artifact_revision",
         "reject_scoped_artifact_revision",
         "accept_chapter",
+        "rewrite_chapter",
         "revise_chapter_length",
         "replan_chapter",
         "discard_chapter",
         "approve_writeback",
+        "submit_outline_research_answers",
     }
 
     _SUPPORTED_ACTIONS = {
@@ -66,15 +82,21 @@ class WebActionService:
         "start_writer",
         "resume",
         "confirm_current_step",
+        "approve_writer_artifact",
+        "request_writer_artifact_revision",
+        "defer_writer_artifact_review",
         "request_scoped_artifact_revision",
         "apply_scoped_artifact_revision",
         "discard_scoped_artifact_revision",
         "reject_scoped_artifact_revision",
         "accept_chapter",
+        "rewrite_chapter",
         "revise_chapter_length",
         "replan_chapter",
         "discard_chapter",
         "defer_chapter_acceptance",
+        "submit_outline_research_answers",
+        "defer_outline_research_answers",
         "approve_writeback",
         "go_back",
         "save_artifact",
@@ -121,10 +143,14 @@ class WebActionService:
                 payload={"task": _model_dump(summary)},
                 progress=summary.progress,
             )
+        if action == "resume":
+            return await self._resume_writer_action(task_id=task_id, payload=payload)
         if action in self._JOB_ACTION_TYPES:
             return await self._start_job_action(task_id=task_id, action=action, payload=payload)
         if action == "defer_chapter_acceptance":
             return self._defer_chapter_acceptance(task_id=task_id, payload=payload)
+        if action == "defer_outline_research_answers":
+            return self._defer_outline_research_answers(task_id=task_id, payload=payload)
         if action in self._WRITER_REVIEW_ACTIONS:
             return await self._start_writer_review_action(task_id=task_id, action=action, payload=payload)
         if action == "go_back":
@@ -137,6 +163,73 @@ class WebActionService:
             message="技术详情已准备好。",
             technical_details=self.session_service.debug_details(task_id),
         )
+
+    async def _resume_writer_action(self, *, task_id: str, payload: dict[str, Any]) -> WebActionResult:
+        writer_state = self.session_service.latest_writer_state(task_id)
+        run_id = str(payload.get("run_id") or writer_state.get("run_id") or "")
+        if not run_id:
+            message = "没有找到可恢复的 Writer 运行。请先开始续写。"
+            self.session_service.append_message(task_id, role="assistant", content=message, payload={"channel": "writer_resume"})
+            return WebActionResult(
+                action="resume",
+                task_id=task_id,
+                message=message,
+                progress=self.session_service.task_progress(task_id),
+            )
+
+        self.session_service.sync_writer_question_messages(task_id)
+        self.session_service.sync_writer_review_messages(task_id)
+        active_stage = self.session_service._active_writer_stage(writer_state)
+        if self.session_service.has_writer_gate_message(task_id, run_id, active_stage=active_stage):
+            message = "已恢复到上一次等待点，请在会话卡片中继续。"
+            self.session_service.append_message(
+                task_id,
+                role="assistant",
+                content=message,
+                payload={"channel": "writer_resume", "run_id": run_id},
+            )
+            return WebActionResult(
+                action="resume",
+                task_id=task_id,
+                message=message,
+                progress=self.session_service.task_progress(task_id),
+            )
+
+        resume_workflow_action = self._workflow_action_for_resumable_stage(writer_state)
+        if resume_workflow_action:
+            return await self._start_job_action(
+                task_id=task_id,
+                action="resume",
+                payload={**payload, "run_id": run_id, "workflow_action": resume_workflow_action},
+            )
+
+        recovery_message = self.session_service.append_writer_recovery_message(
+            task_id,
+            writer_state=writer_state,
+            force=True,
+        )
+        return WebActionResult(
+            action="resume",
+            task_id=task_id,
+            message=recovery_message.content,
+            decision_cards=list(recovery_message.decision_cards),
+            progress=self.session_service.task_progress(task_id),
+            technical_details={
+                "run_id": run_id,
+                "current_stage": str(writer_state.get("current_stage") or ""),
+            },
+        )
+
+    def _workflow_action_for_resumable_stage(self, writer_state: dict[str, Any]) -> str:
+        pending = writer_state.get("pending_checkpoint") if isinstance(writer_state.get("pending_checkpoint"), dict) else {}
+        if pending:
+            return ""
+        stage = str(writer_state.get("current_stage") or "")
+        resumable_stages = {"freeze_a", "freeze_b", "freeze_c", "freeze_d"}
+        if stage not in resumable_stages:
+            return ""
+        actions = self.status_presenter.writer_actions_for_stage(stage=stage)
+        return actions[0].workflow_action if actions else ""
 
     async def _start_job_action(self, *, task_id: str, action: str, payload: dict[str, Any]) -> WebActionResult:
         job_type = self._JOB_ACTION_TYPES[action]
@@ -155,17 +248,16 @@ class WebActionService:
                 "start_read": "已准备开始导入原文，进度会通过后台事件更新。",
                 "start_close_read": "已准备开始阅读，进度会通过后台事件更新。",
                 "build_creative_kb": "已准备构建 Creative KB，进度会通过后台事件更新。",
-                "start_writer": "已准备启动 Writer 分层生成，后续审阅会以决策卡呈现。",
+                "start_writer": "已收到续写意图，Writer 正在生成下一条可审阅内容；需要你回答、审阅或验收时会继续发到会话里。",
                 "resume": "已准备恢复最近一次未完成流程。",
             }[action]
-        decision_cards = self._writer_decision_cards(task_id=task_id) if action in {"start_writer", "resume"} else []
         self.session_service.append_message(task_id, role="assistant", content=message, payload={"job_id": job.job_id})
         return WebActionResult(
             action=action,
             task_id=task_id,
             message=message,
             job=job,
-            decision_cards=decision_cards,
+            decision_cards=[],
             progress=self.session_service.task_progress(task_id),
         )
 
@@ -272,11 +364,8 @@ class WebActionService:
     async def _run_writer(self, context: JobContext) -> dict[str, Any]:
         payload = context.payload
         api_key = str(payload.get("api_key") or os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
-        intent_payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"action", "requested_from", "dry_run", "target_chapter_count", "chapter_count", "target_chapters"}
-        }
+        dry_run = self._writer_dry_run_requested(payload)
+        intent_payload = self._writer_intent_payload(payload)
         target_chapter_count = self._optional_int(payload, "target_chapter_count", default=None)
         if target_chapter_count is None:
             target_chapter_count = self._optional_int(payload, "target_chapters", default=3) or 3
@@ -288,7 +377,7 @@ class WebActionService:
                 book_id=context.task_id,
                 run_id=str(payload.get("run_id") or uuid.uuid4().hex),
                 product_mode=str(payload.get("product_mode") or "assist"),
-                dry_run=bool(payload.get("dry_run", False)) if api_key else True,
+                dry_run=dry_run,
                 api_key=api_key,
                 intent_payload=intent_payload,
                 user_world_notes=str(payload.get("user_world_notes") or payload.get("constraints") or ""),
@@ -299,14 +388,7 @@ class WebActionService:
         )
         context.emit("progress", "Writer 已到达可审阅节点。", payload={"run_id": result.get("run_id", "")})
         result_payload = dict(result)
-        cards = self._cards_payload(self._writer_decision_cards(task_id=context.task_id))
-        if cards:
-            result_payload["decision_cards"] = cards
-            context.emit(
-                "progress",
-                "Writer 审阅决策已准备好。",
-                payload={"run_id": result_payload.get("run_id") or str(payload.get("run_id") or ""), "decision_cards": cards},
-            )
+        self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
         return result_payload
 
     async def _run_writer_resume(self, context: JobContext) -> dict[str, Any]:
@@ -315,6 +397,7 @@ class WebActionService:
         if not run_id:
             raise ValueError("没有找到可恢复的 Writer run。")
         api_key = str(payload.get("api_key") or os.getenv("DEEPSEEK_API_KEY") or "").strip() or None
+        dry_run = self._writer_dry_run_requested(payload)
         workflow_action = self._resolve_writer_workflow_action(
             task_id=context.task_id,
             action=str(payload.get("action") or ""),
@@ -329,18 +412,16 @@ class WebActionService:
                 action=workflow_action,
                 product_mode=str(payload.get("product_mode") or "assist"),
                 payload={**dict(payload), "workflow_action": workflow_action},
-                dry_run=bool(payload.get("dry_run", False)) if api_key else True,
+                dry_run=dry_run,
                 api_key=api_key,
             ),
         )
         result_payload = dict(result)
-        cards = self._cards_payload(self._writer_decision_cards(task_id=context.task_id))
-        if cards:
-            result_payload["decision_cards"] = cards
+        self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
         context.emit(
             "progress",
             "Writer 状态已更新，新的审阅入口会刷新到会话区。",
-            payload={"run_id": run_id, "workflow_action": workflow_action, "decision_cards": cards},
+            payload={"run_id": run_id, "workflow_action": workflow_action},
         )
         return result_payload
 
@@ -398,7 +479,147 @@ class WebActionService:
         return api_key
 
     @staticmethod
-    def _optional_int(payload: dict[str, Any], key: str, *, default: int | None) -> int | None:
+    def _writer_dry_run_requested(payload: Mapping[str, Any]) -> bool:
+        dry_run = _truthy(payload.get("dry_run"))
+        if dry_run and not _truthy(os.getenv("NOVEL_AGENT_WEB_ALLOW_WRITER_DRY_RUN")):
+            raise RuntimeError(
+                "Web Writer 正式入口不允许 dry-run 生成续写规划；"
+                "请配置 DEEPSEEK_API_KEY 后重试，或仅在开发环境设置 NOVEL_AGENT_WEB_ALLOW_WRITER_DRY_RUN=1。"
+            )
+        return dry_run
+
+    @classmethod
+    def _writer_intent_payload(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
+        raw_intent = payload.get("intent_payload")
+        intent: dict[str, Any] = dict(raw_intent) if isinstance(raw_intent, Mapping) else {}
+
+        legacy_intent = payload.get("intent")
+        if isinstance(legacy_intent, Mapping):
+            direction = str(legacy_intent.get("direction") or legacy_intent.get("goal") or "").strip()
+            if direction:
+                cls._append_unique(intent.setdefault("desired_actions", []), direction)
+
+        continuation_goal = str(
+            payload.get("continuation_goal")
+            or payload.get("feedback_text")
+            or payload.get("user_feedback")
+            or payload.get("supplement_text")
+            or ""
+        ).strip()
+        if continuation_goal:
+            cls._append_unique(intent.setdefault("desired_actions", []), continuation_goal)
+        for item in cls._coerce_text_list(payload.get("desired_actions")):
+            cls._append_unique(intent.setdefault("desired_actions", []), item)
+        for item in cls._coerce_text_list(payload.get("major_characters")):
+            cls._append_unique(intent.setdefault("major_characters", []), item)
+        for item in cls._coerce_text_list(payload.get("avoidances")):
+            cls._append_unique(intent.setdefault("avoidances", []), item)
+
+        preferred_outcome = str(payload.get("preferred_outcome") or "").strip()
+        if preferred_outcome:
+            intent["preferred_outcome"] = preferred_outcome
+        notes = cls._join_nonempty(intent.get("notes"), payload.get("notes"), payload.get("constraints"))
+        if notes:
+            intent["notes"] = notes
+
+        intent["story_scale"] = cls._writer_story_scale_payload(payload, intent.get("story_scale"))
+        intent["climax_plan"] = cls._writer_climax_plan_payload(payload.get("climax_plan"), intent.get("climax_plan"))
+        if "allow_character_cast" in payload:
+            intent["allow_character_cast"] = bool(payload.get("allow_character_cast"))
+        return intent
+
+    @classmethod
+    def _writer_story_scale_payload(cls, payload: Mapping[str, Any], existing: Any) -> dict[str, Any]:
+        source = dict(existing) if isinstance(existing, Mapping) else {}
+        story_scale = payload.get("story_scale")
+        if isinstance(story_scale, Mapping):
+            source.update(dict(story_scale))
+        target_chapter_count = cls._optional_int(payload, "target_chapter_count", default=None)
+        if target_chapter_count is None:
+            target_chapter_count = cls._optional_int(payload, "target_chapters", default=None)
+        if target_chapter_count is not None:
+            source["target_chapter_count"] = target_chapter_count
+        target_total_chars = cls._optional_int(payload, "target_total_chars", default=None)
+        if target_total_chars is not None:
+            source["target_total_chars"] = target_total_chars
+        default_chars = cls._optional_int(payload, "default_chapter_target_chars", default=None)
+        if default_chars is None:
+            default_chars = cls._optional_int(payload, "default_chapter_chars", default=None)
+        if default_chars is not None:
+            source["default_chapter_target_chars"] = default_chars
+        pacing = str(payload.get("pacing_profile") or payload.get("pacing_preference") or "").strip()
+        if not pacing:
+            pacing_spec = payload.get("pacing_spec")
+            if isinstance(pacing_spec, Mapping):
+                pacing = str(pacing_spec.get("preference") or "").strip()
+        if pacing:
+            source["pacing_profile"] = pacing
+        length_notes = str(payload.get("length_distribution_notes") or "").strip()
+        if length_notes:
+            source["length_distribution_notes"] = length_notes
+        return source
+
+    @classmethod
+    def _writer_climax_plan_payload(cls, raw_climax: Any, existing: Any) -> dict[str, Any]:
+        source = dict(existing) if isinstance(existing, Mapping) else {}
+        if isinstance(raw_climax, Mapping):
+            source.update(dict(raw_climax))
+        setup_requirements = source.pop("setup_requirements", "")
+        forbidden_early_resolution = source.pop("forbidden_early_resolution", "")
+        target_position = str(source.pop("target_chapter_position", "") or "").strip()
+        must_foreshadow = cls._coerce_text_list(source.get("must_foreshadow"))
+        must_not_resolve_before = cls._coerce_text_list(source.get("must_not_resolve_before"))
+        for item in cls._coerce_text_list(setup_requirements):
+            cls._append_unique(must_foreshadow, item)
+        for item in cls._coerce_text_list(forbidden_early_resolution):
+            cls._append_unique(must_not_resolve_before, item)
+        if target_position and not source.get("target_chapter_index"):
+            parsed_position = cls._first_positive_int(target_position)
+            if parsed_position is not None:
+                source["target_chapter_index"] = parsed_position
+        source["must_foreshadow"] = must_foreshadow
+        source["must_not_resolve_before"] = must_not_resolve_before
+        return source
+
+    @staticmethod
+    def _coerce_text_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            chunks = value.replace("，", ",").replace("；", ";").replace("\n", ";")
+            return [item.strip() for item in chunks.replace(";", ",").split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [str(value).strip()] if str(value).strip() else []
+
+    @staticmethod
+    def _append_unique(items: Any, value: str) -> None:
+        if not isinstance(items, list):
+            return
+        normalized = value.strip()
+        if normalized and normalized not in items:
+            items.append(normalized)
+
+    @staticmethod
+    def _join_nonempty(*values: Any) -> str:
+        parts = [str(value).strip() for value in values if str(value or "").strip()]
+        return "\n".join(parts)
+
+    @staticmethod
+    def _first_positive_int(value: str) -> int | None:
+        digits = ""
+        for char in value:
+            if char.isdigit():
+                digits += char
+            elif digits:
+                break
+        if not digits:
+            return None
+        parsed = int(digits)
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _optional_int(payload: Mapping[str, Any], key: str, *, default: int | None) -> int | None:
         value = payload.get(key)
         if value in {None, ""}:
             return default
@@ -458,6 +679,27 @@ class WebActionService:
             decision_cards=self._writer_decision_cards(task_id=task_id),
         )
 
+    def _defer_outline_research_answers(self, *, task_id: str, payload: dict[str, Any]) -> WebActionResult:
+        writer_state = self.session_service.latest_writer_state(task_id)
+        message = "已保留当前大纲研究问题，稍后可以继续回答。"
+        self.session_service.append_message(
+            task_id,
+            role="assistant",
+            content=message,
+            payload={
+                "channel": "writer_question_deferred",
+                "run_id": str(payload.get("run_id") or writer_state.get("run_id") or ""),
+                "question_set_id": str(payload.get("question_set_id") or ""),
+                "note": str(payload.get("note") or ""),
+            },
+        )
+        return WebActionResult(
+            action="defer_outline_research_answers",
+            task_id=task_id,
+            message=message,
+            progress=self.session_service.task_progress(task_id),
+        )
+
     def _go_back(self, *, task_id: str, payload: dict[str, Any]) -> WebActionResult:
         writer_state = self.session_service.latest_writer_state(task_id)
         message = "已记录返回上一层修改的意图。"
@@ -492,6 +734,54 @@ class WebActionService:
             raise ValueError("没有找到可恢复的 Writer run。")
         workflow_action = self._resolve_writer_workflow_action(task_id=task_id, action=action, payload=payload)
         normalized = {**payload, "action": action, "workflow_action": workflow_action, "run_id": run_id}
+        if action == "submit_outline_research_answers":
+            answer_text = str(payload.get("answer_text") or "").strip()
+            user_answers = payload.get("user_answers")
+            has_structured_answers = isinstance(user_answers, list) and any(
+                isinstance(item, dict) and str(item.get("answer_text") or "").strip()
+                for item in user_answers
+            )
+            if not answer_text and not has_structured_answers:
+                raise ValueError("请先在聊天输入框中回答问题，再提交继续研究。")
+            normalized["answer_text"] = answer_text
+            normalized["question_set_id"] = str(payload.get("question_set_id") or "")
+            normalized["source_message_id"] = str(payload.get("source_message_id") or "")
+            if isinstance(user_answers, list):
+                normalized["user_answers"] = [dict(item) for item in user_answers if isinstance(item, dict)]
+        if action in {"approve_writer_artifact", "request_writer_artifact_revision", "defer_writer_artifact_review"}:
+            normalized["review_id"] = str(payload.get("review_id") or "")
+            normalized["artifact_kind"] = str(payload.get("artifact_kind") or "")
+            normalized["artifact_id"] = str(payload.get("artifact_id") or "")
+            normalized["artifact_path"] = str(payload.get("artifact_path") or payload.get("path") or pending.get("artifact_path") or "")
+            normalized["source_message_id"] = str(payload.get("source_message_id") or "")
+            if action == "approve_writer_artifact":
+                normalized["supplement_text"] = str(payload.get("supplement_text") or payload.get("user_feedback") or "").strip()
+            if action == "request_writer_artifact_revision":
+                revision_feedback = str(
+                    payload.get("revision_feedback")
+                    or payload.get("feedback_text")
+                    or payload.get("feedback")
+                    or payload.get("user_feedback")
+                    or ""
+                ).strip()
+                if not revision_feedback:
+                    raise ValueError("请先输入你希望怎样修改当前产物。")
+                normalized["revision_feedback"] = revision_feedback
+        if action in {"accept_chapter", "rewrite_chapter", "replan_chapter", "discard_chapter"}:
+            feedback_text = str(
+                payload.get("feedback_text")
+                or payload.get("feedback")
+                or payload.get("user_feedback")
+                or payload.get("reason")
+                or ""
+            ).strip()
+            if action in {"rewrite_chapter", "replan_chapter"} and not feedback_text:
+                raise ValueError("请先输入你的草稿验收反馈。")
+            normalized["feedback_text"] = feedback_text
+            normalized["source_message_id"] = str(payload.get("source_message_id") or "")
+            normalized["chapter_id"] = str(payload.get("chapter_id") or payload.get("current_chapter_id") or "")
+            normalized["draft_id"] = str(payload.get("draft_id") or payload.get("current_draft_id") or "")
+            normalized["reason_code"] = str(payload.get("reason_code") or "")
         feedback = str(payload.get("user_feedback") or payload.get("feedback") or "").strip()
         if feedback:
             normalized["user_feedback"] = feedback
@@ -511,6 +801,18 @@ class WebActionService:
             return explicit_action
         if action == "resume":
             return "resume"
+        if action == "submit_outline_research_answers":
+            return "continue_after_outline_research_input"
+        if action == "approve_writer_artifact":
+            writer_state, _pending, _stage, pending_stage = self._writer_state_parts(task_id)
+            active_stage = pending_stage or str(writer_state.get("current_stage") or "")
+            if active_stage == "writeback_review":
+                return "approve_writeback"
+            return "approve_writer_artifact"
+        if action == "request_writer_artifact_revision":
+            return "request_writer_artifact_revision"
+        if action == "defer_writer_artifact_review":
+            return "defer_writer_artifact_review"
         if action == "confirm_current_step":
             writer_state, pending, stage, pending_stage = self._writer_state_parts(task_id)
             actions = self.status_presenter.writer_actions_for_stage(stage=stage, pending_stage=pending_stage)
@@ -520,6 +822,17 @@ class WebActionService:
         if action in self._DIRECT_WRITER_WORKFLOW_ACTIONS:
             return action
         return "resume"
+
+    def _append_writer_result_messages(self, *, task_id: str, result_payload: dict[str, Any]) -> None:
+        question_set = result_payload.get("question_set")
+        if isinstance(question_set, dict):
+            self.session_service.append_writer_question_message(task_id, question_set)
+            return
+        self.session_service.sync_writer_completion_message(task_id)
+        if str(result_payload.get("stage") or "") == "outline_research_user_input":
+            self.session_service.sync_writer_question_messages(task_id)
+            return
+        self.session_service.sync_writer_review_messages(task_id)
 
     def _writer_state_parts(self, task_id: str) -> tuple[dict[str, Any], dict[str, Any], str, str]:
         writer_state = self.session_service.latest_writer_state(task_id)
@@ -536,14 +849,19 @@ class WebActionService:
     def _public_action_message(action: str) -> str:
         return {
             "confirm_current_step": "已确认当前审阅点，Writer 会继续到下一步。",
+            "approve_writer_artifact": "已通过当前审阅产物，Writer 会带着你的补充继续。",
+            "request_writer_artifact_revision": "已提交调整反馈，Writer 会修订当前产物并回到同一审阅点。",
+            "defer_writer_artifact_review": "已保留当前审阅点，稍后可以继续处理。",
             "request_scoped_artifact_revision": "已提交修改反馈，Writer 会生成受控修订候选。",
             "apply_scoped_artifact_revision": "已准备应用候选修改。",
             "discard_scoped_artifact_revision": "已准备放弃候选修改。",
             "reject_scoped_artifact_revision": "已准备放弃候选修改。",
             "accept_chapter": "已准备接受本章并进入写回确认。",
-            "revise_chapter_length": "已提交字数和节奏调整请求，Writer 会回到长度计划。",
+            "rewrite_chapter": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
+            "revise_chapter_length": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "replan_chapter": "已提交章节梗概调整请求，Writer 会回到章节规划。",
             "discard_chapter": "已准备作废本次草稿。",
+            "submit_outline_research_answers": "已提交补充回答，Writer 会继续大纲研究。",
             "approve_writeback": "已确认写回续写记忆。",
         }.get(action, "已准备继续 Writer 流程。")
 
@@ -551,14 +869,19 @@ class WebActionService:
     def _writer_workflow_progress_message(workflow_action: str) -> str:
         return {
             "resume": "正在恢复最近的 Writer 审阅点。",
+            "approve_writer_artifact": "正在带着你的补充继续 Writer Agent Loop。",
+            "request_writer_artifact_revision": "正在按你的反馈修订当前审阅产物。",
+            "defer_writer_artifact_review": "正在保留当前审阅点。",
             "request_scoped_artifact_revision": "正在生成受控修订候选。",
             "apply_scoped_artifact_revision": "正在应用受控修订候选。",
             "discard_scoped_artifact_revision": "正在放弃受控修订候选。",
             "reject_scoped_artifact_revision": "正在放弃受控修订候选。",
             "accept_chapter": "正在处理章节验收。",
-            "revise_chapter_length": "正在按字数和节奏要求重写。",
+            "rewrite_chapter": "正在根据反馈重写当前章。",
+            "revise_chapter_length": "正在根据反馈重写当前章。",
             "replan_chapter": "正在返回章节梗概调整。",
             "discard_chapter": "正在作废本次草稿。",
+            "continue_after_outline_research_input": "正在提交补充回答并继续大纲研究。",
             "approve_writeback": "正在写回续写记忆。",
         }.get(workflow_action, "正在继续 Writer 流程。")
 
@@ -589,16 +912,24 @@ class WebActionService:
             ]
 
         active_stage = pending_stage or stage
+        if active_stage == "outline_research_user_input":
+            self.session_service.sync_writer_question_messages(task_id)
+            return []
+        if active_stage in {
+            "initialized",
+            "agent_running",
+            "not_initialized",
+            "freeze_a_review",
+            "batch_review",
+            "chapter_review",
+            "wait_chapter_review",
+            "wait_chapter_acceptance",
+        }:
+            self.session_service.sync_writer_review_messages(task_id)
+            return []
         actions = self.status_presenter.writer_actions_for_stage(stage=stage, pending_stage=pending_stage)
         if not writer_state or not actions:
-            return [
-                DecisionCard(
-                    card_id=f"{task_id}:writer-starting",
-                    title="Writer 已启动",
-                    body="Writer 到达审阅点后，这里会显示可继续的决策按钮。",
-                    actions=[{"action": "resume", "label": "刷新审阅状态", "payload": {}}],
-                )
-            ]
+            return []
 
         status = self.status_presenter.present(active_stage)
         if active_stage == "wait_chapter_acceptance":
@@ -609,11 +940,11 @@ class WebActionService:
                     body=status.message or "当前章节草稿已经生成，请选择验收方式。",
                     actions=[
                         {
-                            "action": item.workflow_action,
-                            "label": item.label,
+                            "action": "rewrite_chapter" if item.workflow_action == "revise_chapter_length" else item.workflow_action,
+                            "label": "基于反馈重写本章" if item.workflow_action == "revise_chapter_length" else item.label,
                             "description": item.description,
                             "variant": "primary" if item.workflow_action == "accept_chapter" else "danger" if item.workflow_action == "discard_chapter" else "secondary",
-                            "requires_input": item.workflow_action in {"revise_chapter_length", "replan_chapter"},
+                            "requires_input": item.workflow_action in {"rewrite_chapter", "revise_chapter_length", "replan_chapter"},
                             "payload": {},
                         }
                         for item in actions
@@ -645,25 +976,35 @@ class WebActionService:
             DecisionCard(
                 card_id=f"{task_id}:writer-review:{active_stage}",
                 title=status.step or "Writer 审阅",
-                body=status.message or "请审阅右侧 Writer 产物，再选择下一步。",
+                body=status.message or "请审阅当前产物；通过时可以补充字数、风格、节奏、重点段落或禁止项，不通过时请说明要调整哪里。",
                 actions=[
                     {
-                        "action": "confirm_current_step",
-                        "label": "接受并继续",
+                        "action": "approve_writer_artifact",
+                        "label": "通过并继续",
                         "variant": "primary",
-                        "payload": {"workflow_action": workflow_action},
-                    },
-                    {
-                        "action": "request_scoped_artifact_revision",
-                        "label": "按我的反馈修改",
-                        "requires_input": True,
+                        "requires_input": False,
                         "payload": {
-                            "target_stage": active_stage,
-                            "target_artifact_path": str(pending.get("artifact_path") or ""),
+                            "workflow_action": "approve_writer_artifact",
+                            "artifact_path": str(pending.get("artifact_path") or ""),
                         },
                     },
-                    {"action": "go_back", "label": "返回上一层", "payload": {}},
-                    {"action": "resume", "label": "稍后继续", "payload": {}},
+                    {
+                        "action": "request_writer_artifact_revision",
+                        "label": "不通过并调整",
+                        "requires_input": True,
+                        "payload": {
+                            "workflow_action": "request_writer_artifact_revision",
+                            "artifact_path": str(pending.get("artifact_path") or ""),
+                        },
+                    },
+                    {
+                        "action": "defer_writer_artifact_review",
+                        "label": "稍后继续",
+                        "payload": {
+                            "workflow_action": "defer_writer_artifact_review",
+                            "artifact_path": str(pending.get("artifact_path") or ""),
+                        },
+                    },
                 ],
             )
         ]

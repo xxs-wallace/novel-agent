@@ -30,14 +30,21 @@ from .creative_kb_benchmark_schema import (
     KBBenchmarkCase,
 )
 from .orchestration_schema import (
+    ArtifactReviewDecision,
     ChapterLengthBudget,
     ChapterLengthPlan,
     CreativeKBRetrievalInput,
     MemoryAssemblyBudget,
     MemoryAssemblyInput,
+    OutlineResearchAnswerSubmission,
+    OutlineResearchQuestion,
+    OutlineResearchQuestionSet,
+    OutlineResearchUserAnswer,
     ReferenceFragment,
     RetrievalContext,
     WriterInputBundle,
+    WriterLoopEvent,
+    WriterLoopStep,
     WriterSource,
 )
 from .narrative_memory_schema import (
@@ -72,6 +79,7 @@ __all__ = [
     "CharacterRelationshipItem",
     "CharacterStoryEventItem",
     "ChapterContextItem",
+    "ArtifactReviewDecision",
     "ChapterLengthBudget",
     "ChapterLengthPlan",
     "CharacterProfileContextItem",
@@ -95,6 +103,10 @@ __all__ = [
     "MemoryQueryPathItem",
     "MemoryQueryState",
     "NarrativeMemoryPage",
+    "OutlineResearchAnswerSubmission",
+    "OutlineResearchQuestion",
+    "OutlineResearchQuestionSet",
+    "OutlineResearchUserAnswer",
     "ParagraphBenchmarkIssue",
     "ParagraphBenchmarkReviewerReport",
     "ParagraphBenchmarkRunResult",
@@ -115,5 +127,7 @@ __all__ = [
     "LoadedSmokeSample",
     "PrefixRuntimeSnapshot",
     "WriterInputBundle",
+    "WriterLoopEvent",
+    "WriterLoopStep",
     "WriterSource",
 ]

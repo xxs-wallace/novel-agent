@@ -58,7 +58,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.use_model
         else None
     )
-    payload = build_source_arc_map(repo_root=repo_root, db_path=db_path, book_id=args.task_id, model_client=model_client)
+    try:
+        payload = build_source_arc_map(repo_root=repo_root, db_path=db_path, book_id=args.task_id, model_client=model_client)
+    except Exception as exc:
+        payload = {
+            "status": "failed",
+            "reason": str(exc),
+            "book_id": args.task_id,
+            "db_path": db_path.as_posix(),
+        }
     if payload["status"] != "built":
         print(json.dumps(payload, ensure_ascii=False, indent=2) if args.format == "json" else _format_markdown(payload))
         return 1
@@ -89,6 +97,8 @@ def build_source_arc_map(
                 "book_id": book_id,
                 "db_path": db_path.as_posix(),
             }
+        if model_client is None:
+            raise RuntimeError("SourceArcMap generation requires --use-model and an available model")
         source_arc_map = service.build_from_chapters(conn, book_id=book_id)
         json_path, markdown_path = service.ensure_paths(book_id)
     return {

@@ -32,6 +32,7 @@ from ..schemas.orchestration_schema import (
     FreezeRecord,
     ModelingCheckItem,
     ModelingStatus,
+    OutlineResearchQuestionSet,
     OutlineSeedPacket,
     PlanningFact,
     PlanningNotebook,
@@ -155,7 +156,7 @@ class WriterLayeredGenerationOrchestrator:
                 character_profiles_repo=self.character_profiles_repo,
             ),
             model_adapter=outline_research_adapter
-            or (ModelOutlineResearchModelAdapter(model_client=model_client) if model_client is not None else HeuristicOutlineResearchModelAdapter()),
+            or ModelOutlineResearchModelAdapter(model_client=model_client),
         )
 
     def check_modeling_status(self, conn: sqlite3.Connection, *, book_id: str) -> ModelingStatus:
@@ -814,7 +815,7 @@ class WriterLayeredGenerationOrchestrator:
             next_freeze_stage="freeze_a",
         )
         self.run_writer.write_json(run_id, "outline_research_checkpoint.json", checkpoint)
-        return {
+        payload = {
             "status": research.sufficiency_decision.status,
             "stage": stage,
             "checkpoint": checkpoint.to_dict(),
@@ -822,6 +823,25 @@ class WriterLayeredGenerationOrchestrator:
             "planning_notebook": research.planning_notebook.to_dict(),
             "sufficiency_decision": research.sufficiency_decision.to_dict(),
         }
+        if stage == "outline_research_user_input":
+            question_set = self._build_outline_research_question_set(run_id=run_id, research=research)
+            self.run_writer.write_outline_research_question_set(run_id, question_set)
+            payload["question_set"] = question_set.to_dict()
+        return payload
+
+    def _build_outline_research_question_set(
+        self,
+        *,
+        run_id: str,
+        research: OutlineResearchRunResult,
+    ) -> OutlineResearchQuestionSet:
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        return OutlineResearchQuestionSet.from_sufficiency_decision(
+            run_id=run_id,
+            decision=research.sufficiency_decision,
+            source_artifact_id=f"writer:{run_id}:sufficiency-decision",
+            artifact_path=str(run_dir / "outline_research_question_set.json"),
+        )
 
     def confirm_freeze_a(self, *, run_id: str, artifact_overrides: Mapping[str, str] | None = None) -> dict[str, str]:
         artifact_names = [
@@ -1497,13 +1517,15 @@ class WriterLayeredGenerationOrchestrator:
         fallback_factory,
     ) -> dict[str, Any] | list[Any]:
         if self.model_client is None:
-            return fallback_factory()
+            raise RuntimeError("Writer layered generation requires an available model_client")
         payload, _ = self.model_client.generate_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback_factory=fallback_factory,
-            use_fallback_on_error=True,
+            use_fallback_on_error=False,
         )
+        if not isinstance(payload, dict):
+            raise RuntimeError("Writer layered generation model returned a non-object JSON payload")
         return payload
 
     def _fallback_book_plan(

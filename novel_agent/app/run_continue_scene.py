@@ -112,12 +112,13 @@ def _maybe_run_creative_kb_retrieval(
     args: argparse.Namespace,
     run_id: str,
     writer: RunWriter,
+    orchestrator: MainLayerOrchestrator | None = None,
 ) -> dict[str, Any] | None:
     if not _should_run_creative_kb(args):
         return None
 
     db = NovelAgentDB(Path(args.creative_kb_db))
-    orchestrator = MainLayerOrchestrator()
+    orchestrator = orchestrator or MainLayerOrchestrator()
     scene_plan = _load_optional_json_file(args.scene_plan_json)
     retrieval_context = {
         "character_hits": _normalize_lines(args.character_hit),

@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from novel_agent.app import llm as llm_module
 from novel_agent.app.llm import JsonModelClient, ModelSettings
 
 
@@ -112,6 +111,7 @@ def test_json_model_client_retries_with_thinking_disabled_after_exhaustion(
         ModelSettings(
             model_type="OpenAIModel",
             model_name="fake",
+            api_key="test-key",
             request_retry_attempts=1,
             request_retry_backoff_seconds=0,
             retry_without_thinking_on_failure=True,
@@ -134,7 +134,9 @@ def test_openai_model_uses_client_timeout_and_disables_nested_retries(
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(llm_module, "OpenAIModel", FakeOpenAIModel)
+    import smolagents.models as smolagents_models
+
+    monkeypatch.setattr(smolagents_models, "OpenAIModel", FakeOpenAIModel)
     JsonModelClient(
         ModelSettings(
             model_type="OpenAIModel",

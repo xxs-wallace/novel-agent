@@ -220,8 +220,15 @@ def build_writer_workflow(
     include_reasoning_content: bool = True,
     revision_adapter: object | None = None,
 ) -> tuple[NovelAgentDB, WriterInteractiveWorkflow]:
-    model_client = None
-    if not dry_run:
+    if dry_run:
+        model_client = JsonModelClient(
+            ModelSettings(
+                model_type="DryRunModel",
+                model_name="dry-run",
+                dry_run=True,
+            )
+        )
+    else:
         model_client = JsonModelClient(
             ModelSettings(
                 model_type="OpenAIModel",
@@ -298,17 +305,25 @@ def run_writer_workflow_action(
     if action == "continue_after_planning_review":
         return workflow.continue_after_planning_review(run_id=run_id)
     if action == "continue_after_outline_research_input":
+        raw_user_answers = payload.get("user_answers")
+        if isinstance(raw_user_answers, list):
+            user_answers = [dict(item) for item in raw_user_answers if isinstance(item, Mapping)]
+        elif isinstance(raw_user_answers, dict):
+            user_answers = {
+                str(key): str(value)
+                for key, value in raw_user_answers.items()
+            }
+        else:
+            user_answers = {}
         return workflow.continue_after_outline_research_input(
             conn,
             run_id=run_id,
             book_id=book_id,
             product_mode=product_mode,
-            user_answers={
-                str(key): str(value)
-                for key, value in (payload.get("user_answers") or {}).items()
-            }
-            if isinstance(payload.get("user_answers"), dict)
-            else {},
+            user_answers=user_answers,
+            question_set_id=str(payload.get("question_set_id") or ""),
+            source_message_id=str(payload.get("source_message_id") or ""),
+            answer_text=str(payload.get("answer_text") or ""),
             user_world_notes=str(payload.get("user_world_notes") or ""),
             character_seed_payloads=cast(list[Mapping[str, Any]], payload.get("character_seed_payloads") or []),
             roster_hint_payloads=cast(list[Mapping[str, Any]], payload.get("roster_hint_payloads") or []),
@@ -372,8 +387,34 @@ def run_writer_workflow_action(
             product_mode=product_mode,
         )
     if action in {
+        "approve_writer_artifact",
+        "request_writer_artifact_revision",
+        "defer_writer_artifact_review",
+    }:
+        decision_by_action = {
+            "approve_writer_artifact": "approved",
+            "request_writer_artifact_revision": "revision_requested",
+            "defer_writer_artifact_review": "deferred",
+        }
+        return workflow.review_writer_artifact(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+            decision=decision_by_action[action],
+            artifact_kind=str(payload.get("artifact_kind") or ""),
+            artifact_id=str(payload.get("artifact_id") or ""),
+            artifact_path=str(payload.get("artifact_path") or "") or str(payload.get("path") or ""),
+            review_id=str(payload.get("review_id") or ""),
+            supplement_text=str(payload.get("supplement_text") or ""),
+            revision_feedback=str(payload.get("revision_feedback") or payload.get("feedback_text") or payload.get("user_feedback") or ""),
+            source_message_id=str(payload.get("source_message_id") or ""),
+            chapter_id=str(payload.get("chapter_id") or ""),
+        )
+    if action in {
         "continue_after_chapter_acceptance",
         "accept_chapter",
+        "rewrite_chapter",
         "revise_length",
         "revise_chapter_length",
         "replan_chapter",
@@ -381,9 +422,10 @@ def run_writer_workflow_action(
     }:
         status_by_action = {
             "accept_chapter": "accepted",
-            "revise_length": "revise_length",
-            "revise_chapter_length": "revise_length",
-            "replan_chapter": "replan_chapter",
+            "rewrite_chapter": "rewrite_requested",
+            "revise_length": "rewrite_requested",
+            "revise_chapter_length": "rewrite_requested",
+            "replan_chapter": "replan_requested",
             "discard_chapter": "discarded",
         }
         normalized_payload = dict(payload)
@@ -394,6 +436,18 @@ def run_writer_workflow_action(
                 workflow=workflow,
                 run_id=run_id,
                 payload=normalized_payload,
+            )
+        if action in {"rewrite_chapter", "revise_length", "revise_chapter_length"}:
+            return workflow.rewrite_current_chapter(
+                conn,
+                run_id=run_id,
+                book_id=book_id,
+                product_mode=product_mode,
+            )
+        if action == "replan_chapter":
+            return workflow.replan_current_chapter_from_feedback(
+                run_id=run_id,
+                source_message_id=str(payload.get("source_message_id") or ""),
             )
         return workflow.continue_after_chapter_acceptance(run_id=run_id)
     if action == "approve_writeback":
@@ -529,6 +583,14 @@ def _first_chapter_id_from_length_plan(workflow: WriterInteractiveWorkflow, run_
     raise ValueError("chapter_length_plan.json 中没有可用的章节预算")
 
 
+def _first_chapter_id_from_chapter_package(workflow: WriterInteractiveWorkflow, run_id: str) -> str:
+    package = _load_run_data(workflow, run_id, "chapter_package.json")
+    for item in package.get("chapters") or []:
+        if isinstance(item, dict) and str(item.get("chapter_id") or "").strip():
+            return str(item["chapter_id"])
+    raise ValueError("chapter_package.json 中没有可用的章节梗概")
+
+
 def _maybe_confirm_pending_review(
     *,
     workflow: WriterInteractiveWorkflow,
@@ -652,28 +714,11 @@ def run_writer_guided_flow(
     result["freeze_c"] = pending or {}
 
     if default_target_chars is not None or chapter_length_overrides:
-        result["length_review_override"] = workflow.continue_after_length_review(
-            run_id=run_id,
-            default_target_chars=default_target_chars,
-            chapter_overrides=chapter_length_overrides or {},
-        )
+        result["legacy_length_review_override_ignored"] = {
+            "message": "新 Writer Agent Loop 不再暴露独立长度确认；请通过章节梗概通过时的 supplement_text 或草稿反馈表达。",
+        }
 
-    pending = _maybe_confirm_pending_review(
-        workflow=workflow,
-        run_id=run_id,
-        stage="wait_length_review",
-        confirm_review=confirm_review,
-        on_confirm=lambda: workflow.continue_after_length_review(
-            run_id=run_id,
-            default_target_chars=default_target_chars,
-            chapter_overrides=chapter_length_overrides or {},
-        ),
-    )
-    if pending and pending.get("status") == "waiting_for_review":
-        return {**result, **pending}
-    result["length_review"] = pending or {}
-
-    current_chapter_id = chapter_id.strip() or _first_chapter_id_from_length_plan(workflow, run_id)
+    current_chapter_id = chapter_id.strip() or _first_chapter_id_from_chapter_package(workflow, run_id)
     result["current_chapter_id"] = current_chapter_id
     result["execution_input"] = workflow.prepare_execution(
         conn,
@@ -682,19 +727,10 @@ def run_writer_guided_flow(
         chapter_id=current_chapter_id,
         product_mode=mode,
     )
-    pending = _maybe_confirm_pending_review(
-        workflow=workflow,
-        run_id=run_id,
-        stage="freeze_d_review",
-        confirm_review=confirm_review,
-        on_confirm=lambda: workflow.continue_after_execution_review(run_id=run_id),
-    )
-    if pending and pending.get("status") == "waiting_for_review":
-        return {**result, **pending}
     if workflow.run_writer.get_freeze_record(run_id, "freeze_d") is None:
         result["freeze_d"] = workflow.continue_after_execution_review(run_id=run_id)
     else:
-        result["freeze_d"] = pending or {}
+        result["freeze_d"] = {}
 
     if execute_chapter:
         result["execution_result"] = workflow.execute_current_chapter(
@@ -707,7 +743,7 @@ def run_writer_guided_flow(
         if acceptance_checkpoint and acceptance_checkpoint.get("stage") == "wait_chapter_acceptance":
             artifact_path = str(acceptance_checkpoint.get("artifact_path") or _run_data_path(workflow, run_id, "generation_review_decision.json"))
             review_status = accept_chapter_review(artifact_path).strip().lower() if accept_chapter_review else ""
-            if review_status not in {"accepted", "revise_length", "replan_chapter", "discarded"}:
+            if review_status not in {"accepted", "rewrite_requested", "replan_requested", "discarded", "revise_length", "replan_chapter"}:
                 return {
                     **result,
                     "status": "waiting_for_review",
@@ -719,9 +755,23 @@ def run_writer_guided_flow(
                 run_id=run_id,
                 status=review_status,
             )
-            acceptance_outcome = workflow.continue_after_chapter_acceptance(run_id=run_id)
+            normalized_review_status = {
+                "revise_length": "rewrite_requested",
+                "replan_chapter": "replan_requested",
+            }.get(review_status, review_status)
+            if normalized_review_status == "rewrite_requested":
+                acceptance_outcome = workflow.rewrite_current_chapter(
+                    conn,
+                    run_id=run_id,
+                    book_id=book_id,
+                    product_mode=mode,
+                )
+            elif normalized_review_status == "replan_requested":
+                acceptance_outcome = workflow.replan_current_chapter_from_feedback(run_id=run_id)
+            else:
+                acceptance_outcome = workflow.continue_after_chapter_acceptance(run_id=run_id)
             result["chapter_acceptance"] = acceptance_outcome
-            if acceptance_outcome.get("stage") in {"wait_chapter_acceptance", "wait_length_review", "wait_chapter_review"}:
+            if acceptance_outcome.get("stage") in {"wait_chapter_acceptance", "chapter_review"}:
                 return {
                     **result,
                     "status": "waiting_for_review",
@@ -743,7 +793,8 @@ def run_writer_guided_flow(
     result["workflow_state"] = workflow.load_workflow_state(run_id=run_id) or {}
     result["artifacts"] = {
         "run_dir": str(workflow.run_writer.layout.run_dir(run_id)),
-        "chapter_length_plan": str(_run_data_path(workflow, run_id, "chapter_length_plan.json")),
+        "chapter_length_budget": str(_run_data_path(workflow, run_id, "chapter_length_budget.json")),
+        "chapter_writing_guidance": str(_run_data_path(workflow, run_id, "chapter_writing_guidance.json")),
         "chapter_execution_input": str(_run_data_path(workflow, run_id, "chapter_execution_input.json")),
     }
     return result
@@ -797,7 +848,11 @@ def _write_writer_review_decision_payload(
 ) -> None:
     state = workflow.load_workflow_state(run_id=run_id) or {}
     existing = _load_run_data_if_exists(workflow, run_id, "generation_review_decision.json")
-    status = str(payload.get("status") or existing.get("status") or "").strip().lower()
+    status = str(payload.get("status") or existing.get("status") or "").strip().lower().replace("-", "_")
+    status = {
+        "revise_length": "rewrite_requested",
+        "replan_chapter": "replan_requested",
+    }.get(status, status)
     chapter_id = str(existing.get("chapter_id") or state.get("current_chapter_id") or "").strip()
     draft_id = str(existing.get("draft_id") or state.get("current_draft_id") or "draft-001").strip()
     decision_id = str(existing.get("decision_id") or f"review-{chapter_id or 'chapter'}-{draft_id}").strip()
@@ -810,14 +865,20 @@ def _write_writer_review_decision_payload(
     )
     next_checkpoint_by_status = {
         "accepted": "freeze_e",
-        "revise_length": "wait_length_review",
-        "replan_chapter": "wait_chapter_review",
+        "rewrite_requested": "",
+        "replan_requested": "",
+        "discarded": "halted",
+    }
+    next_action_by_status = {
+        "accepted": "writeback_review",
+        "rewrite_requested": "agent_loop_rewrite_draft",
+        "replan_requested": "agent_loop_replan_chapter",
         "discarded": "halted",
     }
     reason_by_status = {
         "accepted": "approved",
-        "revise_length": "length_or_pacing_revision_requested",
-        "replan_chapter": "chapter_plan_revision_requested",
+        "rewrite_requested": "rewrite_requested",
+        "replan_requested": "chapter_plan_revision_requested",
         "discarded": "discarded_by_user",
     }
     reason_code = str(payload.get("reason_code") or reason_by_status.get(status, status))
@@ -890,9 +951,11 @@ def _write_writer_review_decision_payload(
             "status": status,
             "reason_code": reason_code,
             "feedback_text": feedback_text,
+            "next_action": next_action_by_status.get(status, ""),
             "next_action_checkpoint": next_checkpoint_by_status.get(status, ""),
             "length_plan_update": length_plan_update if status == "revise_length" else None,
             "chapter_replan_request": chapter_replan_request if status == "replan_chapter" else None,
+            "source_message_id": str(payload.get("source_message_id") or ""),
             "reviewer_type": "user",
         },
     )
@@ -1050,9 +1113,9 @@ def _prompt_writer_acceptance_review(workflow: WriterInteractiveWorkflow, run_id
     if choice == "accept":
         return "accepted"
     if choice == "revise":
-        return "revise_length"
+        return "rewrite_requested"
     if choice == "replan":
-        return "replan_chapter"
+        return "replan_requested"
     if choice == "discard":
         return "discarded"
     return ""
@@ -1462,6 +1525,7 @@ def _build_creative_kb(
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
     include_reasoning_content: bool = True,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CreativeKBBuildResult:
     db = NovelAgentDB(db_path)
     facade = creative_kb_facade or _build_creative_kb_facade(
@@ -1472,6 +1536,9 @@ def _build_creative_kb(
     )
 
     def print_progress(event: dict[str, Any]) -> None:
+        if progress_callback is not None:
+            progress_callback({"stage": "creative_kb", **event})
+            return
         print(json.dumps({"creative_kb_progress": event}, ensure_ascii=False))
 
     with db.connect() as conn:
@@ -1501,8 +1568,21 @@ def _build_source_arc_map(
     api_key: str | None = None,
 ) -> dict[str, object]:
     db = NovelAgentDB(db_path)
+    loader_service = SourceArcMappingService(repo_root=repo_root, model_client=None)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        summaries = loader_service.load_chapter_plot_summaries(conn, book_id=book_id)
+    if not summaries:
+        return {
+            "status": "skipped",
+            "reason": "no_chapter_summaries",
+            "book_id": book_id,
+        }
+
     normalized_api_key = str(api_key or "").strip()
     should_use_model = bool(normalized_api_key) and normalized_api_key not in {"unused", "test-key"}
+    if not should_use_model:
+        raise RuntimeError("SourceArcMap generation requires an available model API key")
     model_client = (
         JsonModelClient(
             ModelSettings(
@@ -1518,19 +1598,10 @@ def _build_source_arc_map(
                 max_output_tokens=12288,
             )
         )
-        if should_use_model
-        else None
     )
     service = SourceArcMappingService(repo_root=repo_root, model_client=model_client)
     with db.connect() as conn:
         db.init_schema(conn)
-        summaries = service.load_chapter_plot_summaries(conn, book_id=book_id)
-        if not summaries:
-            return {
-                "status": "skipped",
-                "reason": "no_chapter_summaries",
-                "book_id": book_id,
-            }
         source_arc_map = service.build_from_chapters(conn, book_id=book_id)
         json_path, markdown_path = service.ensure_paths(book_id)
     return {

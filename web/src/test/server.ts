@@ -10,7 +10,10 @@ import type {
   JobEventView,
   TaskSummary,
   WebActionRequest,
-  WebActionResult
+  WebActionResult,
+  WriterArtifactReview,
+  WriterDraftReview,
+  WriterQuestionSet
 } from "../api/types";
 
 const now = "2026-05-12T00:00:00.000Z";
@@ -21,16 +24,22 @@ export const calls: {
   artifactViews: string[];
   messages: Array<{ taskId: string; body: unknown }>;
   commands: Array<{ taskId: string; body: unknown }>;
+  deleteWriterRuns: Array<{ taskId: string; confirm: boolean }>;
 } = {
   createTask: [],
   actions: [],
   artifactViews: [],
   messages: [],
-  commands: []
+  commands: [],
+  deleteWriterRuns: []
 };
 
 let tasks: TaskSummary[] = [];
 let messagesByTask: Record<string, ConversationMessage[]> = {};
+let messageListCounts: Record<string, number> = {};
+let deferredMessagesByTask: Record<string, ConversationMessage> = {};
+let deferredMessageJobIds: Record<string, string> = {};
+let deferredMessagesReady: Record<string, boolean> = {};
 
 function progress(step = "freeze_d_review") {
   return {
@@ -41,8 +50,8 @@ function progress(step = "freeze_d_review") {
     message: "freeze_d_review",
     read_progress: { completed: 2, total: 4 },
     close_read_progress: { completed: 1, total: 4 },
-    modeling_ready: { characters: true, world: false, outline: true },
-    counts: { chapters: 2 },
+    modeling_ready: { characters: true, world: false, outline: true, "桥段 KB": true },
+    counts: { chapters: 2, documents: 4, fragment_cards: 3, fragment_card_docs: 3, fragment_clusters: 2 },
     technical_available: true
   };
 }
@@ -68,6 +77,11 @@ export function resetMockState() {
   calls.artifactViews = [];
   calls.messages = [];
   calls.commands = [];
+  calls.deleteWriterRuns = [];
+  messageListCounts = {};
+  deferredMessagesByTask = {};
+  deferredMessageJobIds = {};
+  deferredMessagesReady = {};
   tasks = [makeTask("task-alpha", true), makeTask("task-beta")];
   messagesByTask = {
     "task-alpha": [
@@ -87,10 +101,10 @@ export function resetMockState() {
               { action: "go_back", label: "返回上一层" },
               { action: "resume", label: "稍后继续" },
               { action: "accept_chapter", label: "接受本章" },
-              { action: "rewrite_with_length", label: "调整字数后重写", requires_input: true },
-              { action: "rewrite_with_outline", label: "修改章节梗概后重写", requires_input: true },
-              { action: "discard_draft", label: "作废本次草稿", variant: "danger" },
-              { action: "confirm_writeback", label: "确认写回续写记忆" }
+              { action: "rewrite_chapter", label: "基于反馈重写", requires_input: true },
+              { action: "replan_chapter", label: "修改章节梗概后重写", requires_input: true },
+              { action: "discard_chapter", label: "作废本次草稿", variant: "danger" },
+              { action: "approve_writeback", label: "确认写回续写记忆" }
             ]
           }
         ],
@@ -99,6 +113,44 @@ export function resetMockState() {
     ],
     "task-beta": []
   };
+}
+
+export function setWriterArtifactReviewAfterJobReplay(taskId = "task-alpha", jobId = "job-existing-start_writer") {
+  const review: WriterArtifactReview = {
+    schema_version: "1.0",
+    run_id: "run-2",
+    review_id: "artifact-review-run-2-freeze-a",
+    artifact_kind: "book_continuation_plan",
+    artifact_id: "writer-book-plan",
+    title: "全书续写规划",
+    summary: "续写规划已经生成，等待审阅。",
+    next_prompt: "通过后继续生成本批剧情大纲。",
+    detail_artifact_id: "writer-book-plan",
+    actions: [
+      {
+        action: "approve_writer_artifact",
+        label: "通过并继续",
+        payload: { run_id: "run-2", review_id: "artifact-review-run-2-freeze-a", artifact_kind: "book_continuation_plan" },
+        description: "",
+        variant: "primary",
+        requires_input: false,
+        input_role: "artifact_supplement"
+      }
+    ],
+    technical_available: true,
+    technical_details: {}
+  };
+  deferredMessagesByTask[taskId] = {
+    message_id: "assistant-artifact-review-after-job",
+    task_id: taskId,
+    role: "assistant",
+    content: "请审阅全书续写规划。",
+    payload: { channel: "writer_artifact_review", run_id: review.run_id, review_id: review.review_id },
+    writer_artifact_review: review,
+    decision_cards: [],
+    created_at: now
+  };
+  deferredMessageJobIds[jobId] = taskId;
 }
 
 export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_close_read") {
@@ -114,6 +166,135 @@ export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_clo
     events_url: `/api/jobs/${jobId}/events`
   };
   tasks = tasks.map((task) => (task.task_id === taskId ? { ...task, active_job: job } : task));
+}
+
+export function setWriterQuestionMessage(taskId = "task-alpha") {
+  const questionSet: WriterQuestionSet = {
+    schema_version: "1.0",
+    question_set_id: "outline-research-run-1-needs-answer",
+    run_id: "run-1",
+    stage: "outline_research_user_input",
+    status: "pending",
+    source_artifact_id: "writer:run-1:sufficiency-decision",
+    artifact_path: "/tmp/outline_research_question_set.json",
+    questions: [
+      {
+        question_id: "q1",
+        prompt: "顾迟是否为新增人物？",
+        required: true,
+        hint: "这会影响人物补充和章节规划。",
+        gap_id: "gap-001",
+        risk_level: "high"
+      }
+    ],
+    actions: { submit: "continue_after_outline_research_input", defer: "defer_outline_research_answers" },
+    submit_action: "submit_outline_research_answers",
+    defer_action: "defer_outline_research_answers",
+    technical_available: true
+  };
+  messagesByTask[taskId] = [
+    ...(messagesByTask[taskId] ?? []),
+    {
+      message_id: "assistant-question",
+      task_id: taskId,
+      role: "assistant",
+      content: "大纲研究需要你补充几个关键问题。",
+      payload: { channel: "writer_question_set", question_set_id: questionSet.question_set_id, run_id: questionSet.run_id },
+      writer_question_set: questionSet,
+      decision_cards: [],
+      created_at: now
+    }
+  ];
+}
+
+export function setWriterArtifactReviewMessage(taskId = "task-alpha") {
+  const review: WriterArtifactReview = {
+    schema_version: "1.0",
+    run_id: "run-1",
+    review_id: "artifact-review-run-1-batch",
+    artifact_kind: "batch_plan",
+    artifact_id: "writer-batch-plan",
+    title: "本批剧情大纲",
+    summary: "本批会把旧案线索推到新地点。",
+    next_prompt: "通过时可以补充风格、字数或禁止项；不通过时请说明调整方向。",
+    detail_artifact_id: "writer-batch-plan",
+    actions: [
+      {
+        action: "approve_writer_artifact",
+        label: "通过并继续",
+        payload: { run_id: "run-1", review_id: "artifact-review-run-1-batch", artifact_kind: "batch_plan" },
+        description: "",
+        variant: "primary",
+        requires_input: false,
+        input_role: "artifact_supplement"
+      },
+      {
+        action: "request_writer_artifact_revision",
+        label: "不通过并调整",
+        payload: { run_id: "run-1", review_id: "artifact-review-run-1-batch", artifact_kind: "batch_plan" },
+        description: "",
+        variant: "secondary",
+        requires_input: true,
+        input_role: "artifact_revision_feedback"
+      },
+      {
+        action: "defer_writer_artifact_review",
+        label: "稍后继续",
+        payload: { run_id: "run-1", review_id: "artifact-review-run-1-batch", artifact_kind: "batch_plan" },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      }
+    ],
+    technical_available: true,
+    technical_details: {}
+  };
+  messagesByTask[taskId] = [
+    ...(messagesByTask[taskId] ?? []),
+    {
+      message_id: "assistant-artifact-review",
+      task_id: taskId,
+      role: "assistant",
+      content: "请审阅本批剧情大纲。",
+      payload: { channel: "writer_artifact_review", run_id: review.run_id, review_id: review.review_id },
+      writer_artifact_review: review,
+      decision_cards: [],
+      created_at: now
+    }
+  ];
+}
+
+export function setWriterDraftReviewMessage(taskId = "task-alpha") {
+  const review: WriterDraftReview = {
+    schema_version: "1.0",
+    run_id: "run-1",
+    review_id: "draft-review-run-1-ch-1-draft-1",
+    chapter_id: "ch-1",
+    draft_id: "draft-1",
+    title: "章节草稿验收",
+    preview: "雨落下来，巷口的灯忽明忽暗。",
+    word_count: 3200,
+    target_word_count: 3000,
+    continuity_summary: "人物动机保持一致。",
+    detail_artifact_id: "writer-draft",
+    actions: [],
+    technical_available: true,
+    technical_details: {}
+  };
+  messagesByTask[taskId] = [
+    ...(messagesByTask[taskId] ?? []),
+    {
+      message_id: "assistant-draft-review",
+      task_id: taskId,
+      role: "assistant",
+      content: "请验收当前章节草稿。",
+      payload: { channel: "writer_draft_review", run_id: review.run_id, review_id: review.review_id },
+      writer_draft_review: review,
+      decision_cards: [],
+      created_at: now
+    }
+  ];
 }
 
 const closeReadTree: ArtifactTreeNode[] = [
@@ -140,9 +321,27 @@ const closeReadTree: ArtifactTreeNode[] = [
 ];
 
 const writerTree: ArtifactTreeNode[] = [
-  node("writer-run", "Run 总览", "writer_run", "writer", "已生成"),
-  node("writer-plan", "全书续写规划", "writer_artifact", "writer"),
-  node("writer-draft", "正文草稿", "draft", "writer")
+  {
+    ...node("writer-run-history-1", "第一章 雨夜接应", "writer_run_group", "writer", "待验收"),
+    children: [
+      node("writer-run", "续写概览", "writer_run", "writer", "已生成"),
+      node("writer-research", "大纲研究", "writer_stage", "writer", "已生成"),
+      node("writer-questions", "问题集", "writer_artifact", "writer"),
+      node("writer-notebook", "大纲研究笔记", "writer_artifact", "writer"),
+      node("writer-trace", "检索轨迹", "writer_artifact", "writer"),
+      node("writer-plan", "全书续写规划", "writer_artifact", "writer"),
+      node("writer-batch-plan", "本批剧情大纲", "writer_artifact", "writer"),
+      node("writer-chapter-package", "章节标题与梗概", "writer_artifact", "writer"),
+      node("writer-guidance", "章节写作指导", "writer_artifact", "writer"),
+      node("writer-draft", "正文草稿", "draft", "writer"),
+      node("writer-generation-review", "验收决策", "writer_artifact", "writer"),
+      node("writer-writeback", "写回摘要", "writeback", "writer")
+    ]
+  },
+  {
+    ...node("writer-run-history-2", "第二章 旧码头回声", "writer_run_group", "writer", "已生成"),
+    children: [node("writer-draft-2", "正文草稿", "draft", "writer")]
+  }
 ];
 
 function node(id: string, label: string, kind: string, surface: ArtifactSurface, badge = ""): ArtifactTreeNode {
@@ -231,23 +430,13 @@ function actionResult(taskId: string, body: WebActionRequest): WebActionResult {
     payload: {},
     progress: progress(),
     job,
-    decision_cards:
-      body.action === "start_writer"
-        ? [
-            {
-              card_id: "start-writer-review",
-              title: "Writer 审阅",
-              body: "Writer 已启动。",
-              actions: [{ action: "confirm_current_step", label: "接受并继续", variant: "primary" }]
-            }
-          ]
-        : [],
+    decision_cards: [],
     technical_details: {}
   };
 }
 
 function jobEvents(jobId: string): JobEventView[] {
-  return [
+  const events: JobEventView[] = [
     {
       event_id: "000001",
       job_id: jobId,
@@ -257,6 +446,17 @@ function jobEvents(jobId: string): JobEventView[] {
       created_at: now
     }
   ];
+  if (jobId.includes("start_writer")) {
+    events.push({
+      event_id: "000002",
+      job_id: jobId,
+      kind: "succeeded",
+      message: "后台任务已完成",
+      payload: {},
+      created_at: now
+    });
+  }
+  return events;
 }
 
 export const handlers = [
@@ -283,19 +483,39 @@ export const handlers = [
       deleted: confirm ? { db: true } : {}
     });
   }),
+  http.delete("/api/tasks/:taskId/writer-runs/latest", ({ params, request }) => {
+    const confirm = new URL(request.url).searchParams.get("confirm") === "true";
+    calls.deleteWriterRuns.push({ taskId: String(params.taskId), confirm });
+    return HttpResponse.json({
+      task_id: params.taskId,
+      confirmed: confirm,
+      run_id: "run-1",
+      candidate_paths: ["/tmp/runs/writer/run-1"],
+      deleted_paths: confirm ? ["/tmp/runs/writer/run-1"] : [],
+      errors: [],
+      message: confirm ? "已删除最近一次 Writer 运行，可以重新提交续写意图。" : "将删除最近一次 Writer 运行产物，不影响阅读记忆和任务索引。"
+    });
+  }),
   http.post("/api/tasks/:taskId/reset-close-read", ({ params }) =>
     HttpResponse.json(actionResult(String(params.taskId), { action: "reset_close_read", payload: {} }))
   ),
-  http.get("/api/tasks/:taskId/messages", ({ params }) => HttpResponse.json(messagesByTask[String(params.taskId)] ?? [])),
+  http.get("/api/tasks/:taskId/messages", ({ params }) => {
+    const taskId = String(params.taskId);
+    messageListCounts[taskId] = (messageListCounts[taskId] ?? 0) + 1;
+    const messages = messagesByTask[taskId] ?? [];
+    const deferredMessage = deferredMessagesReady[taskId] && messageListCounts[taskId] > 1 ? deferredMessagesByTask[taskId] : null;
+    return HttpResponse.json(deferredMessage ? [...messages, deferredMessage] : messages);
+  }),
   http.post("/api/tasks/:taskId/messages", async ({ params, request }) => {
     const body = await request.json();
     calls.messages.push({ taskId: String(params.taskId), body });
+    const payload = (body as { payload?: Record<string, unknown> }).payload ?? {};
     const message: ConversationMessage = {
       message_id: `user-${calls.messages.length}`,
       task_id: String(params.taskId),
       role: "user",
       content: String((body as { content?: string }).content ?? ""),
-      payload: {},
+      payload,
       decision_cards: [],
       created_at: now
     };
@@ -316,7 +536,14 @@ export const handlers = [
     }
     return HttpResponse.json(actionResult(String(params.taskId), body));
   }),
-  http.get("/api/jobs/:jobId/events/replay", ({ params }) => HttpResponse.json(jobEvents(String(params.jobId)))),
+  http.get("/api/jobs/:jobId/events/replay", ({ params }) => {
+    const jobId = String(params.jobId);
+    const taskId = deferredMessageJobIds[jobId];
+    if (taskId) {
+      deferredMessagesReady[taskId] = true;
+    }
+    return HttpResponse.json(jobEvents(jobId));
+  }),
   http.get("/api/tasks/:taskId/artifact-tree", ({ request }) => {
     const surface = new URL(request.url).searchParams.get("surface");
     return HttpResponse.json(surface === "writer" ? writerTree : closeReadTree);

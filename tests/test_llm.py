@@ -55,3 +55,19 @@ def test_generate_json_raises_after_exhausting_invalid_json_retries(monkeypatch:
 
     assert exc_info.value.attempts == 3
     assert exc_info.value.raw_text == "bad-3"
+
+
+def test_generate_json_ignores_fallback_on_error_for_real_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client(monkeypatch)
+    responses = iter(["bad-1", "bad-2", "bad-3"])
+
+    monkeypatch.setattr(client, "generate_text", lambda **_: next(responses))
+    monkeypatch.setattr(llm_module.time, "sleep", lambda *_: None)
+
+    with pytest.raises(InvalidJSONResponseError):
+        client.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            fallback_factory=lambda: {"fallback": True},
+            use_fallback_on_error=True,
+        )

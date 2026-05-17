@@ -5,7 +5,14 @@ import { describe, expect, it } from "vitest";
 
 import { createAppQueryClient } from "../App";
 import { WorkspaceShell } from "../components/layout/WorkspaceShell";
-import { calls, setTaskActiveJob } from "./server";
+import {
+  calls,
+  setTaskActiveJob,
+  setWriterArtifactReviewAfterJobReplay,
+  setWriterArtifactReviewMessage,
+  setWriterDraftReviewMessage,
+  setWriterQuestionMessage
+} from "./server";
 
 function renderWorkspace() {
   const queryClient = createAppQueryClient();
@@ -29,6 +36,16 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.getByRole("region", { name: "结果浏览器" })).toBeInTheDocument();
     expect(screen.queryByText("freeze_d_review")).not.toBeInTheDocument();
     expect(screen.queryByText("wait_chapter_acceptance")).not.toBeInTheDocument();
+    expect(screen.queryByText("我的反馈")).not.toBeInTheDocument();
+  });
+
+  it("shows Creative KB build progress in the task rail", async () => {
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(screen.getAllByText("Creative KB").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Creative KB进度 75%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("3/4 · 2 簇").length).toBeGreaterThan(0);
   });
 
   it("opens the create task dialog, submits to createTask, and starts importing", async () => {
@@ -87,6 +104,24 @@ describe("Novel Agent Web workspace", () => {
     expect(calls.commands).toHaveLength(0);
   });
 
+  it("can preview and delete the latest Writer run without deleting the task", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByLabelText("打开 task-alpha 操作菜单"));
+    await user.click(screen.getByRole("menuitem", { name: "删除最近续写" }));
+
+    expect(await screen.findByText("删除最近续写预览")).toBeInTheDocument();
+    expect(calls.deleteWriterRuns).toEqual([{ taskId: "task-alpha", confirm: false }]);
+
+    await user.click(screen.getByRole("button", { name: "确认删除最近续写" }));
+
+    await waitFor(() => expect(calls.deleteWriterRuns).toHaveLength(2));
+    expect(calls.deleteWriterRuns[1]).toEqual({ taskId: "task-alpha", confirm: true });
+    expect(await screen.findByRole("button", { name: "task-alpha" })).toBeInTheDocument();
+  });
+
   it("refreshes the visible artifact detail when close-read progress arrives", async () => {
     const user = userEvent.setup();
     renderWorkspace();
@@ -109,6 +144,15 @@ describe("Novel Agent Web workspace", () => {
     await screen.findByText("导入原文进度已更新");
   });
 
+  it("refreshes conversation messages when a Writer job reaches review", async () => {
+    setTaskActiveJob("task-alpha", "job-existing-start_writer");
+    setWriterArtifactReviewAfterJobReplay("task-alpha", "job-existing-start_writer");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await screen.findByText("全书续写规划");
+  });
+
   it("sends natural language to messages endpoint, not commands", async () => {
     const user = userEvent.setup();
     renderWorkspace();
@@ -121,6 +165,117 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() => expect(calls.messages).toHaveLength(1));
     expect(calls.commands).toHaveLength(0);
     expect(calls.messages[0].body).toMatchObject({ content: "请让主角先回到旧案现场。" });
+  });
+
+  it("binds Writer question answers to the chat input and only continues through the card action", async () => {
+    const user = userEvent.setup();
+    setWriterQuestionMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(await screen.findByText("顾迟是否为新增人物？")).toBeInTheDocument();
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "不是新增人物，本轮不加入。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(calls.messages).toHaveLength(1));
+    expect(calls.messages[0].body).toMatchObject({
+      content: "不是新增人物，本轮不加入。",
+      payload: {
+        channel: "writer_question_answer",
+        run_id: "run-1",
+        question_set_id: "outline-research-run-1-needs-answer",
+        answer_text: "不是新增人物，本轮不加入。"
+      }
+    });
+    expect(calls.actions.some((call) => call.body.action === "submit_outline_research_answers")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "提交回答并继续研究" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "submit_outline_research_answers")).toBe(true));
+    const submitCall = calls.actions.find((call) => call.body.action === "submit_outline_research_answers");
+    expect(submitCall?.body.payload).toMatchObject({
+      run_id: "run-1",
+      question_set_id: "outline-research-run-1-needs-answer",
+      source_message_id: "user-1",
+      answer_text: "不是新增人物，本轮不加入。"
+    });
+    expect(calls.commands).toHaveLength(0);
+  });
+
+  it("uses the shared chat input for Writer artifact approval supplements", async () => {
+    const user = userEvent.setup();
+    setWriterArtifactReviewMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(await screen.findByText("本批会把旧案线索推到新地点。")).toBeInTheDocument();
+    expect(within(screen.getByRole("log")).queryByRole("button", { name: "用输入框补充" })).not.toBeInTheDocument();
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "动作段更紧，结尾不要解释幕后人。");
+    const approveButtons = await screen.findAllByRole("button", { name: "通过并继续" });
+    await user.click(approveButtons[approveButtons.length - 1]);
+
+    await waitFor(() => expect(calls.messages.some((call) => call.body && JSON.stringify(call.body).includes("writer_artifact_supplement"))).toBe(true));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "approve_writer_artifact")).toBe(true));
+    const actionCall = calls.actions.find((call) => call.body.action === "approve_writer_artifact");
+    expect(actionCall?.body.payload).toMatchObject({
+      review_id: "artifact-review-run-1-batch",
+      supplement_text: "动作段更紧，结尾不要解释幕后人。",
+      source_message_id: "user-1"
+    });
+    await waitFor(() =>
+      expect(within(document.querySelector("form.composer") as HTMLElement).queryByRole("button", { name: "通过并继续" })).not.toBeInTheDocument()
+    );
+  });
+
+  it("uses the shared chat input for Writer artifact revision feedback", async () => {
+    const user = userEvent.setup();
+    setWriterArtifactReviewMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(within(screen.getByRole("log")).queryByRole("button", { name: "输入调整反馈" })).not.toBeInTheDocument();
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "第二个场景因果太跳，先补人物动机。");
+    const revisionButtons = await screen.findAllByRole("button", { name: "不通过并调整" });
+    await user.click(revisionButtons[revisionButtons.length - 1]);
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "request_writer_artifact_revision")).toBe(true));
+    const actionCall = calls.actions.find((call) => call.body.action === "request_writer_artifact_revision");
+    expect(actionCall?.body.payload).toMatchObject({
+      revision_feedback: "第二个场景因果太跳，先补人物动机。",
+      source_message_id: "user-1"
+    });
+    await waitFor(() =>
+      expect(within(document.querySelector("form.composer") as HTMLElement).queryByRole("button", { name: "不通过并调整" })).not.toBeInTheDocument()
+    );
+  });
+
+  it("shows the draft review card without the old length-rewrite branch", async () => {
+    const user = userEvent.setup();
+    setWriterDraftReviewMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(await screen.findByText("雨落下来，巷口的灯忽明忽暗。")).toBeInTheDocument();
+    expect(screen.queryByText("调整字数后重写")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("log")).queryByRole("button", { name: "输入重写反馈" })).not.toBeInTheDocument();
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "节奏太慢，冲突提前。");
+    const rewriteButtons = await screen.findAllByRole("button", { name: "基于反馈重写" });
+    await user.click(rewriteButtons[rewriteButtons.length - 1]);
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "rewrite_chapter")).toBe(true));
+    const rewriteCall = calls.actions.find((call) => call.body.action === "rewrite_chapter");
+    expect(rewriteCall?.body.payload).toMatchObject({
+      feedback_text: "节奏太慢，冲突提前。",
+      source_message_id: "user-1"
+    });
+    await waitFor(() =>
+      expect(within(document.querySelector("form.composer") as HTMLElement).queryByRole("button", { name: "基于反馈重写" })).not.toBeInTheDocument()
+    );
   });
 
   it("opens Writer wizard from the button and submits start_writer action", async () => {
@@ -136,7 +291,13 @@ describe("Novel Agent Web workspace", () => {
 
     await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(true));
     const writerCall = calls.actions.find((call) => call.body.action === "start_writer");
-    expect(writerCall?.body.payload).toMatchObject({ continuation_goal: "进入新地点并揭露线索。" });
+    expect(writerCall?.body.payload).toMatchObject({
+      continuation_goal: "进入新地点并揭露线索。",
+      desired_actions: ["进入新地点并揭露线索。"],
+      target_chapter_count: 3,
+      default_chapter_target_chars: 3000,
+      story_scale: { target_chapter_count: 3, default_chapter_target_chars: 3000, pacing_profile: "延续原作节奏" }
+    });
     expect(calls.commands).toHaveLength(0);
   });
 
@@ -151,20 +312,6 @@ describe("Novel Agent Web workspace", () => {
     expect(calls.actions.find((call) => call.body.action === "confirm_current_step")?.body.action.startsWith("/")).toBe(false);
   });
 
-  it("submits scoped revision feedback to the Writer revision action", async () => {
-    const user = userEvent.setup();
-    renderWorkspace();
-    await waitForInitialTask();
-
-    await user.type(await screen.findByPlaceholderText("局部修改反馈"), "把这一段改得克制一点。");
-    await user.click(screen.getByRole("button", { name: "按反馈修改" }));
-
-    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "request_scoped_artifact_revision")).toBe(true));
-    const revisionCall = calls.actions.find((call) => call.body.action === "request_scoped_artifact_revision");
-    expect(revisionCall?.body.payload).toMatchObject({ feedback: "把这一段改得克制一点。" });
-    expect(calls.commands).toHaveLength(0);
-  });
-
   it("shows person encyclopedia fields when clicking a person tree node", async () => {
     const user = userEvent.setup();
     renderWorkspace();
@@ -177,6 +324,24 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.getAllByText("当前目标").length).toBeGreaterThan(0);
     expect(screen.getAllByText("关系网络").length).toBeGreaterThan(0);
     expect(screen.getAllByText("禁止误写点").length).toBeGreaterThan(0);
+  });
+
+  it("shows the Agent Loop Writer artifact tree", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(screen.getByRole("tab", { name: /Writer/ }));
+
+    expect(await screen.findByText("第一章 雨夜接应")).toBeInTheDocument();
+    expect(screen.getByText("第二章 旧码头回声")).toBeInTheDocument();
+    expect(await screen.findByText("大纲研究")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "问题集" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "大纲研究笔记" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检索轨迹" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "章节写作指导" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "验收决策" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "章节长度计划" })).not.toBeInTheDocument();
   });
 
   it("keeps raw JSON hidden until the technical details drawer is opened", async () => {

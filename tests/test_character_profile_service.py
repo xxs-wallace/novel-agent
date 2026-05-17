@@ -253,7 +253,7 @@ def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) 
     assert personality[0]["evidence_level"] == "inferred"
     assert recent_activity[-1]["value"] == "在雨夜赶往医院"
     assert recent_activity[-1]["field_type"] == "fact"
-    assert "## 基本属性/关系/能力" in str(row["profile_summary_md"])
+    assert "## 基本属性/能力" in str(row["profile_summary_md"])
     assert "## 剧情时间线" in str(row["profile_summary_md"])
 
 
@@ -345,6 +345,47 @@ def test_merge_updates_resolves_relationship_conflicts_and_alias_targets(tmp_pat
     assert relationships[0]["sentiment_state"] == "信任回升"
     assert relationships[0]["last_updated_chapter_index"] == 5
     assert relationships[0]["source_chapter_indexes"] == [2, 5]
+
+
+def test_character_roster_exposes_character_id_and_merge_uses_it(tmp_path) -> None:
+    db = NovelAgentDB(tmp_path / "character_id_profile.db")
+    service = _build_service()
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        character_id = CharacterProfilesRepo().upsert(
+            conn,
+            _profile_payload(
+                book_id="book-3",
+                canonical_name="周衡",
+                aliases=["阿衡"],
+                last_seen_doc_id=4,
+                last_seen_title_index=2,
+            ),
+        )
+        service.merge_updates(
+            conn,
+            book_id="book-3",
+            chapter_index=3,
+            doc_ids=[8],
+            updates=[
+                {
+                    "character_id": str(character_id),
+                    "canonical_name": "衡哥",
+                    "aliases": ["衡哥"],
+                    "personhood_evidence_summary": "衡哥被称呼并执行调查行动。",
+                    "recent_activity": "衡哥回到调查现场。",
+                }
+            ],
+        )
+        roster = CharacterRosterService(profiles_repo=CharacterProfilesRepo()).load_recent_roster(conn, book_id="book-3")
+        rows = CharacterProfilesRepo().list_by_book(conn, book_id="book-3")
+
+    assert roster[0]["character_id"] == str(character_id)
+    assert [row["canonical_name"] for row in rows] == ["周衡"]
+    row = rows[0]
+    assert "衡哥" in _load_json(row, "aliases_json")
+    assert "衡哥被称呼并执行调查行动" in row["personhood_evidence_summary"]
 
 
 def test_merge_updates_filters_style_metadata_from_profile_fields(tmp_path) -> None:

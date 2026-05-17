@@ -78,13 +78,10 @@ class SegmentationRunner:
         tree_service = SourceTreeService(model_client=model_client)
         analysis = tree_service.analyze(source_root, book_id=self.config.book.book_id)
         if not analysis.books:
-            analysis = tree_service.heuristic_analysis(source_root, book_id=self.config.book.book_id)
+            raise RuntimeError("Directory analysis model returned no books")
         ordered_paths = self._resolve_ordered_paths(source_root=source_root, read_order=analysis.books[0].read_order)
         if not ordered_paths:
-            fallback_analysis = tree_service.heuristic_analysis(source_root, book_id=self.config.book.book_id)
-            ordered_paths = self._resolve_ordered_paths(source_root=source_root, read_order=fallback_analysis.books[0].read_order)
-        if not ordered_paths:
-            raise RuntimeError(f"No readable files resolved for {source_root}")
+            raise RuntimeError("Directory analysis model returned no readable files")
         toc_snapshot = BookTocService().extract_from_paths(ordered_paths)
         reader = ChunkReaderService(
             target_min_chars=self.config.read_strategy.target_chunk_chars_min,

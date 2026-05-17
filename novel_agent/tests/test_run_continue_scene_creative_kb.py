@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from novel_agent.app.orchestrators import MainLayerOrchestrator
 from novel_agent.app.repos.assets_repo import AssetsRepo
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
@@ -16,7 +18,29 @@ from novel_agent.app.run_continue_scene import (
     _maybe_run_creative_kb_retrieval,
 )
 from novel_agent.app.schemas.creative_kb_schema import FragmentCard, FragmentCluster, StyleFeatures
+from novel_agent.app.services.retrieval_facade import RetrievalFacade
+from novel_agent.app.services.rerank_service import RerankService
+from novel_agent.app.services.scene_brief_service import SceneBriefService
 from novel_agent.runs import RunLayout, RunWriter
+
+
+class _FakeRetrievalModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, use_fallback_on_error
+        payload = fallback_factory()
+        return payload, ""
+
+
+def _orchestrator() -> MainLayerOrchestrator:
+    model_client = _FakeRetrievalModel()
+    return MainLayerOrchestrator(
+        retrieval_facade=RetrievalFacade(
+            scene_brief_service=SceneBriefService(model_client=model_client),  # type: ignore[arg-type]
+            rerank_service=RerankService(model_client=model_client),  # type: ignore[arg-type]
+        )
+    )
 
 
 def _card() -> FragmentCard:
@@ -202,7 +226,12 @@ def test_maybe_run_creative_kb_retrieval_writes_run_artifacts(tmp_path: Path) ->
         include_coarse_result=False,
     )
 
-    payload = _maybe_run_creative_kb_retrieval(args=args, run_id=run_id, writer=writer)
+    payload = _maybe_run_creative_kb_retrieval(
+        args=args,
+        run_id=run_id,
+        writer=writer,
+        orchestrator=_orchestrator(),
+    )
 
     assert payload is not None
     assert payload["rerank_result"]["selected_fragment_ids"] == ["frag-1"]
@@ -346,7 +375,12 @@ def test_maybe_run_creative_kb_retrieval_end_to_end_with_memory_context(tmp_path
         include_coarse_result=False,
     )
 
-    payload = _maybe_run_creative_kb_retrieval(args=args, run_id=run_id, writer=writer)
+    payload = _maybe_run_creative_kb_retrieval(
+        args=args,
+        run_id=run_id,
+        writer=writer,
+        orchestrator=_orchestrator(),
+    )
 
     assert payload is not None
     bundle = payload["writer_input_bundle"]
@@ -428,7 +462,12 @@ def test_maybe_run_creative_kb_retrieval_degrades_when_memory_assets_missing(tmp
         include_coarse_result=False,
     )
 
-    payload = _maybe_run_creative_kb_retrieval(args=args, run_id=run_id, writer=writer)
+    payload = _maybe_run_creative_kb_retrieval(
+        args=args,
+        run_id=run_id,
+        writer=writer,
+        orchestrator=_orchestrator(),
+    )
 
     assert payload is not None
     bundle = payload["writer_input_bundle"]

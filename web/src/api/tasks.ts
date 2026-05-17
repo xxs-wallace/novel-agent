@@ -1,5 +1,5 @@
 import { apiFetch, jsonBody } from "./client";
-import type { CreateTaskRequest, DeleteTaskPreview, TaskProgress, TaskSummary, WebActionResult } from "./types";
+import type { CreateTaskRequest, DeleteTaskPreview, TaskProgress, TaskSummary, WebActionResult, WriterRunDeletePreview } from "./types";
 
 export function getTasks(): Promise<TaskSummary[]> {
   return apiFetch<TaskSummary[]>("/api/tasks");
@@ -35,6 +35,15 @@ export function deleteTask(taskId: string, options: { confirm?: boolean; include
     include_runs: String(Boolean(options.includeRuns))
   });
   return apiFetch<DeleteTaskPreview>(`/api/tasks/${encodeURIComponent(taskId)}?${params.toString()}`, {
+    method: "DELETE"
+  });
+}
+
+export function deleteLatestWriterRun(taskId: string, options: { confirm?: boolean } = {}): Promise<WriterRunDeletePreview> {
+  const params = new URLSearchParams({
+    confirm: String(Boolean(options.confirm))
+  });
+  return apiFetch<WriterRunDeletePreview>(`/api/tasks/${encodeURIComponent(taskId)}/writer-runs/latest?${params.toString()}`, {
     method: "DELETE"
   });
 }

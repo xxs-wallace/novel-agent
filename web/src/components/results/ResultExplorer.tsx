@@ -9,9 +9,10 @@ import { ArtifactTree } from "./ArtifactTree";
 
 interface ResultExplorerProps {
   selectedTaskId: string;
+  focusedArtifactId?: string;
 }
 
-export function ResultExplorer({ selectedTaskId }: ResultExplorerProps) {
+export function ResultExplorer({ selectedTaskId, focusedArtifactId = "" }: ResultExplorerProps) {
   const [surface, setSurface] = useState<ArtifactSurface>("close-read");
   const [selectedNode, setSelectedNode] = useState<ArtifactTreeNode | null>(null);
 
@@ -33,6 +34,23 @@ export function ResultExplorer({ selectedTaskId }: ResultExplorerProps) {
       setSelectedNode(firstNode);
     }
   }, [firstNode, nodes, selectedNode, selectedTaskId, surface]);
+
+  useEffect(() => {
+    if (!focusedArtifactId) {
+      return;
+    }
+    setSurface("writer");
+  }, [focusedArtifactId]);
+
+  useEffect(() => {
+    if (!focusedArtifactId || surface !== "writer") {
+      return;
+    }
+    const node = findNode(nodes, focusedArtifactId);
+    if (node) {
+      setSelectedNode(node);
+    }
+  }, [focusedArtifactId, nodes, surface]);
 
   const detailQuery = useQuery({
     queryKey: ["artifact-view", selectedNode?.id],
@@ -102,4 +120,17 @@ function containsNode(nodes: ArtifactTreeNode[], id: string): boolean {
     }
   }
   return false;
+}
+
+function findNode(nodes: ArtifactTreeNode[], id: string): ArtifactTreeNode | null {
+  for (const node of nodes) {
+    if (node.id === id) {
+      return node;
+    }
+    const child = findNode(node.children, id);
+    if (child) {
+      return child;
+    }
+  }
+  return null;
 }

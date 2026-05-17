@@ -265,7 +265,23 @@ def test_fragment_card_builder_retries_on_schema_error_and_syncs_preferred_tags(
 
 
 def test_scene_brief_service_maps_legacy_scene_plan_to_contract() -> None:
-    service = SceneBriefService()
+    model_client = SequenceModelClient(
+        [
+            {
+                "scene_objective": "续写这一小段离别前的停顿",
+                "emotional_goal": "表现克制型悲伤",
+                "conflict_goal": "让人物维持表面平静",
+                "narrative_function": ["收束", "情绪沉浸"],
+                "emotion_mode": ["克制"],
+                "character_temperament": ["敏感", "克制"],
+                "relationship_state": ["未和解"],
+                "style_need": ["短句", "低对白"],
+                "must_avoid": ["突然表白", "设定冲突"],
+                "preferred_tags": ["雨天", "告别"],
+            }
+        ]
+    )
+    service = SceneBriefService(model_client=model_client)  # type: ignore[arg-type]
     retrieval_input = CreativeKBRetrievalInput(
         anchor_context="上一段写到她没有说再见。",
         recent_window_summary="当前处于误解后的短暂对峙。",
@@ -415,7 +431,54 @@ def test_coarse_retrieval_and_rerank_form_unique_cluster_selection() -> None:
     assert "cluster-a" in coarse.filtered_cluster_ids
 
     selected_candidates = [rep_card, same_cluster_non_rep, other_cluster]
-    rerank = RerankService(top_n=2).rerank(
+    rerank_model = SequenceModelClient(
+        [
+            {
+                "scores": [
+                    {
+                        "candidate_id": "frag-rep",
+                        "cluster_id": "cluster-a",
+                        "continuity_fit": 8,
+                        "scene_function_fit": 9,
+                        "character_temperament_fit": 8,
+                        "relationship_state_fit": 8,
+                        "emotion_expression_fit": 9,
+                        "style_fit": 8,
+                        "transferability": 9,
+                        "context_dependency_penalty": 1,
+                        "reason": "主维度高度贴合。",
+                    },
+                    {
+                        "candidate_id": "frag-nonrep",
+                        "cluster_id": "cluster-a",
+                        "continuity_fit": 6,
+                        "scene_function_fit": 6,
+                        "character_temperament_fit": 6,
+                        "relationship_state_fit": 6,
+                        "emotion_expression_fit": 6,
+                        "style_fit": 5,
+                        "transferability": 4,
+                        "context_dependency_penalty": 7,
+                        "reason": "同簇但上下文依赖高。",
+                    },
+                    {
+                        "candidate_id": "frag-other",
+                        "cluster_id": "cluster-b",
+                        "continuity_fit": 5,
+                        "scene_function_fit": 7,
+                        "character_temperament_fit": 6,
+                        "relationship_state_fit": 4,
+                        "emotion_expression_fit": 5,
+                        "style_fit": 5,
+                        "transferability": 8,
+                        "context_dependency_penalty": 4,
+                        "reason": "部分匹配。",
+                    },
+                ]
+            }
+        ]
+    )
+    rerank = RerankService(top_n=2, model_client=rerank_model).rerank(  # type: ignore[arg-type]
         scene_brief=scene_brief,
         candidates=selected_candidates,
         anchor_context="她没有立刻说出那句告别，只是站在雨里。",
@@ -425,6 +488,6 @@ def test_coarse_retrieval_and_rerank_form_unique_cluster_selection() -> None:
     assert len(rerank.selected_fragment_ids) == 2
     assert "frag-rep" in rerank.selected_fragment_ids
     assert "frag-nonrep" not in rerank.selected_fragment_ids
-    assert rerank.selection_notes == "rule_based_placeholder_rerank"
+    assert rerank.selection_notes == "prompt_based_fixed_rubric"
     scores_by_id = {item.candidate_id: item for item in rerank.scores}
     assert scores_by_id["frag-rep"].scene_function_fit >= scores_by_id["frag-unrelated"].scene_function_fit if "frag-unrelated" in scores_by_id else True

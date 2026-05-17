@@ -37,6 +37,15 @@ class CharacterIdentityResolutionService:
             candidate_name = self._clean_name(update.get("canonical_name"))
             if not candidate_name:
                 continue
+            id_resolved = self._resolve_by_character_id(
+                conn,
+                book_id=book_id,
+                update=update,
+                source_verified_names=source_verified_names,
+            )
+            if id_resolved is not None:
+                resolved.append(id_resolved)
+                continue
             first_decision = self._ask_model(
                 model_client=model_client,
                 prompt_input={
@@ -84,6 +93,38 @@ class CharacterIdentityResolutionService:
                 resolved.append(normalized)
         return resolved
 
+    def _resolve_by_character_id(
+        self,
+        conn,
+        *,
+        book_id: str,
+        update: dict[str, Any],
+        source_verified_names: list[str],
+    ) -> dict[str, Any] | None:
+        try:
+            character_id = int(update.get("character_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        if character_id <= 0:
+            return None
+        row = self.profiles_repo.get_by_id(conn, book_id=book_id, character_id=character_id)
+        if row is None:
+            return None
+        canonical_name = self._clean_name(row["canonical_name"])
+        if not canonical_name:
+            return None
+        normalized = dict(update)
+        incoming_name = self._clean_name(update.get("canonical_name"))
+        aliases_to_add = [incoming_name] if incoming_name and incoming_name != canonical_name else []
+        aliases_to_add.extend(self._as_name_list(update.get("aliases")))
+        normalized["character_id"] = str(character_id)
+        normalized["canonical_name"] = canonical_name
+        normalized["aliases"] = self._merge_aliases(
+            update.get("aliases"),
+            self._source_supported_aliases(aliases_to_add, source_verified_names=source_verified_names),
+        )
+        return normalized
+
     def _ask_model(
         self,
         *,
@@ -100,8 +141,7 @@ class CharacterIdentityResolutionService:
         )
         decision = dict(payload) if isinstance(payload, dict) else {}
         if self._decision_action(decision) not in {"create_new", "merge_existing", "drop", "request_all_profiles"}:
-            fallback = fallback_factory()
-            return dict(fallback) if isinstance(fallback, dict) else {}
+            raise RuntimeError("Character identity resolution model returned an invalid decision")
         return decision
 
     def _apply_decision(
@@ -194,6 +234,7 @@ class CharacterIdentityResolutionService:
 
     def _compact_update(self, update: dict[str, Any]) -> dict[str, Any]:
         keys = (
+            "character_id",
             "canonical_name",
             "aliases",
             "recent_activity",

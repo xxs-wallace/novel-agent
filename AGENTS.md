@@ -19,6 +19,7 @@
 - 涉及跨层对象时，必须先查对应 `contracts.md`，不得在代码里自行改变已冻结字段名、字段类型或字段语义。
 - 涉及用户可见流程、入口、状态文案或人工确认点时，必须遵守 `.trae/specs/spec.md`。
 - 涉及模块内部能力时，优先遵守该模块目录下的 `spec.md` 和 `design.md`。
+- 不得用本地 heuristic / deterministic fallback 伪装模型已完成语义判断。若功能 contract 需要模型理解正文、摘要、人物、关系、篇章结构、规划或评审，生产路径中缺少模型、模型 id 缺失、模型不可访问、请求失败或 JSON 解析失败时，只能在有限次数和时间内重试；重试后仍失败必须抛出异常或返回显式 `failed` / `blocked` / `skipped` / `needs_model` 状态。来自用户操作的异常必须在最上层 catch 后通知用户任务失败；来自后台任务的模型异常必须标记任务失败，并保存可供用户点击查看的错误栈。只有 spec 明确允许的 dry-run、测试、兼容迁移或安全保底路径可以使用本地 fallback，并且产物必须显式标注 `dry_run` / `fallback` / `provisional`，不得标记为 `success`、`ready`、`committed` 或正常验收结果。
 
 ## Product Constraints
 

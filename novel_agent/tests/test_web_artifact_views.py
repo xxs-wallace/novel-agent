@@ -20,6 +20,14 @@ def _find_node(nodes: list[dict[str, Any]], label: str) -> dict[str, Any]:
     return {}
 
 
+def _flatten_labels(nodes: list[dict[str, Any]]) -> list[str]:
+    labels: list[str] = []
+    for node in nodes:
+        labels.append(str(node["label"]))
+        labels.extend(_flatten_labels(node.get("children", [])))
+    return labels
+
+
 FULL_TIMELINE_SUMMARY = (
     "主角在雨夜收到匿名线索后回到旧码头，先确认信件来源与失踪证人的路径有关，"
     "再根据现场残留物把旧案重新串联起来。随后同伴补充新的目击证词，使调查方向"
@@ -183,7 +191,28 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     run_dir = tmp_path / "runs" / "writer" / "run-1"
     run_dir.mkdir(parents=True)
     (run_dir / "workflow_state.json").write_text(
-        json.dumps({"data": {"run_id": "run-1", "book_id": task_id, "current_stage": "batch_review"}}, ensure_ascii=False),
+        json.dumps({"data": {"run_id": "run-1", "book_id": task_id, "current_stage": "chapter_review"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "continuation_intent.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "desired_actions": ["让主角根据匿名信继续追查旧案。"],
+                    "story_scale": {
+                        "target_chapter_count": 3,
+                        "target_total_chars": 9000,
+                        "default_chapter_target_chars": 3000,
+                    },
+                    "climax_plan": {"conflict_climax": "在旧码头发现真正的幕后联系人。"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "book_continuation_plan.json").write_text(
+        json.dumps({"data": {"continuation_goal": "围绕匿名信展开三章追查。"}}, ensure_ascii=False),
         encoding="utf-8",
     )
     (run_dir / "batch_plan.json").write_text(
@@ -218,12 +247,28 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    (run_dir / "chapter_length_plan.json").write_text(
-        json.dumps({"data": {"default_target_chars": 2400, "budgets": [{"chapter_id": "ch-1", "target_chars": 2600}]}}, ensure_ascii=False),
+    (run_dir / "sufficiency_decision.json").write_text(
+        json.dumps({"data": {"status": "needs_user_input", "blocking_gaps": ["新增人物授权"], "user_questions": ["顾迟是否新增？"]}}, ensure_ascii=False),
         encoding="utf-8",
     )
-    (run_dir / "chapter_execution_input.json").write_text(
-        json.dumps({"data": {"chapter_title": "雨夜接应", "fact_constraints": ["证人仍在危险中"], "forbidden_items": ["不得越权"]}}, ensure_ascii=False),
+    (run_dir / "outline_research_question_set.json").write_text(
+        json.dumps({"data": {"status": "pending", "questions": [{"prompt": "顾迟是否新增？", "required": True}]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "planning_notebook.json").write_text(
+        json.dumps({"data": {"summary": "围绕旧案线索规划。", "evidence": [{"evidence_level": "user_authorized", "text": "顾迟不是新增人物"}]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "outline_research_trace.json").write_text(
+        json.dumps({"data": {"requests": [{"type": "story_detail", "query": "旧案线索"}]}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "chapter_writing_guidance.json").write_text(
+        json.dumps({"data": {"chapter_title": "雨夜接应", "length_budget": {"target_chars": 2600}, "user_supplement": {"supplement_text": "动作段更紧。"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (run_dir / "generation_review_decision.json").write_text(
+        json.dumps({"data": {"status": "rewrite_requested", "feedback_text": "节奏太慢。", "next_action": "agent_loop_rewrite_draft"}}, ensure_ascii=False),
         encoding="utf-8",
     )
     (run_dir / "draft.md").write_text("雨落下来，巷口的灯忽明忽暗。", encoding="utf-8")
@@ -236,8 +281,34 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     client.post("/api/tasks", json={"task_id": task_id, "source_path": ""})
     tree = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=writer")
     assert tree.status_code == 200
-    labels = [node["label"] for node in tree.json()]
-    assert labels == ["Run 总览", "全书续写规划", "本批剧情大纲", "章节标题与梗概", "章节长度计划", "本章写作材料", "正文草稿", "写回确认"]
+    tree_payload = tree.json()
+    labels = _flatten_labels(tree_payload)
+    assert tree_payload[0]["label"] == "雨夜接应"
+    assert labels == [
+        "雨夜接应",
+        "续写概览",
+        "写作目标",
+        "大纲研究结果",
+        "问题集",
+        "大纲研究笔记",
+        "检索轨迹",
+        "全书续写规划",
+        "本批剧情大纲",
+        "章节标题与梗概",
+        "章节写作指导",
+        "正文草稿",
+        "验收决策",
+        "写回摘要",
+    ]
+    assert "章节长度计划" not in labels
+
+    intent_node = _find_node(tree.json(), "写作目标")
+    intent_view = client.get(f"/api/artifacts/{intent_node['id']}/view").json()
+    intent_rendered = json.dumps(intent_view, ensure_ascii=False)
+    assert intent_view["kind"] == "writer_continuation_intent"
+    assert "让主角根据匿名信继续追查旧案" in intent_rendered
+    assert "目标章节数：3" in intent_rendered
+    assert "desired_actions" not in intent_rendered
 
     batch_node = _find_node(tree.json(), "本批剧情大纲")
     batch_view = client.get(f"/api/artifacts/{batch_node['id']}/view")
@@ -252,3 +323,39 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     technical = client.get(f"/api/artifacts/{batch_node['id']}/technical")
     assert technical.status_code == 200
     assert "raw_json" in technical.json()
+
+    guidance_node = _find_node(tree.json(), "章节写作指导")
+    guidance_view = client.get(f"/api/artifacts/{guidance_node['id']}/view").json()
+    assert guidance_view["kind"] == "writer_writing_guidance"
+    assert "动作段更紧" in json.dumps(guidance_view, ensure_ascii=False)
+
+    draft_node = _find_node(tree.json(), "正文草稿")
+    draft_view = client.get(f"/api/artifacts/{draft_node['id']}/view").json()
+    assert draft_view["markdown"] == "雨落下来，巷口的灯忽明忽暗。"
+
+
+def test_writer_tree_lists_multiple_writer_runs_as_history(tmp_path: Path) -> None:
+    task_id = "book-one"
+    for run_id, title in (("run-1", "第一章 雨夜接应"), ("run-2", "第二章 旧码头回声")):
+        run_dir = tmp_path / "runs" / "writer" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "workflow_state.json").write_text(
+            json.dumps({"data": {"run_id": run_id, "book_id": task_id, "current_stage": "wait_chapter_acceptance"}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (run_dir / "chapter_brief.json").write_text(
+            json.dumps({"data": {"chapter_id": run_id, "title": title}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (run_dir / "draft.md").write_text(f"{title}正文。", encoding="utf-8")
+
+    client = TestClient(create_app(repo_root=tmp_path))
+    client.post("/api/tasks", json={"task_id": task_id, "source_path": ""})
+
+    tree = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=writer").json()
+    top_labels = [node["label"] for node in tree]
+
+    assert set(top_labels) == {"第一章 雨夜接应", "第二章 旧码头回声"}
+    for node in tree:
+        child_labels = [child["label"] for child in node["children"]]
+        assert "正文草稿" in child_labels

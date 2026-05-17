@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from novel_agent.app.repos.assets_repo import AssetsRepo
@@ -19,20 +20,30 @@ class _SequenceModelClient:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[str, str]] = []
+        self.settings = SimpleNamespace(dry_run=False)
 
     def generate_json(self, **kwargs: Any) -> tuple[dict[str, Any], str]:
         self.calls.append((str(kwargs["system_prompt"]), str(kwargs["user_prompt"])))
         if not self.responses:
-            fallback_factory = kwargs["fallback_factory"]
-            payload = fallback_factory()
-            return payload, "{}"
+            raise RuntimeError("No fake source arc model response configured")
         payload = self.responses.pop(0)
         return payload, "{}"
 
 
 def test_plot_summary_compression_uses_overlapped_windows() -> None:
     summaries = [_summary(index, "主线推进，人物继续调查旧案。") for index in range(14)]
-    service = PlotSummaryUnitCompressionService(threshold_chars=1, window_size=8, overlap_size=2)
+    model_client = _SequenceModelClient(
+        [
+            {"unit_summary": "压缩单元 1", "continuity_hooks": [], "boundary_events": [], "uncertainty_notes": []},
+            {"unit_summary": "压缩单元 2", "continuity_hooks": [], "boundary_events": [], "uncertainty_notes": []},
+        ]
+    )
+    service = PlotSummaryUnitCompressionService(
+        threshold_chars=1,
+        window_size=8,
+        overlap_size=2,
+        model_client=model_client,  # type: ignore[arg-type]
+    )
 
     result = service.compress_if_needed(summaries)
 
@@ -44,6 +55,8 @@ def test_plot_summary_compression_uses_overlapped_windows() -> None:
     assert result.units[0].overlap_title_indexes == []
     assert result.units[1].overlap_title_indexes == [6, 7]
     assert result.stride == 6
+    assert "output_schema" in model_client.calls[0][1]
+    assert "fallback_payload" not in model_client.calls[0][1]
 
 
 def test_plot_summary_compression_skips_when_under_threshold() -> None:
@@ -110,6 +123,8 @@ def test_source_arc_mapping_under_threshold_sends_all_summaries_to_model() -> No
     assert len(model_client.calls) == 1
     assert "input_type" in model_client.calls[0][1]
     assert "chapter_summaries" in model_client.calls[0][1]
+    assert "output_schema" in model_client.calls[0][1]
+    assert "fallback_payload" not in model_client.calls[0][1]
     assert result.arcs[0].source_arc_title == "日常铺垫到旧案线索"
     assert result.arcs[0].pacing_notes == "2 个 chapter 中先铺垫关系，再转入线索。"
 
@@ -206,9 +221,53 @@ def test_source_arc_mapping_smoke_compresses_over_8kb_and_exports(tmp_path: Path
             _insert_chapter(conn, book_id=book_id, index=index, summary=repeated_summary)
         conn.commit()
 
+        model_client = _SequenceModelClient(
+            [
+                {
+                    "unit_summary": "模型压缩单元 1：日常铺垫后冲突升级。",
+                    "continuity_hooks": [],
+                    "boundary_events": [],
+                    "major_character_state_changes": [],
+                    "relationship_movements": [],
+                    "world_or_rule_reveals": [],
+                    "uncertainty_notes": [],
+                },
+                {
+                    "unit_summary": "模型压缩单元 2：规则揭示并收束当前冲突。",
+                    "continuity_hooks": [],
+                    "boundary_events": [],
+                    "major_character_state_changes": [],
+                    "relationship_movements": [],
+                    "world_or_rule_reveals": [],
+                    "uncertainty_notes": [],
+                },
+                {
+                    "arcs": [
+                        {
+                            "source_arc_id": "source-arc-0001",
+                            "source_arc_title": "铺垫到规则揭示",
+                            "start_document_title_index": 0,
+                            "end_document_title_index": 13,
+                            "source_arc_role": "主线推进",
+                            "core_events": ["连续章节由日常铺垫转入规则揭示。"],
+                            "main_character_threads": [],
+                            "world_or_rule_reveals": ["能力规则与组织秘密被揭示。"],
+                            "transition_from_previous": "当前已读范围起点",
+                            "setup_for_next": "后续继续处理冲突后果",
+                            "pacing_notes": "约 14 个 chapter，经 2 个压缩单元完成推进。",
+                            "chapter_role_map": [],
+                        }
+                    ]
+                },
+            ]
+        )
         service = SourceArcMappingService(
             repo_root=tmp_path,
-            compression_service=PlotSummaryUnitCompressionService(threshold_chars=8 * 1024),
+            model_client=model_client,  # type: ignore[arg-type]
+            compression_service=PlotSummaryUnitCompressionService(
+                threshold_chars=8 * 1024,
+                model_client=model_client,  # type: ignore[arg-type]
+            ),
             now_factory=lambda: "2026-05-05T00:00:00+00:00",
         )
         source_arc_map = service.build_from_chapters(conn, book_id=book_id)
@@ -247,6 +306,28 @@ def test_context_assembly_includes_exported_source_arc_context(tmp_path: Path) -
             _insert_chapter(conn, book_id=book_id, index=index, summary=summary)
         source_arc_service = SourceArcMappingService(
             repo_root=tmp_path,
+            model_client=_SequenceModelClient(
+                [
+                    {
+                        "arcs": [
+                            {
+                                "source_arc_id": "source-arc-0001",
+                                "source_arc_title": "关系铺垫到规则揭示",
+                                "start_document_title_index": 1,
+                                "end_document_title_index": 8,
+                                "source_arc_role": "主线推进",
+                                "core_events": ["前半段关系铺垫，后半段规则揭示。"],
+                                "main_character_threads": [],
+                                "world_or_rule_reveals": ["世界规则被揭示。"],
+                                "transition_from_previous": "当前已读范围起点",
+                                "setup_for_next": "继续处理规则后果",
+                                "pacing_notes": "8 个 chapter 覆盖当前范围。",
+                                "chapter_role_map": [],
+                            }
+                        ]
+                    }
+                ]
+            ),  # type: ignore[arg-type]
             now_factory=lambda: "2026-05-05T00:00:00+00:00",
         )
         source_arc_service.build_from_chapters(conn, book_id=book_id)

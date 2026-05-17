@@ -51,12 +51,94 @@ class DecisionCard(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class WriterQuestion(BaseModel):
+    question_id: str
+    prompt: str
+    required: bool = True
+    hint: str = ""
+    gap_id: str = ""
+    risk_level: str = ""
+
+
+class WriterQuestionSet(BaseModel):
+    schema_version: str = "1.0"
+    question_set_id: str
+    run_id: str
+    stage: str
+    status: str = "pending"
+    questions: list[WriterQuestion]
+    source_artifact_id: str = ""
+    artifact_path: str = ""
+    actions: dict[str, str] = Field(default_factory=dict)
+    submit_action: str = "submit_outline_research_answers"
+    defer_action: str = "defer_outline_research_answers"
+    technical_available: bool = True
+
+
+class WriterQuestionAnswer(BaseModel):
+    question_id: str
+    answer_text: str
+
+
+class WriterQuestionAnswerMessage(BaseModel):
+    channel: Literal["writer_question_answer"] = "writer_question_answer"
+    run_id: str
+    question_set_id: str
+    answer_text: str
+    user_answers: list[WriterQuestionAnswer] = Field(default_factory=list)
+
+
+class WriterReviewAction(BaseModel):
+    action: str
+    label: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
+    variant: Literal["primary", "secondary", "danger"] = "secondary"
+    requires_input: bool = False
+    input_role: str = ""
+
+
+class WriterArtifactReview(BaseModel):
+    schema_version: str = "1.0"
+    run_id: str
+    review_id: str
+    artifact_kind: str
+    artifact_id: str = ""
+    title: str
+    summary: str = ""
+    next_prompt: str = ""
+    detail_artifact_id: str = ""
+    actions: list[WriterReviewAction] = Field(default_factory=list)
+    technical_available: bool = True
+    technical_details: dict[str, Any] = Field(default_factory=dict)
+
+
+class WriterDraftReview(BaseModel):
+    schema_version: str = "1.0"
+    run_id: str
+    review_id: str
+    chapter_id: str
+    draft_id: str
+    title: str = "章节草稿验收"
+    preview: str = ""
+    word_count: int = 0
+    target_word_count: int | None = None
+    continuity_summary: str = ""
+    detail_artifact_id: str = ""
+    actions: list[WriterReviewAction] = Field(default_factory=list)
+    technical_available: bool = True
+    technical_details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConversationMessage(BaseModel):
     message_id: str
     task_id: str
     role: MessageRole
     content: str
     payload: dict[str, Any] = Field(default_factory=dict)
+    writer_question_set: WriterQuestionSet | None = None
+    writer_artifact_review: WriterArtifactReview | None = None
+    writer_draft_review: WriterDraftReview | None = None
     decision_cards: list[DecisionCard] = Field(default_factory=list)
     created_at: datetime
 
@@ -146,6 +228,7 @@ class CreateTaskRequest(BaseModel):
 class MessageCreateRequest(BaseModel):
     content: str
     payload: dict[str, Any] = Field(default_factory=dict)
+    writer_question_answer: WriterQuestionAnswerMessage | None = None
 
 
 class CommandRequest(BaseModel):

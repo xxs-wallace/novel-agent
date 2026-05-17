@@ -114,32 +114,15 @@ class FragmentCardBuilderService:
                 last_error = exc
                 last_failure_stage = self._infer_failure_stage(exc)
 
-        try:
-            fallback_card = self._payload_to_card(document=document, payload=self._fallback_payload(document))
-            return FragmentCardBuildResult(
-                status="fallback_success",
-                fragment_card=fallback_card,
-                retry_count=max(0, FRAGMENT_CARD_SCHEMA_RETRY_ATTEMPTS - 1),
-                used_fallback=True,
-                failure_stage=cast(Any, last_failure_stage or "schema_validate"),
-                failure_reason=self._summarize_failure(last_error, last_payload=last_payload, last_raw_text=last_raw_text),
-                warnings=[f"fallback fragment_card used for doc_id={document.doc_id}"],
-            )
-        except Exception as fallback_exc:
-            preview_source = last_raw_text or str(last_payload)
-            failure_reason = self._summarize_failure(
-                fallback_exc,
-                last_payload=last_payload,
-                last_raw_text=preview_source,
-            )
-            return FragmentCardBuildResult(
-                status="failed",
-                retry_count=max(0, FRAGMENT_CARD_SCHEMA_RETRY_ATTEMPTS - 1),
-                used_fallback=False,
-                failure_stage=cast(Any, self._infer_failure_stage(fallback_exc)),
-                failure_reason=failure_reason,
-                warnings=[f"fragment_card build failed for doc_id={document.doc_id}"],
-            )
+        failure_reason = self._summarize_failure(last_error, last_payload=last_payload, last_raw_text=last_raw_text)
+        return FragmentCardBuildResult(
+            status="failed",
+            retry_count=max(0, FRAGMENT_CARD_SCHEMA_RETRY_ATTEMPTS - 1),
+            used_fallback=False,
+            failure_stage=cast(Any, last_failure_stage or "schema_validate"),
+            failure_reason=failure_reason,
+            warnings=[f"fragment_card build failed for doc_id={document.doc_id}"],
+        )
 
     def _payload_to_card(self, *, document: DocumentRow, payload: dict[str, Any] | list[Any]) -> FragmentCard:
         if not isinstance(payload, dict):

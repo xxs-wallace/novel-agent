@@ -11,7 +11,7 @@ def build_plot_summary_unit_prompt(
     *,
     window: Sequence[ChapterPlotSummary],
     overlap_title_indexes: Sequence[int],
-    fallback_payload: dict[str, Any],
+    output_schema: dict[str, Any],
 ) -> tuple[str, str]:
     system_prompt = (
         "你是小说阅读后的剧情梗概压缩 Agent。\n"
@@ -24,8 +24,8 @@ def build_plot_summary_unit_prompt(
         "请压缩以下连续 document/chapter 梗概。\n\n"
         f"overlap_title_indexes:\n{json.dumps(list(overlap_title_indexes), ensure_ascii=False)}\n\n"
         f"chapter_summaries:\n{json.dumps([_summary_payload(item) for item in window], ensure_ascii=False, indent=2)}\n\n"
-        "输出 JSON 字段必须与 fallback_payload 相同，metadata 字段可以沿用 fallback_payload，但内容字段必须由你重新概括。\n"
-        f"fallback_payload:\n{json.dumps(fallback_payload, ensure_ascii=False, indent=2)}"
+        "输出 JSON 字段必须与 output_schema 相同，metadata 字段可以沿用 output_schema，但内容字段必须由你基于输入重新概括。\n"
+        f"output_schema:\n{json.dumps(output_schema, ensure_ascii=False, indent=2)}"
     )
     return system_prompt, user_prompt
 
@@ -38,7 +38,7 @@ def build_source_arc_map_prompt(
     story_outline_md: str = "",
     world_summary_md: str = "",
     character_profile_summaries: Sequence[str] = (),
-    fallback_payload: dict[str, Any],
+    output_schema: dict[str, Any],
 ) -> tuple[str, str]:
     system_prompt = (
         "你是 Source Arc Mapping Agent。\n"
@@ -67,8 +67,8 @@ def build_source_arc_map_prompt(
         f"world_summary_md:\n{world_summary_md.strip()}\n\n"
         f"character_profile_summaries:\n{json.dumps(list(character_profile_summaries), ensure_ascii=False, indent=2)}\n\n"
         f"source_inputs:\n{json.dumps(source_payload, ensure_ascii=False, indent=2)}\n\n"
-        "输出 JSON 字段必须与 fallback_payload 相同。请重点重写 arcs 与其中的 chapter_role_map。\n"
-        f"fallback_payload:\n{json.dumps(fallback_payload, ensure_ascii=False, indent=2)}"
+        "输出 JSON 字段必须与 output_schema 相同。请基于 source_inputs 生成 arcs 与其中的 chapter_role_map。\n"
+        f"output_schema:\n{json.dumps(output_schema, ensure_ascii=False, indent=2)}"
     )
     return system_prompt, user_prompt
 

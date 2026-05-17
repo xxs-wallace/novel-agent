@@ -54,6 +54,47 @@ class _RecordingCreativeKBFacade:
         )
 
 
+class _FakeSourceArcModelClient:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, fallback_factory, use_fallback_on_error
+        return (
+            {
+                "arcs": [
+                    {
+                        "source_arc_id": "source-arc-0001",
+                        "source_arc_title": "测试篇章推进",
+                        "start_document_title_index": 1,
+                        "end_document_title_index": 2,
+                        "source_arc_role": "主线推进",
+                        "core_events": ["已有摘要显示日常关系转入旧案调查。"],
+                        "main_character_threads": [],
+                        "world_or_rule_reveals": ["组织规则和能力设定被提及。"],
+                        "transition_from_previous": "当前已读范围起点",
+                        "setup_for_next": "继续追踪旧案调查。",
+                        "pacing_notes": "测试摘要覆盖两个 chapter。",
+                        "chapter_role_map": [
+                            {
+                                "document_title_index": 1,
+                                "chapter_title": "第1章",
+                                "role": "日常关系",
+                                "reason": "关系出现细微变化。",
+                            },
+                            {
+                                "document_title_index": 2,
+                                "chapter_title": "第2章",
+                                "role": "主线推进",
+                                "reason": "旧案调查继续推进。",
+                            },
+                        ],
+                    }
+                ]
+            },
+            "",
+        )
+
+
 def test_close_read_retries_schema_invalid_multi_chapter_batch_with_smaller_batch() -> None:
     runner = CloseReadRunner.__new__(CloseReadRunner)
     batch = ChapterBatch(
@@ -464,7 +505,10 @@ def test_pipeline_runs_unbounded_segmentation_when_close_batches_are_zero(tmp_pa
     assert result["close_read_batches"] == 0
 
 
-def test_interactive_pipeline_builds_source_arc_map_from_chapter_summaries(tmp_path: Path) -> None:
+def test_interactive_pipeline_builds_source_arc_map_from_chapter_summaries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     db_path = tmp_path / "pipeline.db"
@@ -502,7 +546,14 @@ def test_interactive_pipeline_builds_source_arc_map_from_chapter_summaries(tmp_p
             )
         conn.commit()
 
-    result = _build_source_arc_map(repo_root=repo_root, db_path=db_path, book_id="couple")
+    monkeypatch.setattr(run_interactive, "JsonModelClient", lambda _settings: _FakeSourceArcModelClient())
+
+    result = _build_source_arc_map(
+        repo_root=repo_root,
+        db_path=db_path,
+        book_id="couple",
+        api_key="fake-live-key",
+    )
 
     json_path = repo_root / ".memory" / "arcs" / "couple.source_arc_map.json"
     markdown_path = repo_root / ".memory" / "arcs" / "couple.source_arc_map.md"
@@ -570,6 +621,7 @@ def test_pipeline_exports_source_arc_map_after_close_read(tmp_path: Path, monkey
 
     monkeypatch.setattr(run_interactive, "SegmentationRunner", FakeSegmentationRunner)
     monkeypatch.setattr(run_interactive, "CloseReadRunner", FakeCloseReadRunner)
+    monkeypatch.setattr(run_interactive, "JsonModelClient", lambda _settings: _FakeSourceArcModelClient())
 
     result = run_interactive._run_pipeline(  # noqa: SLF001
         repo_root=repo_root,
@@ -577,7 +629,7 @@ def test_pipeline_exports_source_arc_map_after_close_read(tmp_path: Path, monkey
         source_path=source_path,
         db_path=db_path,
         debug_path=debug_path,
-        api_key="unused",
+        api_key="fake-live-key",
         run_mode="resume",
         max_read_kb=0,
         max_close_batches=1,

@@ -139,6 +139,23 @@ def test_character_evidence_prompt_is_batch_level_and_excludes_offsets() -> None
     assert "mention_offsets" in system_prompt
 
 
+def test_character_evidence_prompt_requests_character_id_mapping() -> None:
+    batch = CharacterEvidenceBatchAssemblerService(document_chars_budget=200).build_batch(
+        book_id="book-1",
+        documents=[_doc(doc_id=1, title_index=1, title="第一章", content="明非说他会去。")],
+        existing_character_roster=[
+            {"character_id": "42", "canonical_name": "路明非", "aliases": ["明非"]},
+        ],
+    )
+
+    system_prompt, user_prompt = build_character_evidence_prompt({"character_evidence_batch": batch.to_dict()})
+
+    assert "character_id 必须使用 roster 中的 character_id" in system_prompt
+    assert '"character_id": "42"' in user_prompt
+    assert '"character_id": "123"' in user_prompt
+    assert "resolution_status" in user_prompt
+
+
 def test_memory_candidate_filters_low_confidence_and_keeps_character_facts() -> None:
     service = MemoryCandidateService()
     evidence_payload = {
@@ -181,6 +198,45 @@ def test_memory_candidate_filters_low_confidence_and_keeps_character_facts() -> 
     assert [item["canonical_name"] for item in output["character_updates"]] == ["路明非"]
     assert output["character_updates"][0]["recent_activity"] == "路明非决定进入学院。"
     assert output["character_updates"][0]["is_speaking_character"] is True
+
+
+def test_character_reduce_inputs_prefer_character_id_and_existing_profile_by_id() -> None:
+    service = MemoryCandidateService()
+    reduce_inputs = service.build_character_reduce_inputs(
+        prompt_input={
+            "book_id": "book-1",
+            "character_profiles": [
+                {"character_id": "7", "canonical_name": "旧名", "aliases": ["阿衡"], "profile_summary_md": "旧档案"}
+            ],
+        },
+        summary_payload={"chapter_summary_short": "阿衡重新出现。"},
+        evidence_payload={
+            "characters": [
+                {
+                    "character_id": "7",
+                    "canonical_name": "周衡",
+                    "aliases": ["阿衡"],
+                    "personhood_evidence": "阿衡被称呼并行动。",
+                    "activity_or_state_evidence": "阿衡重新进入场景。",
+                    "candidate_type": "character",
+                    "confidence": 0.9,
+                },
+                {
+                    "character_id": "7",
+                    "canonical_name": "阿衡",
+                    "personhood_evidence": "阿衡继续行动。",
+                    "activity_or_state_evidence": "阿衡留下线索。",
+                    "candidate_type": "character",
+                    "confidence": 0.88,
+                },
+            ]
+        },
+    )
+
+    assert len(reduce_inputs) == 1
+    assert reduce_inputs[0]["character_id"] == "7"
+    assert reduce_inputs[0]["existing_profile"]["profile_summary_md"] == "旧档案"
+    assert [item["canonical_name"] for item in reduce_inputs[0]["ordered_character_evidence"]] == ["周衡", "阿衡"]
 
 
 def test_memory_candidate_prompt_input_uses_batch_level_evidence() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_agent.app.orchestrators import MainLayerOrchestrator
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
@@ -13,6 +14,9 @@ from novel_agent.app.schemas.context_assembly_schema import (
     ContextAssemblyPayload,
 )
 from novel_agent.app.schemas.creative_kb_schema import FragmentCard, FragmentCluster, SceneBrief, StyleFeatures
+from novel_agent.app.services.retrieval_facade import RetrievalFacade
+from novel_agent.app.services.rerank_service import RerankService
+from novel_agent.app.services.scene_brief_service import SceneBriefService
 
 
 class _FakeContextAssemblyService:
@@ -23,6 +27,23 @@ class _FakeContextAssemblyService:
     def assemble(self, conn, *, assembly_input):  # type: ignore[no-untyped-def]
         self.last_input = assembly_input
         return self.payload
+
+
+class _FakeRetrievalModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, use_fallback_on_error
+        payload = fallback_factory()
+        return payload, ""
+
+
+def _retrieval_facade() -> RetrievalFacade:
+    model_client = _FakeRetrievalModel()
+    return RetrievalFacade(
+        scene_brief_service=SceneBriefService(model_client=model_client),  # type: ignore[arg-type]
+        rerank_service=RerankService(model_client=model_client),  # type: ignore[arg-type]
+    )
 
 
 def _card(
@@ -76,7 +97,7 @@ def _card(
 
 
 def test_main_layer_orchestrator_prepares_creative_kb_input() -> None:
-    orchestrator = MainLayerOrchestrator()
+    orchestrator = MainLayerOrchestrator(retrieval_facade=_retrieval_facade())
 
     retrieval_input = orchestrator.prepare_creative_kb_input(
         anchor_context="  锚点上下文  ",
@@ -107,7 +128,7 @@ def test_main_layer_orchestrator_routes_online_retrieval_through_creative_kb(tmp
     db = NovelAgentDB(tmp_path / "main_layer_orchestrator.db")
     cards_repo = FragmentCardsRepo()
     clusters_repo = FragmentClustersRepo()
-    orchestrator = MainLayerOrchestrator()
+    orchestrator = MainLayerOrchestrator(retrieval_facade=_retrieval_facade())
     explicit_scene_brief = SceneBrief(
         scene_objective="寻找一段克制型离别参考",
         emotional_goal="压住悲伤",
@@ -201,7 +222,7 @@ def test_main_layer_orchestrator_builds_writer_input_bundle_from_retrieval_resul
     db = NovelAgentDB(tmp_path / "main_layer_writer_bundle.db")
     cards_repo = FragmentCardsRepo()
     clusters_repo = FragmentClustersRepo()
-    orchestrator = MainLayerOrchestrator()
+    orchestrator = MainLayerOrchestrator(retrieval_facade=_retrieval_facade())
     explicit_scene_brief = SceneBrief(
         scene_objective="寻找一段克制型离别参考",
         emotional_goal="压住悲伤",
@@ -304,7 +325,10 @@ def test_main_layer_orchestrator_assembles_memory_context_into_writer_input_bund
             missing_context=[],
         )
     )
-    orchestrator = MainLayerOrchestrator(context_assembly_service=fake_context_service)
+    orchestrator = MainLayerOrchestrator(
+        retrieval_facade=_retrieval_facade(),
+        context_assembly_service=fake_context_service,
+    )
     explicit_scene_brief = SceneBrief(
         scene_objective="寻找一段克制型离别参考",
         emotional_goal="压住悲伤",

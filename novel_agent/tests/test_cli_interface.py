@@ -155,6 +155,57 @@ def test_run_event_stream_shows_close_read_model_prompt_progress() -> None:
     assert "模型调用完成：章节摘要 · 12.5s" in messages[1]
 
 
+def test_run_event_stream_shows_creative_kb_document_progress() -> None:
+    stream = RunEventStream()
+
+    stream.progress_callback(
+        {
+            "stage": "creative_kb",
+            "phase": "fragment_card_document_done",
+            "current_doc_id": "8",
+            "attempted_docs": 3,
+            "total_buildable_documents": 20,
+            "built_cards": 3,
+            "failed_docs": 0,
+            "status": "success",
+        }
+    )
+
+    rendered = stream.events()[0].message
+    assert "片段卡完成：doc 8" in rendered
+    assert "已建卡 3" in rendered
+    assert "已处理 3/20" in rendered
+
+
+def test_workflow_facade_streams_creative_kb_progress_without_stdout_buffer(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    facade = WorkflowFacade(repo_root=tmp_path)
+
+    def fake_build_creative_kb(**kwargs):  # type: ignore[no-untyped-def]
+        progress_callback = kwargs.get("progress_callback")
+        assert progress_callback is not None
+        progress_callback(
+            {
+                "stage": "creative_kb",
+                "phase": "fragment_card_document_done",
+                "current_doc_id": "2",
+                "attempted_docs": 1,
+                "total_buildable_documents": 2,
+                "built_cards": 1,
+                "failed_docs": 0,
+                "status": "success",
+            }
+        )
+        return SimpleNamespace(to_dict=lambda: {"built_fragment_count": 1})
+
+    monkeypatch.setattr(run_interactive, "_build_creative_kb", fake_build_creative_kb)
+
+    result = facade.build_creative_kb(db_path=tmp_path / "book.db", book_id="book-one", api_key="unused")
+
+    messages = [event.message for event in facade.event_stream.events()]
+    assert result["built_fragment_count"] == 1
+    assert "片段卡完成：doc 2，success，已建卡 1 · 已处理 1/2" in messages
+
+
 def test_artifact_presenter_summarizes_batch_chapter_length_and_draft(tmp_path: Path) -> None:
     presenter = ArtifactPresenter()
     batch_path = tmp_path / "batch_plan.json"

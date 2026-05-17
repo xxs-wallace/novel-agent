@@ -46,7 +46,9 @@ class SourceTreeService:
 
     def analyze(self, root: Path, *, book_id: str) -> DirectoryAnalysisOutput:
         fallback = self.heuristic_analysis(root, book_id=book_id)
-        if self.model_client is None or self.model_client.settings.dry_run:
+        if self.model_client is None:
+            raise RuntimeError("SourceTreeService requires an available model_client")
+        if self.model_client.settings.dry_run:
             return fallback
         system_prompt, user_prompt = build_directory_analysis_prompt(
             tree_summary=self.summarize_tree(root),
@@ -57,51 +59,49 @@ class SourceTreeService:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             fallback_factory=fallback.to_dict,
-            use_fallback_on_error=True,
+            use_fallback_on_error=False,
         )
         if not isinstance(payload, dict):
-            return fallback
+            raise RuntimeError("Directory analysis model returned a non-object JSON payload")
         raw_books = payload.get("books", [])
         if not isinstance(raw_books, list):
-            return fallback
+            raise RuntimeError("Directory analysis model returned invalid books field")
         books = []
         for book in raw_books:
             if not isinstance(book, dict):
-                continue
+                raise RuntimeError("Directory analysis model returned a non-object book item")
             read_order = []
             raw_read_order = book.get("read_order", [])
-            if not isinstance(raw_read_order, list):
-                raw_read_order = []
+            if not isinstance(raw_read_order, list) or not raw_read_order:
+                raise RuntimeError("Directory analysis model returned no usable read_order")
             for item in raw_read_order:
                 if not isinstance(item, dict):
-                    continue
+                    raise RuntimeError("Directory analysis model returned a non-object read_order item")
+                path = str(item.get("path", "")).strip()
+                if not path:
+                    raise RuntimeError("Directory analysis model returned read_order item without path")
+                try:
+                    sort_key = int(item.get("sort_key", len(read_order) + 1))
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("Directory analysis model returned invalid read_order sort_key") from exc
                 read_order.append(
                     DirectoryReadOrderItem(
-                        path=str(item.get("path", "")),
-                        sort_key=int(item.get("sort_key", len(read_order) + 1)),
+                        path=path,
+                        sort_key=sort_key,
                         reason=str(item.get("reason", "")),
                     )
                 )
-            if not read_order:
-                raw_selected_paths = book.get("selected_paths", [])
-                if not isinstance(raw_selected_paths, list):
-                    raw_selected_paths = []
-                selected_paths = [str(x) for x in raw_selected_paths]
-                read_order = [
-                    DirectoryReadOrderItem(path=path, sort_key=index + 1, reason="模型未给出顺序，按 selected_paths 回退")
-                    for index, path in enumerate(selected_paths)
-                ]
             raw_selected_paths = book.get("selected_paths", [])
             if not isinstance(raw_selected_paths, list):
-                raw_selected_paths = []
+                raise RuntimeError("Directory analysis model returned invalid selected_paths field")
             raw_ignored_paths = book.get("ignored_paths", [])
             if not isinstance(raw_ignored_paths, list):
-                raw_ignored_paths = []
+                raise RuntimeError("Directory analysis model returned invalid ignored_paths field")
             books.append(
                 DirectoryBookPlan(
-                    book_id=str(book.get("book_id", book_id)),
-                    book_name=str(book.get("book_name", root.name)),
-                    root_path=str(book.get("root_path", root.as_posix())),
+                    book_id=str(book.get("book_id") or book_id),
+                    book_name=str(book.get("book_name") or root.name),
+                    root_path=str(book.get("root_path") or root.as_posix()),
                     selected_paths=[str(x) for x in raw_selected_paths],
                     ignored_paths=[str(x) for x in raw_ignored_paths],
                     read_order=read_order,
@@ -109,7 +109,7 @@ class SourceTreeService:
                 )
             )
         if not books:
-            return fallback
+            raise RuntimeError("Directory analysis model returned no usable books")
         return DirectoryAnalysisOutput(
             strategy_type=self._coerce_strategy_type(payload.get("strategy_type", fallback.strategy_type)),
             books=books,
@@ -148,4 +148,4 @@ class SourceTreeService:
             return "single_book_multi_file"
         if isinstance(value, str) and "file" in value:
             return "single_file"
-        return "single_book_multi_file"
+        raise RuntimeError("Directory analysis model returned invalid strategy_type")

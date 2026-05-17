@@ -181,7 +181,7 @@ class CreativeKnowledgeBaseFacade:
                     }
                 )
 
-        scoped_cards = persisted_cards or self.fragment_cards_repo.list_by_doc_ids(
+        scoped_cards = self.fragment_cards_repo.list_by_doc_ids(
             conn,
             doc_ids=[str(document.doc_id) for document in normalized_documents],
         )

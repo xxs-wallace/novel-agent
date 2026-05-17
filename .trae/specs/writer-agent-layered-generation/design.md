@@ -4,7 +4,7 @@
 
 Writer 设计文档收敛为两个核心文件：
 
-- [`design.md`](design.md)：描述 Writer 的主流程、层级职责、冻结点、回滚边界和正文执行边界。
+- [`design.md`](design.md)：描述 Writer 的 Agent Loop、review gate、层级职责、回滚边界和正文执行边界。
 - [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)：描述大纲生成前的多轮 research、query 解析、本地检索与信息充足性判断。
 
 字段级约束、恢复规则和验收 contract 仍以这些 spec / contract 为准：
@@ -17,56 +17,66 @@ Writer 设计文档收敛为两个核心文件：
 
 ## 2. 设计结论
 
-Writer 的核心不是让一个万能 Agent 从用户一句话直接写正文，而是建立一条可审阅、可回滚、可恢复的长篇生成流水线：
+Writer 的核心不是用流程编排器把用户推过一串固定确认点，而是建立一个模型主导的 Agent Loop：
 
 ```text
-建模基线
-  -> 用户续写意图 / 故事规模 / 高潮约束
-  -> 大纲研究循环 Outline Research Loop
-  -> 全书续写规划 Freeze A
-  -> 批次剧情规划 Freeze B
-  -> 章节标题与高密度梗概 Freeze C
-  -> 章节长度与写作输入 Freeze D
-  -> 正文扩写
-  -> 校验 / 验收 / 写回 Freeze E
+用户意图 / Memory / KB / runs artifacts
+  -> Agent 判断需要查询、提问、生成或修订
+  -> 模型通过 tool call 请求本地资料或用户补充
+  -> Agent 生成或修订可审阅 artifact
+  -> 用户通过并补充 prompt，或拒绝并给出修订反馈
+  -> Agent 将反馈重新交给模型，直到 artifact 通过
+  -> 正文生成、章节验收、写回摘要审阅
 ```
 
-本设计采用两个原则：
+本设计采用三个原则：
 
-- **大纲层最重要**：全书大纲、批次大纲和章节梗概要承载人物、场景、行动、结果、关系推进、伏笔铺设和禁止提前消费项。
-- **正文层最简单**：正文 Writer 应接近“受约束渲染器”，主要负责文笔、节奏、场景呈现和风格，不负责重新决定剧情走向。
+- **模型主导下一步**：当信息不足时，模型返回结构化 tool call；Agent 负责执行本地查询或用户交互，不用固定流程替模型猜测。
+- **artifact 是协作界面**：全书规划、批次计划、章节梗概、章节草稿和写回摘要都是可审阅、可修改、可恢复的 artifact。
+- **用户输入是 prompt 材料**：用户通过 artifact 时的补充信息会原文保留，并作为下一轮模型输入；用户拒绝 artifact 时的调整信息会驱动模型修订 artifact。
 
 ## 3. 核心流程
 
 ```mermaid
 flowchart TD
-    A["原作正文 / Memory / KB / 用户意图"] --> B["建模状态检查"]
-    B --> C["故事规模与高潮输入"]
-    C --> C1["从用户概述抽取人物提及"]
-    C1 --> C2["本地 Character Memory 对齐"]
-    C2 -->|存在未匹配人物| C3["询问是否新增人物并补档"]
-    C3 --> D["Outline Seed Packet"]
-    C2 -->|全部已匹配| D["Outline Seed Packet"]
-    D --> E["Outline Research Loop"]
-    E -->|信息不足| F["向用户询问关键缺口"]
-    F --> E
-    E -->|信息足够| G["BookContinuationPlan draft"]
-    G --> H["世界观最小补全 / 角色需求检查"]
-    H --> I["Freeze A: 全书规划确认"]
-    I --> J["BatchPlan"]
-    J --> K["Freeze B: 批次大纲确认"]
-    K --> L["ChapterPackage / ChapterBrief"]
-    L --> M["Freeze C: 章节梗概确认"]
-    M --> N["ChapterLengthPlan"]
-    N --> O["Freeze D: 写作材料确认"]
-    O --> P["正文扩写"]
-    P --> Q["连续性检查"]
-    Q --> R["章节验收"]
-    R -->|accepted| S["Freeze E / Memory Writeback"]
-    R -->|revise_length| N
-    R -->|replan_chapter| L
-    R -->|discarded| T["暂停，仅保留 runs 产物"]
+    A["用户意图 / Memory / KB / runs artifacts"] --> B["Agent Loop"]
+    B --> C{"模型是否需要更多信息?"}
+    C -->|本地资料| D["story_detail / character_profile / world_concept / structure_pattern"]
+    D --> E["Context Broker 查询 Memory / KB / artifacts"]
+    E --> B
+    C -->|用户授权或知识| F["WriterQuestionSet"]
+    F --> G["用户回答结构化问题"]
+    G --> B
+    C -->|信息足够| H["生成或修订 artifact"]
+    H --> I{"Artifact Review Gate"}
+    I -->|通过 + supplement_text| J{"artifact 类型"}
+    I -->|不通过 + revision_feedback| B
+    I -->|稍后继续| K["halted / recoverable"]
+    J -->|全书 / 批次 / 人物 / 设定规划| B
+    J -->|章节标题与梗概| L["内部组装写作输入"]
+    L --> M["生成章节正文"]
+    M --> N["连续性检查"]
+    N --> O["章节草稿验收"]
+    O -->|接受| P["写回摘要 review"]
+    O -->|重写 / 调整| B
+    O -->|作废| K
+    P -->|确认| Q["Memory / KB writeback"]
+    P -->|调整| B
 ```
+
+运行期主状态应尽量保持小而稳定：
+
+- `agent_running`
+- `reviewing_artifact`
+- `needs_user_input`
+- `generating_draft`
+- `reviewing_draft`
+- `writeback_review`
+- `completed`
+- `halted`
+- `error`
+
+内部 stage、artifact path、run id、workflow action 名只用于恢复、debug drawer、技术日志和结构化 action payload，不作为普通用户主状态展示。
 
 ## 4. 大纲研究循环
 
@@ -82,50 +92,18 @@ flowchart TD
 - 已有故事精炼总览：每部小说的大致内容、起止时间和当前续写起点
 - 可选的未决伏笔、悬念或源作品结构位置标题级索引
 
-模型可在多轮中返回三类核心请求：
+模型可在多轮中返回四类核心请求：
 
 - `story_detail`：用一句自然语言说明想进一步了解的故事细节。
 - `character_profile`：按人名请求人物当前状态、能力边界、关系状态和最近变化。
 - `world_concept`：按概念名词请求规则、限制、代价、例外和禁止突破点。
+- `structure_pattern`：请求与当前写作目标匹配的结构模式或篇章节奏参考。
 
 本地 `Context Broker` 负责把这些语义请求转换为可执行检索，并返回裁剪后的 evidence。模型每轮判断信息是否足够；若不足以靠本地资料解决，则向用户提出少量关键问题。
 
-Memory Query 属于 Writer Prompt Loop 的工具调用能力，而不是只在首次输入阶段运行。触发源可以是：
+Memory Query 属于 Writer Prompt Loop 的工具调用能力，而不是只在首次输入阶段运行。触发源可以是初次用户输入、用户对 artifact 的反馈、reviewer feedback 或生成失败后的 retry instruction。
 
-- 初次用户输入，例如要求续写某个角色线或某段剧情后的大纲
-- 用户反馈，例如要求修改大纲方向、补足某个角色动机、检查某个设定是否冲突
-- reviewer feedback，例如指出 outline 缺少因果证据、角色状态不明或 world rule 可能被突破
-- retry instruction，例如上一轮 blocked / needs_user_input / low confidence 后重新规划
-
-这些触发源都会被 Writer 归一化为 `ResearchRequest`，再由 Context Broker 调用 Memory facade。Memory 只负责候选、展开、证据和 trace；是否因为反馈而继续查资料、查询哪些层级，仍由 Writer 模型在 prompt loop 中决定。
-
-对 `story_detail` 请求，Writer 不应自己理解 SQLite 表、Markdown 文件或 document 切片。推荐分工如下：
-
-- Memory 层提供 `NarrativeMemoryQueryService` 或等价接口：
-  - `root_scan(query)`：返回 `event_summary` root Page 候选
-  - `drill_down(state, selected_ids)`：从当前层展开到下一层候选
-  - `resolve_event_ids(event_ids)`：确定性展开 event 到 chapter/doc refs
-  - `resolve_chapter_refs(chapter_refs)`：确定性展开 chapter 到 summary/doc refs
-  - `resolve_document_refs(doc_ids, excerpt_budget)`：返回原文摘录或全文片段
-- Writer 层提供模型选择：
-  - 把 `original_query`、`query_suffix_chain`、`path_context` 和当前层 candidates 交给 Outline Research 模型
-  - 要求模型返回 `need_drill_down`、`selected_ids`、`query_suffix`、`reason`、`confidence`、`need_sibling_scan`
-  - 将选择结果写入 `outline_research_trace.json` / `memory_query_trace.json`
-- Context Broker 是桥接 facade：
-  - 它可以合并重复查询、处理预算和 evidence 归一化
-  - 但不保存新的 canon Memory，不生成续写规划，也不绕过 Writer 模型替它决定剧情需要哪些事实
-
-这使得大纲研究从“一轮大 prompt”变为多轮 Memory page 查询：模型先看 root page，选中剧情大范围后再看 event list，再决定是否展开 chapter summary 或 document。
-
-当 research 达到 `ResearchBudget` 上限时，系统进入 `Sufficiency Gate`，不能直接硬写大纲，也不能只返回失败。模型必须整理：
-
-- 已经确认的信息
-- 尚不明确的信息
-- 阻塞大纲生成的缺口
-- 可以安全降级为假设的低风险缺口
-- 需要用户补充回答的具体问题
-
-预算耗尽后的出口只有三类：
+当 research 达到 `ResearchBudget` 上限时，系统进入 `Sufficiency Gate`。预算耗尽后的出口只有三类：
 
 - `needs_user_input`：存在阻塞缺口，需要用户补充知识或授权边界。
 - `proceed_with_assumptions`：剩余缺口不阻塞大纲，可用明确假设继续生成草案。
@@ -146,7 +124,81 @@ Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 
 
 详细请求格式、`Story Detail Resolver`、事件索引要求和 research budget 见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)。
 
-## 5. 层级职责
+## 5. Artifact Review Gate
+
+Artifact review gate 是用户和 Agent 协作的主要边界。每个 gate 都展示当前 artifact 的用户可读摘要和可编辑视图，并提供三类动作：
+
+- **通过并继续**：用户可填写 `supplement_text`。该文本原文落盘，作为后续模型 prompt 输入之一。
+- **不通过并调整**：用户填写 `revision_feedback`。Agent 将反馈、当前 artifact、上游约束和必要 evidence 发给模型，要求输出修订后的 artifact。
+- **稍后继续**：workflow 暂停，保留可恢复状态和 artifact 版本引用。
+
+review gate 的记录至少包含：
+
+- `review_id`
+- `run_id`
+- `artifact_kind`
+- `artifact_id` 或 `artifact_path`
+- `artifact_version`
+- `decision`
+- `supplement_text`
+- `revision_feedback`
+- `source_message_id`
+- `reviewer_type`
+- `created_at`
+- `next_action`
+
+普通 UI 应提供下一步提示，但不把内部技术名当作主文案。例如章节梗概 review 时提示用户审阅标题、梗概、人物动机、关系推进、场景顺序和伏笔安排；通过时可补充字数、风格、节奏、重点描写和禁止项；不通过时说明要调整哪里。
+
+## 6. 章节正文生成
+
+章节标题与梗概通过后，Agent 直接进入正文准备与生成：
+
+- 加载已通过的 `ChapterPackage` / `ChapterBrief`
+- 合并用户在通过动作里输入的 `supplement_text`
+- 装配全书规划、批次计划、planning notebook、Memory evidence、KB 结构参考和风格参考
+- 内部派生 `ChapterWritingGuidance`、`chapter_length_budget` 和 `chapter_execution_input.json`
+- 调用正文 Writer 生成 `draft.md`
+
+字数、风格和重点展开要求应通过 `supplement_text` 或草稿验收反馈表达。独立的长度计划确认和写作材料确认不再作为普通用户必须经过的主流程节点。
+
+正文 Writer 是受限执行器，不负责重新决定全书方向、批次目标、章节核心因果、关键设定或关系跃迁。若正文生成过程中发现上游 artifact 不可执行，应返回结构化 retry / replan request，由 Agent Loop 回到对应 artifact。
+
+### 6.1 ChapterBrief 人物索引
+
+`ChapterBrief` 不负责内嵌人物档案，也不负责预先压缩人物档案。人物档案仍由 Writer Agent Loop 通过 Memory Query / Context Broker 主动查询。
+
+`ChapterBrief` 只应保存本章会用到的人物身份索引和执行约束，例如：
+
+```json
+{
+  "character_index": [
+    {"character_id": "42", "canonical_name": "角色甲"},
+    {"character_id": "77", "canonical_name": "角色乙"}
+  ],
+  "involved_characters": [
+    {
+      "character_id": "42",
+      "canonical_name": "角色甲",
+      "chapter_role": "本章主动追查线索的人"
+    }
+  ],
+  "relationship_targets": [
+    {
+      "subject_character_id": "42",
+      "target_character_id": "77",
+      "current_state": "互相试探",
+      "target_state": "有限合作",
+      "forbidden_jump": "不能直接完全信任"
+    }
+  ]
+}
+```
+
+当 Writer Agent Loop 认为需要查看人物档案时，应优先返回 `character_id` 作为查询参数；`canonical_name` 只作为人类可读标签和兼容兜底。这样可以避免模型返回名字后再做一次别名 / canonical name 归并，也能减少同名、称谓和别名造成的查询歧义。
+
+若 `ChapterBrief` 中存在只在本章计划中新引入、尚未进入正式 Character Memory 的计划角色，则继续使用计划角色 id，并明确标注其尚无 `character_id`。正式登场并通过写回后，才能绑定 canonical Character Memory 的 `character_id`。
+
+## 7. 层级职责
 
 ### Layer 0: 建模基线
 
@@ -177,7 +229,7 @@ Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 
 
 世界观补全只补后续剧情真的需要的规则、组织、能力限制、地理与历史边界。
 
-人物补充不应要求用户先手工填写“涉及人物名称”。系统应从用户故事概述中抽取人物提及，交给本地 Agent 查询和对齐 Character Memory。只有未匹配到历史档案的人名，才询问用户是否确认新增人物，并要求补充最小人物档案。完成显式人物对齐后，再检查剧情结构中尚未被具体人物承接的功能位。计划人物以 `PlannedCharacterProfile` 存在，只有正文中首次登场、通过校验并完成回写后，才转入正式 Character Memory。
+人物补充不应要求用户先手工填写“涉及人物名称”。系统应从用户故事概述中抽取人物提及，交给本地 Agent 查询和对齐 Character Memory。只有未匹配到历史档案的人名，才询问用户是否确认新增人物，并要求补充最小人物档案。计划人物以 `PlannedCharacterProfile` 存在，只有正文中首次登场、通过校验并完成回写后，才转入正式 Character Memory。
 
 ### Layer 2: 批次剧情规划
 
@@ -201,7 +253,7 @@ Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 
 
 ### Layer 4: 正文扩写
 
-正文 Writer 只消费冻结后的 `ChapterBrief`、长度预算、事实约束、风格参考、禁止项和关系门禁。
+正文 Writer 只消费已通过的 `ChapterBrief`、用户补充信息、长度预算、事实约束、风格参考、禁止项和关系门禁。
 
 正文层不负责：
 
@@ -213,53 +265,41 @@ Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 
 
 ### Layer 5: 校验、验收与写回
 
-章节草稿通过连续性检查后仍必须等待用户验收。只有 `GenerationReviewDecision.status = accepted` 才能进入 `Freeze E` 和正式 Memory writeback。
+章节草稿通过连续性检查后仍必须等待用户验收。只有 `GenerationReviewDecision.status = accepted` 才能进入正式 Memory writeback。
 
-`revise_length` 回到长度计划，`replan_chapter` 回到章节梗概，`discarded` 仅保留运行产物并暂停。
+不接受草稿时，用户反馈回到 Agent Loop：可以要求基于同一章节梗概重写，也可以要求先修订章节梗概再重写。作废草稿仅保留运行产物并暂停。
 
-## 6. 冻结点
+## 8. 受控修订与回滚
 
-| Freeze | 冻结内容 | 下游影响 |
-| --- | --- | --- |
-| `Freeze A` | `BookContinuationPlan`、世界观补全、人物补充方案 | 修改后全部批次、章节和正文失效 |
-| `Freeze B` | 当前 `BatchPlan` | 修改后当前批次及后续批次下游产物失效 |
-| `Freeze C` | 当前 `ChapterPackage` / `ChapterBrief` | 修改后相关章节长度计划、写作输入、正文和回写失效 |
-| `Freeze D` | 单章写作材料、长度预算、事实和风格输入 | 修改后当前章正文失效 |
-| `Freeze E` | 已验收终稿与状态变化 | 允许正式写回 Memory |
-
-冻结点是工程边界，不是用户界面主文案。CLI / GUI 应展示“请审阅本批剧情大纲”“请确认本章写作材料”“请验收当前章节”等自然语言状态。
-
-## 7. 受控修订与回滚
-
-用户可以在审阅节点直接改 artifact，也可以用自然语言触发 `Scoped Artifact Revision`。修订完成后必须回到原审阅状态，展示 diff 并等待用户确认，不能自动越过 Freeze。
+用户可以在 review gate 直接改 artifact，也可以用自然语言触发 scoped artifact revision。修订完成后必须回到原 review gate，展示新版 artifact 并等待用户确认，不能自动越过用户审阅。
 
 回滚原则：
 
-- 上游 artifact 被修改时，下游依赖产物必须失效。
-- 修改长度预算只影响当前章正文，不必自动作废后续章节。
-- 修改章节梗概会影响该章及其后续章节。
-- 修改批次大纲会影响当前批次及后续批次。
+- 上游 artifact 被修改并重新通过时，下游依赖产物必须失效。
+- 修改章节梗概会影响该章及其后续章节的写作输入、正文和写回候选。
+- 修改批次计划会影响当前批次及后续批次。
 - 修改全书规划、世界观补全或人物补充方案会影响全部后续产物。
 - 已进入 `canon_active` 的计划角色不能被静默覆盖，必须要求用户选择保留 canon、回滚首次登场章之后内容，或分叉替代方案。
+- 草稿生成失败可先基于同一写作输入重试；连续失败或反馈指向上游问题时，再回到对应 artifact review gate。
 
-## 8. Agent 划分
+## 9. Agent 划分
 
 推荐保留以下逻辑角色，但不要求在代码中强制一一对应为 class：
 
+- `Writer Loop Controller`：推进小状态机、保存 artifact、处理 review action、暂停、恢复和回滚。
 - `Outline Research Agent`：根据轻量索引多轮提出 research request，维护 planning notebook，并判断信息是否足够。
 - `Context Broker`：把语义请求转换为 SQLite / Markdown / Memory 查询，返回 evidence。
 - `Character Mention Extractor`：从用户故事概述中抽取人物姓名、称谓和疑似新角色，交给本地对齐。
-- `Book Planner`：生成全书续写规划和章节 slot。
+- `Book Planner`：生成或修订全书续写规划和章节 slot。
 - `World Expansion Agent`：补最小设定约束。
 - `Character Casting Agent`：处理显式新角色和隐式角色缺位。
-- `Batch Planner`：生成当前批次剧情大纲。
-- `Chapter Package Planner`：生成章节标题、高密度梗概和 scene beats。
-- `Chapter Length Planner`：生成默认长度和单章 override。
+- `Batch Planner`：生成或修订当前批次剧情大纲。
+- `Chapter Package Planner`：生成或修订章节标题、高密度梗概和 scene beats。
+- `Writing Input Assembler`：从通过后的章节梗概、用户补充和 evidence 派生正文执行输入。
 - `Writer Agent`：受限正文扩写器。
 - `Review / Writeback Agent`：连续性检查、状态变化提取和 accepted-only 写回。
-- `Workflow Controller`：推进状态、保存 artifact、处理暂停、恢复和回滚。
 
-## 9. Contract 对齐
+## 10. Contract 对齐
 
 Writer 层新增对象不得重定义 MVP 跨层 contract：
 
@@ -270,13 +310,21 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 
 `ChapterBrief -> SceneBrief` 应使用确定性派生规则，避免正文层和检索层各自理解一套目标。
 
-## 10. 产物
+本设计新增或重点使用的 Writer contract：
+
+- `ArtifactReviewDecision`：表达用户对任一 review artifact 的通过、修订或暂缓决策。
+- `GenerationReviewDecision`：表达用户对章节草稿的接受、重写、重规划或作废决策。
+- `OutlineResearchQuestionSet`：表达 research 阶段面向用户的结构化问题集。
+- `OutlineResearchAnswerSubmission`：表达用户对问题集的结构化回答。
+
+## 11. 产物
 
 主要运行产物包括：
 
 - `outline_seed_packet.json`
 - `outline_research_trace.json`
 - `outline_research_question_set.json`
+- `outline_research_answer_submission.json`
 - `memory_query_trace.json`
 - `memory_query_decision_log.json`
 - `planning_notebook.json`
@@ -286,7 +334,11 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 - `character_cast_plan.json`
 - `batch_plan.json`
 - `chapter_package.json`
-- `chapter_length_plan.json`
+- `chapter_brief.json`
+- `artifact_review_decision.json`
+- `user_supplement.json`
+- `chapter_writing_guidance.json`
+- `chapter_length_budget.json`
 - `chapter_execution_input.json`
 - `draft.md`
 - `continuity_report.json`
@@ -296,16 +348,18 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 
 其中 research trace 和 planning notebook 用于解释大纲为什么这样设计；它们不是正式 Memory，也不得直接污染 canon。
 
-## 11. 产品模式
+## 12. 产品模式
 
-- `Assist Mode`：默认在全书规划、批次规划、章节梗概、本章写作材料和写回前等待用户确认。
-- `Batch Mode`：默认在全书规划、批次规划和章节梗概处等待用户确认，后续可批量执行。
-- `Auto Novel Mode`：策略层可自动确认内部冻结点，但仍必须保存冻结记录、research trace 和回滚依赖。
+- `Assist Mode`：默认在全书规划、批次规划、章节梗概、章节草稿和写回摘要处等待用户确认。
+- `Batch Mode`：默认在全书规划、批次规划和章节梗概处等待用户确认，后续可批量执行，但仍可插入人工审阅。
+- `Auto Novel Mode`：策略层可自动通过非阻塞 review gate，但仍必须保存 review record、research trace 和回滚依赖；遇到 `needs_user_input`、blocked 或高风险授权问题时必须暂停。
 
-## 12. 成功标准
+## 13. 成功标准
 
 - 大纲生成前模型能够主动查询故事细节、人物档案和世界观概念，而不是被动消费一次性 prompt。
 - 大纲和梗概能承载足够高的信息密度，使正文层主要关注风格表达。
 - 每个关键剧情安排都有来源、假设或用户授权记录。
+- 用户通过 artifact 时的补充信息会成为后续模型 prompt 输入。
+- 用户拒绝 artifact 时的反馈会驱动模型修订 artifact，并回到同一 review gate。
 - 章节草稿未被用户 accepted 时不会写回 Memory。
 - 上游修改能稳定触发下游失效和局部重跑。

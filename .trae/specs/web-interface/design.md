@@ -132,7 +132,7 @@ Web 端的主交互不是 slash command。网页上的按钮、列表点击、�
 - `DecisionCard`
 - `WriterQuestionCard`
 - `WriterAnswerContext`
-- `ScopedRevisionComposer`
+- `WriterReviewComposer`
 - `CommandInput`
 - `CommandPalette`
 
@@ -165,7 +165,7 @@ Web 端的主交互不是 slash command。网页上的按钮、列表点击、�
 - `WriterArtifactView`
 - `TechnicalDetailsDrawer`
 
-右侧不是文件浏览器，而是“用户理解用内容浏览器”。树节点可以映射到文件、数据库查询结果、组合 view model 或 workflow checkpoint。
+右侧不是文件浏览器，而是“用户理解用内容浏览器”。树节点可以映射到文件、数据库查询结果、组合 view model 或 workflow review state。
 
 ## 4. Right-Side Information Model
 
@@ -313,16 +313,16 @@ Writer 审阅相关 action 必须继续复用 Writer workflow / facade。Web 层
 
 | Web action | 用户入口 | payload 关键字段 | 共享层调用 / 语义 |
 |---|---|---|---|
-| `request_scoped_artifact_revision` | artifact 面板“按反馈修改” | `artifact_id`, `feedback_text`, 可选 `run_id`, `target_stage`, `target_artifact_path` | `WorkflowFacade.request_scoped_artifact_revision(...)` |
-| `apply_scoped_artifact_revision` | diff 卡片“应用此修订” | `request_id`, 可选 `run_id`, `artifact_id` | `WorkflowFacade.apply_scoped_artifact_revision(...)` |
-| `discard_scoped_artifact_revision` | diff 卡片“放弃此修订” | `request_id`, 可选 `reason` | 记录候选被放弃，不修改当前 artifact |
 | `submit_outline_research_answers` | 大纲研究问题卡“提交回答并继续研究” | `run_id`, `question_set_id`, 可选 `source_message_id`, `answer_text`, 可选 `user_answers[]` | `WorkflowFacade.writer_action(..., action="continue_after_outline_research_input")` |
-| `defer_outline_research_answers` | 大纲研究问题卡“稍后继续” | `run_id`, `question_set_id`, 可选备注 | 保留等待态，不推进 Freeze A |
+| `defer_outline_research_answers` | 大纲研究问题卡“稍后继续” | `run_id`, `question_set_id`, 可选备注 | 保留等待态，不推进 workflow |
+| `approve_writer_artifact` | artifact review 消息“通过并继续” | `run_id`, `review_id`, `artifact_kind`, 可选 `artifact_id`, `supplement_text`, `source_message_id` | `ArtifactReviewDecision.decision = approved` |
+| `request_writer_artifact_revision` | artifact review 消息“不通过并调整” | `run_id`, `review_id`, `artifact_kind`, 可选 `artifact_id`, `revision_feedback`, `source_message_id` | `ArtifactReviewDecision.decision = revision_requested` |
+| `defer_writer_artifact_review` | artifact review 消息“稍后继续” | `run_id`, `review_id`, 可选备注 | `ArtifactReviewDecision.decision = deferred` |
 | `accept_chapter` | 章节验收卡“接受本章” | `run_id`, `chapter_id`, `draft_id`, 可选 `feedback_text` | `GenerationReviewDecision.status = accepted` |
-| `revise_chapter_length` | 章节验收卡“调整字数后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, `target_chars`, `min_chars`, `max_chars` | `GenerationReviewDecision.status = revise_length` + `LengthPlanUpdate` |
-| `replan_chapter` | 章节验收卡“修改章节梗概后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, `must_preserve[]`, `must_change[]`, `forbidden_carryover[]` | `GenerationReviewDecision.status = replan_chapter` + `ChapterReplanRequest` |
+| `rewrite_chapter` | 章节验收卡“基于反馈重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = rewrite_requested` |
+| `replan_chapter` | 章节验收卡“修改章节梗概后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = replan_requested` |
 | `discard_chapter` | 章节验收卡“作废本次草稿” | `run_id`, `chapter_id`, `draft_id`, `reason` 或 `feedback_text` | `GenerationReviewDecision.status = discarded` |
-| `defer_chapter_acceptance` | 章节验收卡“稍后再决定” | `run_id`, `chapter_id`, `draft_id`, 可选备注 | 不写正式 `GenerationReviewDecision`，保留待验收 checkpoint |
+| `defer_chapter_acceptance` | 章节验收卡“稍后再决定” | `run_id`, `chapter_id`, `draft_id`, 可选备注 | 不写正式 `GenerationReviewDecision`，保留待验收 review gate |
 
 用户可见响应必须使用 `StatusPresenter` / `WriterStatusPresenter` 的中文状态。`target_stage`、checkpoint id、workflow action 名、原始 `GenerationReviewDecision` JSON 等只能放进 technical/debug 响应。
 
@@ -388,10 +388,11 @@ Writer 审阅相关 action 必须继续复用 Writer workflow / facade。Web 层
 
 ```json
 {
-  "action": "request_scoped_artifact_revision",
+  "action": "request_writer_artifact_revision",
   "payload": {
     "artifact_id": "writer:run-1:batch-plan",
-    "feedback_text": "把本批中段冲突提前，但不要提前揭示幕后人。"
+    "review_id": "artifact-review-run-1-002",
+    "revision_feedback": "把本批中段冲突提前，但不要提前揭示幕后人。"
   }
 }
 ```
@@ -404,12 +405,12 @@ Action API 返回：
 - 可选 `ArtifactView` / artifact id，供前端刷新右侧结果。
 - 可选 `technical_details`，仅供 debug drawer 展示。
 
-Scoped Artifact Revision 的 action 语义：
+Artifact Review 的 action 语义：
 
-- `request_scoped_artifact_revision` 只生成候选修订和 diff，不自动保存、不自动确认冻结点。
-- `apply_scoped_artifact_revision` 保存已校验候选并刷新 artifact view；保存后仍停留在原审阅步骤，用户需要再点“确认并继续”。
-- `discard_scoped_artifact_revision` 不改变 artifact，只记录会话事件。
-- 后端必须让 Writer workflow / orchestration 负责 scope guard、prompt 组装、schema 校验、引用完整性校验和回滚传播。
+- `approve_writer_artifact` 写入 `ArtifactReviewDecision.approved`；`supplement_text` 必须原文保留，并作为下一轮 Writer 模型 prompt 输入之一。
+- `request_writer_artifact_revision` 写入 `ArtifactReviewDecision.revision_requested`；`revision_feedback` 必须原文保留，Writer workflow 负责 prompt 组装、schema 校验、引用完整性校验、回滚传播和新版 artifact 落盘。
+- `defer_writer_artifact_review` 只记录稍后继续，不推进 workflow。
+- 修订完成后仍回到同一个 artifact review gate；Web 只刷新会话消息和右侧 artifact view，不自动确认继续。
 - 校验失败返回用户可读错误和恢复建议，不返回 traceback。
 - 普通 view 不返回 revised raw JSON；raw JSON 只可通过 technical endpoint 查看。
 
@@ -425,9 +426,9 @@ Outline Research 用户补充问题的 action 语义：
 
 章节验收 action 语义：
 
-- `accept_chapter` 是唯一允许进入 `Freeze E` 或写回确认的分支。
-- `revise_chapter_length` 必须提交合法长度字段，且不得修改章节核心方向、关系推进或设定事实。
-- `replan_chapter` 必须提交重规划约束；它不是新的 `ChapterPackage`，只是退回章节梗概层的请求。
+- `accept_chapter` 是唯一允许进入写回摘要审阅或正式写回候选的分支。
+- `rewrite_chapter` 基于当前已通过的章节 brief、写作输入和用户反馈重写本章；不得触发正式写回。
+- `replan_chapter` 以用户反馈驱动 Writer 修订 `ChapterPackage` / `ChapterBrief`，并回到章节梗概 review gate；不得触发正式写回。
 - `discard_chapter` 只保留运行产物，不进入 Memory / KB。
 - `defer_chapter_acceptance` 不写正式验收 decision，保持当前待验收状态。
 
@@ -493,7 +494,7 @@ Outline Research 用户补充问题的 action 语义：
 4. 用户点击消息内“提交回答并继续研究”按钮。
 5. 前端发送 `submit_outline_research_answers`，payload 携带 `run_id`、`question_set_id`、回答原文和可选逐题结构化回答。
 6. 后端将回答记录为 `user_authorized` evidence，调用共享 Writer workflow 继续 research 或生成大纲。
-7. 若用户点击“稍后继续”，后端只保留当前等待态和问题消息，不推进后续冻结点。
+7. 若用户点击“稍后继续”，后端只保留当前等待态和问题消息，不推进 workflow。
 
 ### Flow C: Writer 审阅
 
@@ -502,23 +503,23 @@ Outline Research 用户补充问题的 action 语义：
 3. 用户提交 wizard，后端调用共享 Writer 接口生成全书续写规划。
 4. 右侧 Writer 树选中“全书续写规划”。
 5. 中间出现“接受并继续 / 按我的反馈修改 / 手动编辑 / 稍后继续”决策卡。
-6. 用户选择“按我的反馈修改”时，前端发送 `request_scoped_artifact_revision`，后端创建修订 job 或直接返回候选 diff。
-7. 用户在 diff 卡片中选择“应用此修订”时，前端发送 `apply_scoped_artifact_revision`；后端保存候选并刷新右侧 artifact view，但不自动确认当前步骤。
-8. 用户选择“接受并继续”时，前端发送 `confirm_current_step`；后端 workflow 才继续到下一审阅点。
-9. 用户选择“稍后继续”时，只保留当前 checkpoint 和会话消息。
+6. 用户选择“通过并继续”时，可在同一个聊天输入框或卡片输入 `supplement_text`；前端发送 `approve_writer_artifact`。
+7. 用户选择“不通过并调整”时，必须输入 `revision_feedback`；前端发送 `request_writer_artifact_revision`。
+8. 后端将决策交给 Writer workflow；修订完成后右侧刷新新版 artifact，中间回到同一 review gate。
+9. 用户选择“稍后继续”时，只保留当前 review gate 和会话消息。
 
 ### Flow D: 章节验收
 
 1. 右侧展示正文草稿、字数、连续性摘要。
 2. 中间决策卡展示：
    - 接受本章。
-   - 调整字数后重写。
+   - 基于反馈重写本章。
    - 修改章节梗概后重写。
    - 作废本次草稿。
    - 稍后再决定。
 3. 用户选择“接受本章”时，前端发送 `accept_chapter`；Assist 模式后续展示写回确认卡。
-4. 用户选择“调整字数后重写”时，前端发送 `revise_chapter_length`，payload 携带目标字数、最小/最大字数和反馈理由，后端回到章节长度确认。
-5. 用户选择“修改章节梗概后重写”时，前端发送 `replan_chapter`，payload 携带必须保留、必须改变和禁止沿用项，后端回到章节规划审阅。
+4. 用户选择“基于反馈重写本章”时，前端发送 `rewrite_chapter`，payload 携带反馈原文；后端基于当前已通过 brief 和写作输入重写正文。
+5. 用户选择“修改章节梗概后重写”时，前端发送 `replan_chapter`，payload 携带反馈原文；后端回到章节梗概 review gate。
 6. 用户选择“作废本次草稿”时，前端发送 `discard_chapter`，后端只保留 runs 产物并暂停流程。
 7. 用户选择“稍后再决定”时，前端发送 `defer_chapter_acceptance` 或只关闭决策卡；后端不得写正式验收 decision。
 8. 用户选择后，Web 只提交用户决策语义，不暴露内部 workflow action 或 stage。
@@ -531,13 +532,13 @@ Outline Research 用户补充问题的 action 语义：
 - `ArtifactTreeService` snapshot tests。
 - `ArtifactViewService` tests：
   - 人物百科不泄露 JSON。
-  - Writer artifact 摘要覆盖规划、批次、章节、长度、正文和写回。
+  - Writer artifact 摘要覆盖规划、批次、章节、写作指导、正文和写回。
 - `WebActionService` tests：
-  - `request_scoped_artifact_revision` 不需要 slash command 字符串，并调用共享 facade。
-  - `apply_scoped_artifact_revision` 保存候选后不自动确认当前冻结点。
+  - `approve_writer_artifact` 保留 `supplement_text` 原文，并调用共享 Writer workflow。
+  - `request_writer_artifact_revision` 保留 `revision_feedback` 原文，并回到同一 review gate。
   - `submit_outline_research_answers` 调用共享 Writer workflow 的用户补充入口，并保留 `answer_text` 原文。
   - 普通聊天消息不会自动绕过 Outline Research 的 `needs_user_input` 等待态。
-  - `accept_chapter` / `revise_chapter_length` / `replan_chapter` / `discard_chapter` / `defer_chapter_acceptance` 映射到正确 contract。
+  - `accept_chapter` / `rewrite_chapter` / `replan_chapter` / `discard_chapter` / `defer_chapter_acceptance` 映射到正确 contract。
   - 普通 action 响应不泄露内部 stage；technical response 可以包含 raw contract。
 - `JobManager` tests：
   - job 状态变化。

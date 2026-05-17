@@ -3,8 +3,9 @@
 ## Source Of Truth
 
 - 产品级核心流程、总编排、用户接口、UI 交互与用户可见状态文案，以 [`../spec.md`](../spec.md) 为准。
-- 本 spec 只定义 Writer 分层生成模型、内部冻结点依赖、人物补充、批次规划、章节梗概、长度计划、正文执行边界与写回规则。
-- `Freeze A/B/C/D/E`、`checkpoint`、`artifact` 等术语属于内部工程语义；用户界面 SHALL 使用核心 spec 中的自然语言状态。
+- 本 spec 只定义 Writer 分层生成模型、Agent Loop、artifact review gate、人物补充、批次规划、章节梗概、正文执行边界与写回规则。
+- Writer 新流程不再以 `Freeze A/B/C/D/E`、`wait_length_review` 或 `freeze_d_review` 作为主编排模型；运行期 SHALL 使用小状态机 + artifact review record 表达暂停、恢复和回滚。
+- `checkpoint`、artifact path、workflow stage/action 等技术细节只能用于恢复、debug drawer、日志和结构化 action，不得作为普通 UI 的主状态展示。
 
 ## Scope
 
@@ -19,7 +20,39 @@ Writer 层负责把已经建模的原作事实、世界观、人物档案、故�
 - 大纲生成 research / query 细节，见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)
 - 正文执行输入、恢复回滚、章节验收与写回运行边界，见 [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)
 
-Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md) 中已冻结的跨层对象冲突。
+Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md) 中已稳定的跨层对象冲突。
+
+## Agent Loop Workflow
+
+Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排器主导的多级冻结管线。
+
+运行期状态机 SHOULD 尽量收敛为少量稳定状态：
+
+- `agent_running`：Agent 正在 research、查询本地资料、修订规划或生成正文。
+- `reviewing_artifact`：等待用户审阅一个可见 artifact，例如全书规划、批次计划、章节标题与梗概、章节草稿或写回摘要。
+- `needs_user_input`：模型明确返回信息不足或授权边界不足，需要结构化问题集。
+- `generating_draft`：正在基于已通过的章节梗概、用户补充和装配上下文生成正文。
+- `reviewing_draft`：等待用户验收当前章节草稿。
+- `writeback_review`：等待用户确认写回摘要。
+- `completed` / `halted` / `error`：正常完成、用户暂停或异常停止。
+
+每个 review gate 只有两个主要分叉：
+
+- 用户点击通过，并可输入 `supplement_text`。该补充文本 SHALL 保留原文，并与当前标题、梗概、已通过规划、planning notebook、Memory / KB evidence 一起进入下一轮模型 prompt。字数、风格、节奏、必须保留项、禁止项、重点人物关系和展开偏好都属于这一补充信息的自然内容。
+- 用户点击不通过，并输入 `revision_feedback`。Agent SHALL 将反馈、当前 artifact、上游约束和必要 evidence 组装为修订 prompt，让模型产出调整后的 artifact，然后回到同一个 review gate，直到用户通过或暂停。
+
+当模型认为信息不足时，模型 SHALL 返回结构化 tool call，而不是让固定流程猜测下一步：
+
+- 本地查询 tool call：`story_detail`、`character_profile`、`world_concept`、`structure_pattern` 或 artifact lookup，由本地 Agent 翻译为 Memory / KB / runs 查询。
+- 面向用户的 tool call：`WriterQuestionSet`，由 Web / CLI / TUI 展示为结构化问题集，并通过对应 action 提交回答。
+
+章节梗概通过后，系统 SHALL 直接进入正文准备与生成：Agent 内部可派生长度预算、写作指导或 `chapter_execution_input.json`，但 `ChapterLengthPlan`、`wait_length_review` 和 `freeze_d_review` 不再是用户必须单独确认的流程节点。若用户对字数或风格有要求，应在通过章节梗概时通过 `supplement_text` 输入；若用户不认可章节梗概，应走“不通过 + 修订反馈”分叉。
+
+普通 UI 应在 review gate 中提示用户下一步如何操作，例如：
+
+- 审阅当前章节标题与梗概是否符合故事方向。
+- 若通过，可补充本章字数、风格、节奏、重点描写对象、必须保留或禁止出现的内容。
+- 若不通过，请说明需要调整的标题、因果、人物动机、场景顺序、关系推进或伏笔安排。
 
 ## Layer Model
 
@@ -178,7 +211,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - `BookContinuationPlan` SHALL 包含目标章节数、目标总字数、默认单章目标字数、整体节奏配置和高潮设计；它是后续批次与章节规划的正式大纲
 - `BookContinuationPlan.chapter_outline_slots` SHALL 为每个计划章节提供默认字数、章节功能、上层目标、铺垫目标、回收目标和禁止提前消费项；这些 slot 不是最终 `ChapterBrief`，但必须足以指导后续 `BatchPlan`
 - 每个章节 slot 的默认字数总和 SHOULD 接近目标总字数；若存在重点章或高潮章，允许局部 override，但必须保留总量解释
-- `ChapterLengthPlan` MAY 在 Freeze C 后细化单章 `target/min/max`，但不得反向推翻 Freeze A 中已经确认的总规模、章节数量和高潮位置，除非用户显式要求重做全书续写规划
+- 章节写作指导 MAY 在章节梗概通过后派生单章 `target/min/max`、重点展开段落和风格约束；这些派生信息不得反向推翻已通过的总规模、章节数量和高潮位置，除非用户在 review gate 中明确要求重做上游规划
 - 若存在 `NarrativeStructurePattern` / `ArcPatternCard`，必须参考其铺垫、过渡、登场、升级与收束节奏来设计后续 `ArcRoadmap`，而不是只按单章目标推进
 - 若存在 `SourceArcMap`，可用它定位源作品当前结构位置和未回收线索，但不得把源作品具体篇章内容直接当作续写计划
 - 对新增结局、终局秘密、角色命运变更保持保守
@@ -212,7 +245,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 - 处理用户概述中已经显式提到、但当前 Memory 中尚未建档，并被用户确认新增的新角色
 - 处理剧情规划中尚未被具体人物承接的角色功能位
-- 在正文开始前冻结“谁将登场、为何登场、何时登场、不能越界到什么程度”
+- 在正文开始前确认“谁将登场、为何登场、何时登场、不能越界到什么程度”，并作为后续 Agent Loop 的约束输入
 
 典型输出：
 
@@ -252,13 +285,13 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 要求：
 
 - 一个批次必须有明确起点、阶段任务和收束目标
-- `BatchPlan` SHALL 以已冻结的 `BookContinuationPlan` 为强前置输入，而不是仅依据用户即时意图直接生成
+- `BatchPlan` SHALL 以用户已通过的 `BookContinuationPlan` review artifact 为强前置输入，而不是仅依据用户即时意图直接生成
 - `BatchPlan` SHALL 从 `BookContinuationPlan.chapter_outline_slots` 中选择当前批次覆盖范围，并保留对应章节的默认字数、章节功能、铺垫/回收目标和高潮接近度
 - 若 KB 层提供相关 `NarrativeStructurePattern` / `ArcPatternCard`，`BatchPlan` SHALL 标注自己借鉴的结构模式、过渡功能、铺垫/回收目标与节奏类型
 - 若 Memory 层提供相关 `SourceArcMap`，`BatchPlan` MAY 记录源作品结构参考来源，但不应把源作品 arc 当作目标剧情事实
-- 若存在 `CharacterCastPlan`，`BatchPlan` SHALL 同时消费已冻结的人物补充结果，并为首次登场角色预留执行位置
-- 批次之间允许重新规划，但不能随意推翻 Layer 1 已冻结的大方向
-- 批次是正文生成的上游冻结单位
+- 若存在 `CharacterCastPlan`，`BatchPlan` SHALL 同时消费用户已通过的人物补充结果，并为首次登场角色预留执行位置
+- 批次之间允许重新规划，但不能随意推翻 Layer 1 已通过的大方向
+- 批次是正文生成的上游 review artifact
 
 ### Layer 3: 章节标题与梗概层
 
@@ -275,7 +308,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - `ChapterBrief`
 - `ChapterTitle`
 - `ChapterSynopsis`
-- `ChapterLengthPlan`
+- `ChapterWritingGuidance`
 - `SceneIntent`
 - `SceneBrief`
 
@@ -298,6 +331,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
   - `setup_payoff`: 本章负责埋设或回收的伏笔
   - `pacing_notes`: 节奏密度、详略重点和不得注水的范围
 - `scene_beats` SHOULD 由 Writer 根据 `BookContinuationPlan`、`BatchPlan`、用户规模约束和 close-read 记忆自动生成；用户只负责审阅、删除、补充或调整，不应被要求从零填写
+- 用户通过章节梗概时提供的 `supplement_text` SHALL 作为后续正文生成 prompt 输入之一；用户不通过时提供的 `revision_feedback` SHALL 驱动模型修订 `ChapterPackage` / `ChapterBrief`，而不是进入单独的长度确认流程
 - 每章必须绑定来源：
   - 来自大纲的约束
   - 来自世界观的约束
@@ -313,11 +347,11 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
   - `ChapterBrief.plot_function` 或结构意图 -> `SceneBrief.narrative_function`
   - `ChapterBrief.relationship_targets[].current_state/target_state` -> `SceneBrief.relationship_state`
   - `ChapterBrief.forbidden` -> `SceneBrief.must_avoid`
-  - 若 `ChapterBrief` 缺少检索所需字段，则允许结合兼容旧 `ScenePlan` 或批次约束补齐，但不得绕过 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md) 已冻结字段语义
+  - 若 `ChapterBrief` 缺少检索所需字段，则允许结合兼容旧 `ScenePlan` 或批次约束补齐，但不得绕过 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md) 已稳定字段语义
 
 ### Layer 4: 正文扩写层
 
-本层负责基于冻结 brief 与正文执行输入扩写正文。
+本层负责基于已通过的章节 brief、用户补充信息与正文执行输入扩写正文。
 
 详细输入边界、输入分类与 `ChapterBrief -> SceneBrief` 对齐规则见：
 
@@ -326,7 +360,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 在主 spec 中仅保留摘要：
 
-- Writer 层只消费冻结后的正文输入
+- Writer 层只消费已通过的章节 brief、用户补充信息和装配后的正文输入
 - 风格参考不得覆盖事实约束
 - 当前分层 Writer 的直接执行输入为 `chapter_execution_input.json`
 - 正文扩写层 SHOULD 主要关注文笔、风格、节奏、场景呈现和细节表达，而不是重做大纲或梗概层的剧情决策
@@ -343,20 +377,20 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 在主 spec 中仅保留摘要：
 
 - 本层必须提供显式章节验收节点
-- 只有 `GenerationReviewDecision.status = accepted` 才允许进入 `Freeze E`
+- 只有 `GenerationReviewDecision.status = accepted` 才允许进入正式写回候选
 - 未验收、被替换或被作废的草稿不得进入正式 Memory / KB
 
-## Freeze Points
+## Artifact Review Gates
 
-主 spec 中仅保留冻结点摘要：
+主 spec 中仅保留 artifact review gate 摘要：
 
-- `Freeze A`: 全书续写方向冻结
-- `Freeze B`: 当前批次计划冻结
-- `Freeze C`: 最近 N 章梗概冻结
-- `Freeze D`: 单章写作 brief 冻结
-- `Freeze E`: 本章已验收终稿与状态变化冻结
+- `BookContinuationPlan` review：用户审阅全书方向、规模、高潮、角色弧和未决问题。
+- `BatchPlan` review：用户审阅当前批次目标、入口、冲突、中点、出口和禁止提前消费项。
+- `ChapterPackage` / `ChapterBrief` review：用户审阅章节标题、梗概、场景顺序、人物行动、关系推进和伏笔安排。
+- `draft.md` review：用户验收章节正文，或要求 Agent 带反馈重写 / 回到章节梗概修订。
+- `memory_writeback.json` review：用户确认写回摘要后，正式更新 Memory / KB。
 
-详细工作流语义、恢复点与级联回滚规则见：
+每个 review gate 必须落盘结构化 review record，至少包含 review id、artifact kind、artifact 版本引用、用户动作、原始 `supplement_text` 或 `revision_feedback`、reviewer、时间和后续 action。详细恢复点、依赖失效与级联回滚规则见：
 
 - [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
@@ -369,7 +403,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 在主 spec 中仅保留摘要：
 
 - Writer Agent 是受限执行器，而不是自由写作者
-- Writer Agent 必须消费冻结后的 brief 与装配后的输入包
+- Writer Agent 必须消费已通过的 brief、用户补充信息与装配后的输入包
 - Writer Agent 不得越权修改上游规划或事实边界
 
 ## Requirements
@@ -383,15 +417,15 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - **THEN** 系统先生成上游规划产物
 - **AND** 不直接从用户目标跳到正文
 
-#### Scenario: 先冻结全书级方向再规划批次
+#### Scenario: 先通过全书级方向再规划批次
 - **WHEN** 用户已确认续写方向与世界观补充
 - **THEN** 系统先生成 `BookContinuationPlan`
-- **AND** 在 `Freeze A` 完成后才允许生成正式 `BatchPlan`
+- **AND** 在用户通过 `BookContinuationPlan` review 后才允许生成正式 `BatchPlan`
 - **AND** `BatchPlan` 不得绕过 `BookContinuationPlan` 直接由即时用户输入生成
 
 ### Requirement: BookContinuationPlan 必须吸收故事规模与高潮约束
 
-系统 SHALL 在生成 `BookContinuationPlan` 之前收集故事规模、章节数量、总长度、默认单章长度、节奏偏好和整本故事高潮，并将这些约束写入 Freeze A 的正式全书大纲。
+系统 SHALL 在生成 `BookContinuationPlan` 之前收集故事规模、章节数量、总长度、默认单章长度、节奏偏好和整本故事高潮，并将这些约束写入用户通过后的正式全书大纲。
 
 #### Scenario: TUI 引导用户填写故事规模
 - **WHEN** 用户输入自然语言故事方向后进入 Writer 启动向导
@@ -505,7 +539,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 ### Requirement: 人物补充必须先解析显式角色再检查隐式缺位
 
-系统 SHALL 在 `Freeze A` 之前处理新增角色需求，并区分“用户已点名角色”和“剧情仍缺角色功能位”。
+系统 SHALL 在 `BookContinuationPlan` 通过前处理新增角色需求，并区分“用户已点名角色”和“剧情仍缺角色功能位”。
 
 #### Scenario: 显式命名新角色
 - **WHEN** `ExtractedCharacterMentions` 中出现一个当前 Memory 中不存在、且用户确认新增的人物，例如“大反派 X”
@@ -531,9 +565,9 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - **WHEN** 某计划角色在正文中首次登场、通过连续性校验并完成回写
 - **THEN** 系统才将其转为正式 Character Memory 可消费对象
 
-### Requirement: Writer 层不得重定义已冻结跨层 contract
+### Requirement: Writer 层不得重定义已稳定跨层 contract
 
-系统 SHALL 复用 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md) 中已冻结的 `SceneBrief`、`ContextAssemblyPayload`、`WriterInputBundle` 等对象，不得在 Writer spec 中另起一套冲突命名和语义。
+系统 SHALL 复用 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md) 中已稳定的 `SceneBrief`、`ContextAssemblyPayload`、`WriterInputBundle` 等对象，不得在 Writer spec 中另起一套冲突命名和语义。
 
 #### Scenario: 使用 SceneBrief
 - **WHEN** Layer 3 需要把章节意图交给创作知识库层做检索
@@ -542,29 +576,31 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 #### Scenario: 保持正文层输入兼容
 - **WHEN** Writer Agent 开始正文扩写
-- **THEN** 当前分层执行输入必须能追溯到已冻结的 `ChapterBrief`、派生 `SceneBrief`、事实约束、风格参考和长度预算
+- **THEN** 当前分层执行输入必须能追溯到已通过的 `ChapterBrief`、用户补充信息、派生 `SceneBrief`、事实约束、风格参考和长度预算
 - **AND** 若测试或跨层主链路需要构造 `WriterInputBundle`，不得改变 `WriterInputBundle` 与 `ContextAssemblyPayload` 的 contract 语义
 
-### Requirement: 冻结梗概后必须生成章节长度计划
+### Requirement: 章节梗概通过后由 Agent 组装正文输入
 
-系统 SHALL 在 `Freeze C` 之后生成 `ChapterLengthPlan`，用于为当前批次提供默认章节长度，并允许对重点章节单独配置长度。
+系统 SHALL 在用户通过 `ChapterPackage` / `ChapterBrief` 后，由 Agent 将章节标题、梗概、上游规划、用户补充信息、Memory / KB evidence、风格参考和长度偏好组装为正文生成输入。系统不得要求用户再经过独立的长度确认或写作材料确认流程。
 
-#### Scenario: 使用默认长度和重点章节 override
-- **WHEN** 最近 N 章 `ChapterPackage` 已确认
-- **THEN** 系统生成默认章节长度
-- **AND** 允许用户指定重点章节或高潮章节
-- **AND** 允许为这些章节单独指定 `target_chars / min_chars / max_chars`
+#### Scenario: 通过章节梗概并补充写作要求
+- **WHEN** 用户审阅章节标题与梗概后点击通过
+- **THEN** 用户 MAY 在同一动作中输入 `supplement_text`
+- **AND** `supplement_text` 原文必须保留，并作为模型 prompt 输入之一
+- **AND** 用户对字数、风格、节奏、重点段落、禁止项和人物关系的要求均应通过该补充文本表达
+- **AND** Agent MAY 内部派生 `ChapterWritingGuidance`、`chapter_length_budget` 或 `chapter_execution_input.json`
 
-#### Scenario: 交互式调整长度计划
-- **WHEN** 用户选择调整 `ChapterLengthPlan`
-- **THEN** 系统应支持用户保存默认长度覆盖值、单章 override 或修改后的 `chapter_length_plan.json`
-- **AND** 修改后的长度计划必须重新保存并作为后续 `Freeze D` 输入
-- **AND** 若长度计划变更影响当前章，系统必须重新生成或重新确认当前章执行输入
+#### Scenario: 不通过章节梗概并要求调整
+- **WHEN** 用户审阅章节标题与梗概后点击不通过
+- **THEN** 用户必须输入 `revision_feedback`
+- **AND** Agent 将反馈、当前 artifact、上游规划和必要 evidence 发送给模型
+- **AND** 模型输出调整后的 `ChapterPackage` / `ChapterBrief`
+- **AND** workflow 回到同一个章节梗概 review gate，等待用户再次通过或继续修改
 
-#### Scenario: 单章写作读取长度计划
-- **WHEN** 系统加载某一章 `ChapterBrief`
-- **THEN** 系统同时加载该章对应的长度预算
-- **AND** Writer Agent 必须将其视为正文扩写的正式约束之一
+#### Scenario: 不再暴露独立长度确认节点
+- **WHEN** 用户已经通过章节梗概 review gate
+- **THEN** workflow 不得进入 `wait_length_review` 或 `freeze_d_review` 作为普通用户必须处理的主状态
+- **AND** 如果需要调整字数或风格，用户应通过通过动作中的 `supplement_text` 或草稿验收反馈表达
 
 ### Requirement: Writer 规划必须消费结构模式以改善铺垫
 
@@ -606,7 +642,7 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 
 ### Requirement: 上游修改必须触发级联回滚
 
-系统 SHALL 将分层规划产物视为带依赖关系的冻结节点；当上游节点被修改时，所有下游节点必须失效并回滚。
+系统 SHALL 将分层规划产物视为带依赖关系的 review artifact；当上游 artifact 被修改并重新通过时，所有依赖旧版本的下游产物必须失效并回滚。
 
 该 requirement 的详细失效传播与回滚语义已迁移到：
 
@@ -621,9 +657,9 @@ Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contract
 - **THEN** Layer 2 仅生成当前批次的章节包
 - **AND** 后续批次可在不推翻全书方向的前提下重规划
 
-### Requirement: Writer Agent 只消费冻结 brief
+### Requirement: Writer Agent 只消费已通过 brief
 
-系统 SHALL 要求 Writer Agent 在正文扩写时只消费已经冻结的单章 brief 以及已确认的正文执行输入。
+系统 SHALL 要求 Writer Agent 在正文扩写时只消费已经通过 review 的单章 brief、用户补充信息以及已装配的正文执行输入。
 
 该 requirement 的详细输入边界已迁移到：
 
@@ -664,9 +700,9 @@ accepted-only writeback 的详细规则已迁移到：
 
 - [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
 
-### Requirement: 失败恢复必须基于冻结点
+### Requirement: 失败恢复必须基于 review artifact
 
-系统 SHALL 支持从最近冻结点重跑，而不是每次从零开始。
+系统 SHALL 支持从最近已通过的 review artifact 重跑，而不是每次从零开始。
 
 该 requirement 的详细重试与回退语义已迁移到：
 
@@ -696,8 +732,10 @@ Writer 层主要产物：
 - `batch_plan.json`
 - `chapter_package.json`
 - `chapter_brief.json`
-- `chapter_length_plan.json`
-- `chapter_length_budget.json`
+- `artifact_review_record.json`
+- `user_supplement.json`
+- `chapter_writing_guidance.json`
+- `chapter_length_budget.json`（内部派生产物，不是独立用户确认节点）
 - `style_reference_bundle.json`
 - `chapter_execution_input.json`
 - `draft.md`
@@ -713,7 +751,8 @@ Writer 层主要产物：
 
 ### Assist Mode
 
-- 默认在全书规划、批次规划、章节梗概、本章写作材料和写回前等待用户确认
+- 默认在全书规划、批次规划、章节梗概、章节草稿和写回摘要处等待用户确认
+- 不单独暴露长度计划确认或写作材料确认；字数、风格和重点展开要求通过 review gate 的 `supplement_text` 输入
 - 适合严肃续写、同人承接、已有大纲的长篇补完
 
 ### Batch Mode
@@ -724,8 +763,8 @@ Writer 层主要产物：
 
 ### Auto Novel Mode
 
-- 策略层自动确认内部冻结点
-- 仍必须写出冻结记录，便于回滚和审计
+- 策略层可自动通过非阻塞 review gate
+- 仍必须写出 review record、research trace 和依赖记录，便于回滚和审计
 
 ## Non-Goals
 
@@ -743,5 +782,6 @@ Writer 层主要产物：
 - 大纲与章节梗概具备足够高的信息密度，使正文层主要承担文笔和风格表达
 - 能对最近 N 章做批次化生成而不是逐章无头扩写
 - Writer Agent 不再频繁越权发明设定或跳过关系铺垫
-- 失败时能从冻结点恢复
+- 用户通过时的补充信息能作为模型 prompt 输入；用户不通过时的反馈能驱动模型修订 artifact
+- 失败时能从最近已通过的 review artifact 恢复
 - 后续可平滑扩展到自动化长篇生成

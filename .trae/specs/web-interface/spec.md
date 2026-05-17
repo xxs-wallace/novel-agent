@@ -14,7 +14,7 @@ Web 端必须参考当前 Textual TUI 的流程语义，但采用浏览器工作
 
 - [`../spec.md`](../spec.md)：产品级流程、用户可见状态和人工确认规则。
 - [`../cli-interface/design.md`](../cli-interface/design.md)：TUI 已定义的命令、状态侧栏、artifact 审阅、确认点与恢复语义。
-- [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md)：Writer 分层生成与可恢复状态机。
+- [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md)：Writer Agent Loop、artifact review gate 与可恢复状态机。
 
 ## Product Boundary
 
@@ -38,9 +38,9 @@ Web 工作台 SHALL NOT：
 
 Web 工作台 SHALL 在 Writer 审阅流程中提供结构化 action：
 
-- 使用聊天式结构化决策消息承接 Writer 提问。问题可以像普通 Agent 消息一样出现在会话流中，用户也可以使用同一个聊天输入框回答；但消息和回答必须绑定 `run_id`、问题 id、checkpoint / review stage 与后端 action，不能退化为无语义的普通聊天记录。
-- 使用 `Scoped Artifact Revision` 支持用户用自然语言反馈修订当前审阅 artifact。
-- 使用章节验收决策卡支持接受、按长度重写、重做章节规划、作废和稍后决定。
+- 使用聊天式结构化消息承接 Writer 提问、artifact review 和章节验收。消息可以像普通 Agent 消息一样出现在会话流中，用户也可以使用同一个聊天输入框回答；但消息和回答必须绑定 `run_id`、问题 id 或 review id、artifact 引用与后端 action，不能退化为无语义的普通聊天记录。
+- 使用 `ArtifactReviewDecision` 支持用户“通过并补充 prompt 信息”或“不通过并给出调整反馈”；Web 只提交用户决策语义，Writer workflow 负责 prompt 组装和 artifact 修订。
+- 使用章节验收决策卡支持接受、基于反馈重写、退回章节梗概重规划、作废和稍后决定。
 - 所有修订、验收与回写动作 SHALL 调用 `WorkflowFacade` / Writer workflow / 共享 action adapter，不得由 Web 后端直接拼 prompt、写 Memory 或改 workflow state。
 
 ## Technology Direction
@@ -107,7 +107,7 @@ Web 工作台 SHALL 在 Writer 审阅流程中提供结构化 action：
 - 后台任务进度。
 - 错误与恢复建议。
 - 阻塞确认卡片。
-- scoped revision 反馈入口。
+- artifact review 反馈入口。
 
 会话输入 SHALL 支持：
 
@@ -141,7 +141,7 @@ Writer 在 Outline Research Loop、人物对齐、新角色确认或其它人工
 
 用户回答 SHOULD 使用同一个聊天输入框完成。当前存在待回答问题时，输入框进入“回答当前问题”上下文；发送后生成一条普通可读的 user message，同时在 payload 中记录它回答的 `question_set_id`。用户点击“提交回答并继续研究”按钮后，前端 SHALL 调用结构化 action，而不是只保存普通 message。
 
-普通聊天消息 SHALL NOT 自动越过 Writer checkpoint。只有用户点击确认按钮或等价结构化 action，才允许后端调用 `continue_after_outline_research_input`、确认新增人物或继续后续 Writer workflow。
+普通聊天消息 SHALL NOT 自动越过 Writer `needs_user_input` 或 artifact review gate。只有用户点击确认按钮或等价结构化 action，才允许后端调用 `continue_after_outline_research_input`、确认新增人物或继续后续 Writer workflow。
 
 ### 3. Right Result Explorer
 
@@ -226,11 +226,11 @@ Writer 目录树 SHOULD 包含：
 - 章节标题与梗概
   - 按章节分组
   - 目标、冲突、关系推进、禁止项
-- 章节长度计划
-  - 默认字数
-  - 单章预算
-  - 重点章节与高潮章节
-- 本章写作材料
+- 章节写作指导
+  - 用户补充原文
+  - 派生长度预算
+  - 风格与节奏要求
+- 本章执行输入
   - 事实型上下文
   - 风格与桥段参考
   - 禁止项
@@ -249,21 +249,19 @@ Writer 详细内容 SHALL 优先使用卡片、段落、表格和折叠小节展
 
 Writer 审阅卡片 SHALL 支持：
 
-- “确认并继续”：确认当前审阅步骤，推进到下一阶段。
-- “按反馈修改”：提交 `Scoped Artifact Revision` 请求，展示候选 diff。
-- “应用此修订”：保存已校验候选，但不自动确认当前审阅步骤。
-- “放弃此修订”：保留原 artifact。
-- “稍后继续”：保留当前 checkpoint。
+- “通过并继续”：提交 `ArtifactReviewDecision.decision = approved`，可携带原始 `supplement_text`，作为下一轮模型 prompt 输入。
+- “不通过并调整”：提交 `ArtifactReviewDecision.decision = revision_requested`，必须携带原始 `revision_feedback`，由 Writer workflow 驱动模型修订当前 artifact 并回到同一 review gate。
+- “稍后继续”：提交 `ArtifactReviewDecision.decision = deferred` 或等价 action，保留当前可恢复状态。
 
 正文草稿验收卡片 SHALL 支持：
 
 - 接受本章。
-- 调整字数后重写。
+- 基于反馈重写本章。
 - 修改章节梗概后重写。
 - 作废本次草稿。
 - 稍后再决定。
 
-除“接受本章”外，其它验收分支 SHALL NOT 触发 `Freeze E`、Memory writeback 或 Creative KB 写回。
+除“接受本章”外，其它验收分支 SHALL NOT 触发 Memory writeback 或 Creative KB 写回。
 
 ## Web Actions And CLI Command Parity
 
@@ -287,7 +285,7 @@ Web SHALL 支持 TUI 的命令语义，但主交互必须采用网页原生动�
 | `/artifacts` | 右侧 Result Explorer | `list_artifacts` |
 | `/open` | artifact detail “打开文件位置 / 复制路径” | `open_artifact` |
 | `/save` | artifact 编辑器“保存修改”按钮 | `save_artifact` |
-| `/confirm` | 决策卡“接受并继续”按钮 | `confirm_current_step` |
+| `/confirm` | 决策卡“通过并继续”按钮 | `approve_writer_artifact` 或对应共享确认 action |
 | `/back` | 决策卡“返回上一层”按钮 | `go_back` |
 | `/help` | 顶部帮助 / 命令面板 | `show_help` |
 | `/debug` | 技术详情 drawer | `show_debug_details` |
@@ -298,11 +296,11 @@ Writer Web-only actions:
 |---|---|---|
 | Outline Research Loop 需要用户补充 | Agent 消息内问题卡 + 聊天输入回答 + “提交回答并继续研究”按钮 | `submit_outline_research_answers` |
 | Outline Research Loop 稍后回答 | 问题卡“稍后继续”按钮 | `defer_outline_research_answers` |
-| 受控修订当前审阅 artifact | “按反馈修改”表单提交 | `request_scoped_artifact_revision` |
-| 应用受控修订候选 | diff 卡片“应用此修订” | `apply_scoped_artifact_revision` |
-| 放弃受控修订候选 | diff 卡片“放弃此修订” | `discard_scoped_artifact_revision` |
+| 通过当前 review artifact | “通过并继续”按钮 + 可选补充输入 | `approve_writer_artifact` |
+| 调整当前 review artifact | “不通过并调整”按钮 + 反馈输入 | `request_writer_artifact_revision` |
+| 稍后审阅当前 artifact | “稍后继续”按钮 | `defer_writer_artifact_review` |
 | 章节验收接受 | 章节验收卡“接受本章” | `accept_chapter` |
-| 调整字数后重写 | 章节验收卡“调整字数后重写” | `revise_chapter_length` |
+| 基于反馈重写本章 | 章节验收卡“基于反馈重写” | `rewrite_chapter` |
 | 修改章节梗概后重写 | 章节验收卡“修改章节梗概后重写” | `replan_chapter` |
 | 作废当前草稿 | 章节验收卡“作废本次草稿” | `discard_chapter` |
 | 稍后再决定 | 章节验收卡“稍后再决定” | `defer_chapter_acceptance` |
@@ -411,6 +409,52 @@ Web 后端 SHALL 暴露稳定 API。
 
 后端 SHALL 将该 action 映射为 Writer workflow 的 `continue_after_outline_research_input`。如果前端只提交 `answer_text`，后端 MAY 保留原文并生成最小 `user_answers` 映射；不得因为解析失败而伪造用户答案。用户回答必须作为 `user_authorized` evidence 进入 planning notebook 或等价 Writer artifact。
 
+### Conversational Writer Artifact Review Contract
+
+Writer artifact review 也通过会话消息承载。Agent 消息 SHALL 展示当前 artifact 的用户可读摘要、右侧详情入口和下一步提示；结构化 payload 至少包含：
+
+- `run_id`
+- `review_id`
+- `artifact_kind`
+- `artifact_id` 或 `artifact_path`
+- `actions.approve`
+- `actions.request_revision`
+- `actions.defer`
+
+用户点击“通过并继续”时，前端发送：
+
+```json
+{
+  "action": "approve_writer_artifact",
+  "payload": {
+    "run_id": "run-1",
+    "review_id": "artifact-review-run-1-004",
+    "artifact_kind": "chapter_package",
+    "artifact_id": "writer:run-1:chapter-package",
+    "source_message_id": "message-456",
+    "supplement_text": "本章控制在三千字左右，动作段更紧，结尾不要解释幕后人。"
+  }
+}
+```
+
+用户点击“不通过并调整”时，前端发送：
+
+```json
+{
+  "action": "request_writer_artifact_revision",
+  "payload": {
+    "run_id": "run-1",
+    "review_id": "artifact-review-run-1-004",
+    "artifact_kind": "chapter_package",
+    "artifact_id": "writer:run-1:chapter-package",
+    "source_message_id": "message-457",
+    "revision_feedback": "第二个场景因果太跳，先补人物动机，再进入冲突。"
+  }
+}
+```
+
+`supplement_text` 与 `revision_feedback` 必须原文保留。Web 后端不得自己拼 Writer prompt；它只将结构化决策交给 Writer workflow。
+
 ## View Models
 
 后端 SHALL 不把原始 artifact JSON 直接发给普通视图，而是转换为 view model。
@@ -426,6 +470,7 @@ Web 后端 SHALL 暴露稳定 API。
 - `ArtifactView`
 - `DecisionCard`
 - `WriterQuestionSet`
+- `WriterArtifactReview`
 - `PersonEncyclopediaEntry`
 - `ChapterSummaryView`
 - `WriterRunView`
@@ -469,10 +514,11 @@ Web 端被认为达到 TUI parity 的条件：
 - 粗读、精读、Creative KB、Writer、恢复、确认、返回、保存都能通过合适的 Web 按钮 / 菜单 / 决策卡触发。
 - 中间会话可发送自然语言，能展示 Agent 进度与阻塞决策；slash command 仅作为高级兼容入口。
 - Outline Research Loop 的用户补充问题以聊天消息展示，用户可用同一输入框回答；只有点击“提交回答并继续研究”等结构化按钮时才继续 Writer workflow。
+- Writer artifact review 以聊天消息展示，用户可在同一个输入框输入通过后的补充 prompt 或不通过后的调整反馈；只有结构化按钮才继续 workflow。
 - 右侧目录树可浏览 close-read 与 Writer 结果，详细内容不直接展示 JSON。
 - 人物资料以百科条目展示，支持二级目录树。
 - 后端 API 复用 `WorkflowFacade`、`StatusPresenter`、`ArtifactPresenter` 等共享语义。
 - SSE 能实时回流 read、close-read、KB、Writer 与 benchmark 进度。
-- Scoped Artifact Revision 能通过 Web action 生成候选 diff、应用或放弃候选；应用候选后仍需用户显式确认当前审阅步骤。
-- 章节验收能通过 Web action 表达接受、按长度重写、重做章节规划、作废和稍后决定；非接受分支不得回写 Memory / KB。
+- Artifact review 能通过 Web action 表达通过并补充、请求调整、稍后继续；补充和反馈原文均能进入 Writer 结构化决策。
+- 章节验收能通过 Web action 表达接受、基于反馈重写、重做章节规划、作废和稍后决定；非接受分支不得回写 Memory / KB。
 - 测试覆盖 API contract、view model 转换、三栏布局、目录树、会话与 SSE。

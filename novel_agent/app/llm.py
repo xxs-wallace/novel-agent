@@ -50,11 +50,15 @@ class InvalidJSONResponseError(ValueError):
 class JsonModelClient:
     def __init__(self, settings: ModelSettings) -> None:
         self.settings = settings
+        if not settings.dry_run and not str(settings.model_name or "").strip():
+            raise RuntimeError("ModelSettings.model_name is required for non-dry-run model access")
         self.api_key = read_api_key(
             api_key=settings.api_key,
             api_key_file=settings.api_key_file,
             env_name=settings.api_key_env,
         )
+        if not settings.dry_run and settings.model_type == "OpenAIModel" and not str(self.api_key or "").strip():
+            raise RuntimeError("OpenAIModel API key is required for non-dry-run model access")
         self.model = None if settings.dry_run else self._build_model()
 
     def _build_model(self, settings: ModelSettings | None = None):
@@ -211,7 +215,9 @@ class JsonModelClient:
                 time.sleep(backoff)
         if last_error is not None:
             raise last_error
-        return last_text
+        raise RuntimeError(
+            f"Model returned empty text after {attempts} attempts for model={self.settings.model_name}"
+        )
 
     def _should_retry_without_thinking(self) -> bool:
         if not self.settings.retry_without_thinking_on_failure:
@@ -275,6 +281,8 @@ class JsonModelClient:
                     time.sleep(1.0)
                     continue
         if use_fallback_on_error:
-            payload = fallback_factory()
-            return payload, raw_text
+            logger.warning(
+                "Ignoring generate_json fallback request for model=%s; model failures must surface as errors",
+                self.settings.model_name,
+            )
         raise InvalidJSONResponseError(raw_text=raw_text, attempts=JSON_RETRY_ATTEMPTS) from last_error

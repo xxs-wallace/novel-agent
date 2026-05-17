@@ -21,4 +21,11 @@ def create_message(
     request: MessageCreateRequest,
     session: WebSessionService = Depends(get_session_service),
 ) -> ConversationMessage:
-    return session.append_user_message(task_id, request.content, payload=request.payload)
+    payload = dict(request.payload or {})
+    if request.writer_question_answer is not None:
+        if hasattr(request.writer_question_answer, "model_dump"):
+            answer_payload = request.writer_question_answer.model_dump()
+        else:
+            answer_payload = request.writer_question_answer.dict()
+        payload.update(answer_payload)
+    return session.append_user_message(task_id, request.content, payload=payload)

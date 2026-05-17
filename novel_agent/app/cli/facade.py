@@ -250,6 +250,8 @@ class WorkflowFacade:
             "chapters": 0,
             "character_profiles": 0,
             "fragment_cards": 0,
+            "fragment_card_docs": 0,
+            "fragment_clusters": 0,
         }
         if db_path.exists():
             db = NovelAgentDB(db_path)
@@ -260,6 +262,8 @@ class WorkflowFacade:
                 counts["chapters"] = self._count(conn, "chapters", book_id=book_id)
                 counts["character_profiles"] = self._count(conn, "character_profiles", book_id=book_id)
                 counts["fragment_cards"] = self._count(conn, "fragment_cards")
+                counts["fragment_card_docs"] = self._count_distinct(conn, "fragment_cards", "doc_id")
+                counts["fragment_clusters"] = self._count(conn, "fragment_clusters")
         world_summary = self.repo_root / ".memory" / "world" / f"{book_id}.summary.md"
         world_markdown = self.repo_root / ".memory" / "world" / f"{book_id}.md"
         outline = self.repo_root / ".memory" / "outlines" / f"{book_id}.md"
@@ -344,11 +348,12 @@ class WorkflowFacade:
         from .. import run_interactive
 
         self.event_stream.emit("系统", "开始构建 Creative KB")
-        with self.event_stream.capture_stdout():
+        with self.event_stream.capture_stdout(ingest_progress=False):
             result = run_interactive._build_creative_kb(  # noqa: SLF001
                 db_path=db_path,
                 book_id=book_id,
                 api_key=api_key,
+                progress_callback=self.event_stream.progress_callback,
             )
         payload = result.to_dict()
         self.event_stream.emit("系统", "Creative KB 已可用", payload=payload)
@@ -720,6 +725,11 @@ class WorkflowFacade:
         return int(row[0] or 0) if row is not None else 0
 
     @staticmethod
+    def _count_distinct(conn: sqlite3.Connection, table: str, column: str) -> int:
+        row = conn.execute(f"SELECT COUNT(DISTINCT {column}) FROM {table}").fetchone()
+        return int(row[0] or 0) if row is not None else 0
+
+    @staticmethod
     def _delete_count(conn: sqlite3.Connection, table: str, *, book_id: str) -> int:
         cursor = conn.execute(f"DELETE FROM {table} WHERE book_id = ?", (book_id,))
         return int(cursor.rowcount if cursor.rowcount >= 0 else 0)
@@ -769,6 +779,16 @@ class WorkflowFacade:
                     self.repo_root / "runs" / "paragraph_benchmark" / book_id,
                 ]
             )
+            writer_root = self.repo_root / "runs" / "writer"
+            if writer_root.exists():
+                for state_path in writer_root.glob("*/workflow_state.json"):
+                    try:
+                        raw = json.loads(state_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    payload = raw.get("data") if isinstance(raw, dict) else raw
+                    if isinstance(payload, dict) and str(payload.get("book_id") or "") == book_id:
+                        paths.append(state_path.parent)
         deduped: list[Path] = []
         seen: set[str] = set()
         for path in paths:

@@ -984,9 +984,7 @@ class DocumentIngestService:
                 else:
                     raise RuntimeError("Segmentation model returned invalid documents field")
             if not doc_items and not self.model_client.settings.dry_run:
-                payload = self._safe_fallback_segmentation(batch, batch_segments)
-                fallback_items = payload.get("documents")
-                doc_items = fallback_items if isinstance(fallback_items, list) else []
+                raise RuntimeError("Segmentation model returned no documents")
             raw_doc_items = self._materialize_segment_documents(
                 batch_segments=batch_segments,
                 doc_items=doc_items,
@@ -996,17 +994,7 @@ class DocumentIngestService:
                 doc_items=raw_doc_items,
             )
             if not raw_doc_items and not self.model_client.settings.dry_run:
-                payload = self._safe_fallback_segmentation(batch, batch_segments)
-                fallback_items = payload.get("documents")
-                fallback_doc_items = fallback_items if isinstance(fallback_items, list) else []
-                raw_doc_items = self._materialize_segment_documents(
-                    batch_segments=batch_segments,
-                    doc_items=fallback_doc_items,
-                )
-                raw_doc_items = self._split_materialized_documents_by_segment_titles(
-                    batch_segments=batch_segments,
-                    doc_items=raw_doc_items,
-                )
+                raise RuntimeError("Segmentation model returned no materializable documents")
             if pending_overlap_source and raw_doc_items:
                 first_content = str(raw_doc_items[0].get("content", ""))
                 trimmed_content = self._trim_resumed_overlap(

@@ -64,7 +64,7 @@ class RunEventStream:
         elif stage == "close_reading":
             message = self._close_read_message(event)
         elif stage == "creative_kb":
-            message = "正在构建 Creative KB"
+            message = self._creative_kb_message(event)
         elif stage == "creative_kb_benchmark":
             message = self._creative_kb_benchmark_message(event)
         else:
@@ -122,6 +122,8 @@ class RunEventStream:
         for key in ("prompt_timing", "creative_kb_progress"):
             value = payload.get(key)
             if isinstance(value, dict):
+                if key == "creative_kb_progress":
+                    return {"stage": "creative_kb", **value}
                 return value
         if "creative_kb" in payload:
             return {"stage": "creative_kb", **dict(payload.get("creative_kb") or {})}
@@ -179,6 +181,50 @@ class RunEventStream:
         if phase == "summary_written":
             return "Creative KB Benchmark summary 已写入"
         return "Creative KB Benchmark 正在运行"
+
+    @staticmethod
+    def _creative_kb_message(event: Mapping[str, Any]) -> str:
+        phase = str(event.get("phase") or "")
+        attempted = event.get("attempted_docs")
+        total = event.get("total_buildable_documents") or event.get("total_documents")
+        built = event.get("built_cards")
+        failed = event.get("failed_docs")
+        progress = ""
+        if attempted is not None and total is not None:
+            progress = f"{attempted}/{total}"
+        elif attempted is not None:
+            progress = str(attempted)
+        if phase == "fragment_cards_batch_start":
+            first_doc = str(event.get("first_doc_id") or "").strip()
+            last_doc = str(event.get("last_doc_id") or "").strip()
+            doc_range = f"doc {first_doc}-{last_doc}" if first_doc and last_doc and first_doc != last_doc else f"doc {first_doc or last_doc}"
+            suffix = f" · 已处理 {progress}" if progress else ""
+            return f"开始构建 Creative KB 片段卡（{doc_range}）{suffix}"
+        if phase == "fragment_card_document_start":
+            doc_id = str(event.get("current_doc_id") or "").strip()
+            chars = event.get("current_document_chars")
+            chars_text = f"，{chars} 字" if chars is not None else ""
+            suffix = f" · 已处理 {progress}" if progress else ""
+            return f"正在生成片段卡：doc {doc_id}{chars_text}{suffix}"
+        if phase == "fragment_card_document_done":
+            doc_id = str(event.get("current_doc_id") or "").strip()
+            status = str(event.get("status") or "").strip()
+            status_text = f"，{status}" if status else ""
+            built_text = f"，已建卡 {built}" if built is not None else ""
+            failed_text = f"，失败 {failed}" if failed not in (None, 0, "0") else ""
+            suffix = f" · 已处理 {progress}" if progress else ""
+            return f"片段卡完成：doc {doc_id}{status_text}{built_text}{failed_text}{suffix}"
+        if phase == "fragment_cards":
+            built_text = f"已建卡 {built}" if built is not None else "片段卡已写入"
+            suffix = f" · 已处理 {progress}" if progress else ""
+            return f"Creative KB 片段卡已提交：{built_text}{suffix}"
+        if phase == "creative_kb_complete":
+            clusters = event.get("cluster_count")
+            representatives = event.get("representative_count")
+            cluster_text = f"，clusters={clusters}" if clusters is not None else ""
+            representative_text = f"，representatives={representatives}" if representatives is not None else ""
+            return f"Creative KB 片段卡与聚类完成：cards={built if built is not None else '?'}{cluster_text}{representative_text}"
+        return "正在构建 Creative KB"
 
     @staticmethod
     def _close_read_message(event: Mapping[str, Any]) -> str:

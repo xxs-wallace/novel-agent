@@ -48,7 +48,7 @@ class ChapterEventListService:
             "timeline_events": fallback_events,
         }
         if not self._should_use_model():
-            return fallback
+            raise RuntimeError("ChapterEventListService requires an available model_client")
 
         prompt_input = {
             "book_id": book_id,
@@ -67,11 +67,11 @@ class ChapterEventListService:
             use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
         )
         if not isinstance(payload, Mapping):
-            return fallback
+            raise RuntimeError("Chapter event list model returned a non-object JSON payload")
 
         events = self._normalize_events(payload.get("timeline_events"))
-        if not events:
-            events = fallback_events
+        if not events and fallback_events:
+            raise RuntimeError("Chapter event list model returned no usable timeline_events")
         chapter_line = normalize_whitespace(str(payload.get("chapter_line") or "")) or fallback["chapter_line"]
         return {"chapter_line": chapter_line, "timeline_events": events}
 
@@ -99,10 +99,7 @@ class ChapterEventListService:
         return self._normalize_events(existing_timeline_events or [])
 
     def _should_use_model(self) -> bool:
-        if self.model_client is None:
-            return False
-        settings = getattr(self.model_client, "settings", None)
-        return not bool(getattr(settings, "dry_run", False))
+        return self.model_client is not None
 
     def _normalize_events(self, value: object) -> list[dict[str, Any]]:
         if not isinstance(value, list):

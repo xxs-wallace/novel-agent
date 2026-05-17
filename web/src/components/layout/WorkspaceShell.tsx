@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { postAction } from "../../api/actions";
 import { streamJobEvents } from "../../api/jobs";
-import { createTask, deleteTask, getTasks, resetCloseRead, selectTask } from "../../api/tasks";
+import { createTask, deleteLatestWriterRun, deleteTask, getTasks, resetCloseRead, selectTask } from "../../api/tasks";
 import type {
   CreateTaskRequest,
   DecisionCardModel,
@@ -40,6 +40,7 @@ export function WorkspaceShell() {
   const [decisionCards, setDecisionCards] = useState<DecisionCardModel[]>([]);
   const [lastActionMessage, setLastActionMessage] = useState("");
   const [writerWizardSignal, setWriterWizardSignal] = useState(0);
+  const [focusedArtifactId, setFocusedArtifactId] = useState("");
 
   const tasksQuery = useQuery({
     queryKey: ["tasks"],
@@ -90,6 +91,7 @@ export function WorkspaceShell() {
           );
           if (["succeeded", "failed", "cancelled", "error"].includes(event.kind)) {
             refreshTaskArtifacts(job.task_id);
+            void queryClient.invalidateQueries({ queryKey: ["messages", job.task_id] });
             setActiveJobs((current) => current.filter((activeJob) => activeJob.job_id !== job.job_id));
           } else if (shouldRefreshArtifactsForEvent(event)) {
             refreshTaskArtifacts(job.task_id);
@@ -153,6 +155,14 @@ export function WorkspaceShell() {
     }
   });
 
+  const deleteWriterRunMutation = useMutation({
+    mutationFn: ({ taskId, confirm }: { taskId: string; confirm: boolean }) => deleteLatestWriterRun(taskId, { confirm }),
+    onSuccess: (_result, variables) => {
+      refreshTaskArtifacts(variables.taskId);
+      void queryClient.invalidateQueries({ queryKey: ["messages", variables.taskId] });
+    }
+  });
+
   function rememberActionResult(result: WebActionResult) {
     setLastActionMessage(result.message);
     const resultJob = result.job;
@@ -206,6 +216,10 @@ export function WorkspaceShell() {
 
   async function handleDeletePreview(taskId: string, confirm: boolean): Promise<DeleteTaskPreview> {
     return deleteMutation.mutateAsync({ taskId, confirm });
+  }
+
+  async function handleDeleteLatestWriterRun(taskId: string, confirm: boolean) {
+    return deleteWriterRunMutation.mutateAsync({ taskId, confirm });
   }
 
   function openWriterWizard() {
@@ -265,13 +279,14 @@ export function WorkspaceShell() {
             tasks={tasks}
             selectedTaskId={selectedTask?.task_id ?? ""}
             isLoading={tasksQuery.isLoading}
-            isBusy={createMutation.isPending || selectMutation.isPending || actionMutation.isPending}
+            isBusy={createMutation.isPending || selectMutation.isPending || actionMutation.isPending || deleteWriterRunMutation.isPending}
             onCreateTask={(request) => createMutation.mutateAsync(request)}
             onSelectTask={handleSelectTask}
             onAction={(taskId, action, payload) => handleTaskAction(taskId, action, payload)}
             onStartWriter={openWriterWizard}
             onResetCloseRead={handleResetCloseRead}
             onDeleteTask={handleDeletePreview}
+            onDeleteLatestWriterRun={handleDeleteLatestWriterRun}
             onRefresh={refreshTasks}
           />
         </section>
@@ -286,12 +301,13 @@ export function WorkspaceShell() {
             decisionCards={decisionCards}
             actionPending={actionMutation.isPending}
             writerWizardSignal={writerWizardSignal}
+            onOpenArtifactDetail={setFocusedArtifactId}
             onAction={handleAction}
           />
         </section>
 
         <section className={`workspace-panel result-panel mobile-${mobilePanel === "results" ? "visible" : "hidden"}`} aria-label="结果浏览器">
-          <ResultExplorer selectedTaskId={selectedTask?.task_id ?? ""} />
+          <ResultExplorer selectedTaskId={selectedTask?.task_id ?? ""} focusedArtifactId={focusedArtifactId} />
         </section>
       </main>
     </div>

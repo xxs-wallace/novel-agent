@@ -34,25 +34,15 @@ class RerankService:
         if not candidates:
             return RerankResult(selection_notes="no candidates available for rerank")
 
-        if self.model_client is not None:
-            scores = self._rerank_with_prompt(
-                scene_brief=scene_brief,
-                candidates=candidates,
-                anchor_context=anchor_context,
-                recent_window_summary=recent_window_summary,
-            )
-            selection_notes = "prompt_based_fixed_rubric"
-        else:
-            scores = [
-                self._score_candidate(
-                    scene_brief=scene_brief,
-                    candidate=candidate,
-                    anchor_context=anchor_context,
-                    recent_window_summary=recent_window_summary,
-                )
-                for candidate in candidates
-            ]
-            selection_notes = "rule_based_placeholder_rerank"
+        if self.model_client is None:
+            raise RuntimeError("RerankService requires an available model_client")
+        scores = self._rerank_with_prompt(
+            scene_brief=scene_brief,
+            candidates=candidates,
+            anchor_context=anchor_context,
+            recent_window_summary=recent_window_summary,
+        )
+        selection_notes = "prompt_based_fixed_rubric"
 
         scores.sort(
             key=lambda item: (
@@ -65,10 +55,7 @@ class RerankService:
         )
 
         selected_fragment_ids = self._select_top_fragments(scores=scores, candidates=candidates)
-        if not selected_fragment_ids and candidates:
-            selected_fragment_ids = [candidates[0].fragment_id]
-            selection_notes = "fallback_selected_first_candidate"
-        elif not selected_fragment_ids:
+        if not selected_fragment_ids:
             selection_notes = "no candidates passed cluster selection"
         return RerankResult(
             scores=scores,
@@ -85,7 +72,7 @@ class RerankService:
         recent_window_summary: str,
     ) -> list[RerankScore]:
         if self.model_client is None:
-            return []
+            raise RuntimeError("RerankService requires an available model_client")
         system_prompt, user_prompt = build_rerank_prompt(
             scene_brief=scene_brief,
             candidates=candidates,
@@ -111,15 +98,7 @@ class RerankService:
         parsed_scores = self._parse_rerank_payload(payload=payload, candidates=candidates)
         if parsed_scores:
             return parsed_scores
-        return [
-            self._score_candidate(
-                scene_brief=scene_brief,
-                candidate=candidate,
-                anchor_context=anchor_context,
-                recent_window_summary=recent_window_summary,
-            )
-            for candidate in candidates
-        ]
+        raise RuntimeError("Rerank model returned no usable scores")
 
     def _parse_rerank_payload(
         self,

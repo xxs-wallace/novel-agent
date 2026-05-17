@@ -40,7 +40,7 @@ class ChapterEventSummaryService:
             chapter_event_list=event_list,
         )
         if not self._should_use_model():
-            return fallback
+            raise RuntimeError("ChapterEventSummaryService requires an available model_client")
         prompt_input = {
             "book_id": book_id,
             "document_title_index": document_title_index,
@@ -58,9 +58,11 @@ class ChapterEventSummaryService:
             use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
         )
         if not isinstance(payload, Mapping):
-            return fallback
+            raise RuntimeError("Chapter event summary model returned a non-object JSON payload")
         event_summary = normalize_whitespace(str(payload.get("event_summary") or ""))
-        return event_summary if self._is_usable_summary(event_summary) else fallback
+        if not self._is_usable_summary(event_summary):
+            raise RuntimeError("Chapter event summary model returned no usable event_summary")
+        return event_summary
 
     def fallback_summary(
         self,
@@ -92,10 +94,7 @@ class ChapterEventSummaryService:
         return plot_text
 
     def _should_use_model(self) -> bool:
-        if self.model_client is None:
-            return False
-        settings = getattr(self.model_client, "settings", None)
-        return not bool(getattr(settings, "dry_run", False))
+        return self.model_client is not None
 
     @staticmethod
     def _is_usable_summary(summary: str) -> bool:

@@ -5,6 +5,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from novel_agent.app.repos.assets_repo import AssetsRepo
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
@@ -287,26 +289,19 @@ def test_chapter_event_list_service_uses_summary_md_prompt_and_returns_events() 
     assert outline_update["timeline_events"][0]["participants"] == ["调查员"]
 
 
-def test_chapter_event_list_fallback_compresses_plot_chain_into_timeline_events() -> None:
-    outline_update = ChapterEventListService(model_client=None).build_outline_update(
-        book_id="book",
-        document_title_index=3,
-        chapter_title="第三章",
-        summary_md=(
-            "## 剧情事件链\n"
-            "- 起点：调查员接到新线索，重新梳理前一晚的行动顺序。\n"
-            "- 触发：同伴补充关键证词，使队伍确认事件并非偶然。\n"
-            "- 结果：队伍决定分头追踪证人与幕后联系人。\n"
-            "## 结构功能/节奏\n"
-            "- 本章把线索从分散状态推进为可追踪链条。"
-        ),
-        chapter_summary_short="调查线索被重新串联。",
-    )
-
-    assert outline_update["timeline_events"]
-    assert len(outline_update["timeline_events"]) == 3
-    assert outline_update["timeline_events"][0]["summary"].startswith("调查员接到新线索")
-    assert not outline_update["timeline_events"][0]["summary"].endswith("...")
+def test_chapter_event_list_requires_model_client() -> None:
+    with pytest.raises(RuntimeError, match="ChapterEventListService requires an available model_client"):
+        ChapterEventListService(model_client=None).build_outline_update(
+            book_id="book",
+            document_title_index=3,
+            chapter_title="第三章",
+            summary_md=(
+                "## 剧情事件链\n"
+                "- 起点：调查员接到新线索，重新梳理前一晚的行动顺序。\n"
+                "- 触发：同伴补充关键证词，使队伍确认事件并非偶然。"
+            ),
+            chapter_summary_short="调查线索被重新串联。",
+        )
 
 
 def test_close_read_generates_event_list_then_event_summary_from_summary_md() -> None:
@@ -386,7 +381,7 @@ def test_close_read_generates_event_list_then_event_summary_from_summary_md() ->
     assert event_summary.startswith("调查员接到新线索后")
 
 
-def test_chapter_event_summary_fallback_is_not_mechanical_excerpt() -> None:
+def test_chapter_event_summary_requires_model_client() -> None:
     summary_md = "\n".join(
         [
             "## 剧情事件链",
@@ -399,17 +394,14 @@ def test_chapter_event_summary_fallback_is_not_mechanical_excerpt() -> None:
         ]
     )
 
-    event_summary = ChapterEventSummaryService(model_client=None).summarize(
-        book_id="book",
-        document_title_index=3,
-        chapter_title="第三章",
-        summary_md=summary_md,
-        chapter_summary_short="调查员接到新线索...",
-    )
-
-    assert event_summary
-    assert "调查员接到新线索" in event_summary
-    assert not event_summary.endswith("...")
+    with pytest.raises(RuntimeError, match="ChapterEventSummaryService requires an available model_client"):
+        ChapterEventSummaryService(model_client=None).summarize(
+            book_id="book",
+            document_title_index=3,
+            chapter_title="第三章",
+            summary_md=summary_md,
+            chapter_summary_short="调查员接到新线索...",
+        )
 
 
 def test_outline_service_keeps_split_batch_events_with_same_label(tmp_path: Path) -> None:
@@ -725,7 +717,7 @@ def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: 
     story_events = json.loads(row["story_events_json"])
     assert story_events[0]["event_id"] == "chapter-12:event-01-fingel-sells-exam"
     assert story_events[0]["source_doc_ids"] == [48, 49]
-    assert "## 基本属性/关系/能力" in row["profile_summary_md"]
+    assert "## 基本属性/能力" in row["profile_summary_md"]
     assert "## 剧情时间线" in row["profile_summary_md"]
     assert "documents：48-49" in row["profile_summary_md"]
 
@@ -752,6 +744,22 @@ def test_outline_service_renders_timeline_event_source_indexes(tmp_path: Path) -
 
 
 def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_path: Path) -> None:
+    class _OutlineEventSummaryModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = system_prompt, user_prompt, fallback_factory, use_fallback_on_error
+            return (
+                {
+                    "should_compress": True,
+                    "summary_title": "事件1-7调查线推进",
+                    "event_summary": "事件1至事件7连续推动同一条调查线。",
+                    "tail_uncompressed_event_indexes": [8, 9],
+                    "reason": "前七个事件属于同一调查线，末尾两个事件保留为近期上下文。",
+                },
+                "",
+            )
+
     db = NovelAgentDB(tmp_path / "event-summary.db")
     with db.connect() as conn:
         db.init_schema(conn)
@@ -777,6 +785,7 @@ def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_pa
 
         state = OutlineEventSummaryService(
             repo_root=tmp_path,
+            model_client=_OutlineEventSummaryModel(),  # type: ignore[arg-type]
             min_uncompressed_events=4,
             fallback_tail_events=2,
         ).refresh(conn, book_id="book")
@@ -882,6 +891,58 @@ def test_context_assembly_marks_mixed_status_and_falls_back_to_provisional(tmp_p
 
 
 def test_source_arc_map_committed_structure_enters_context_and_can_reverse_commit(tmp_path: Path) -> None:
+    class _SourceArcModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = system_prompt, user_prompt, fallback_factory, use_fallback_on_error
+            return (
+                {
+                    "arcs": [
+                        {
+                            "source_arc_id": "source-arc-0001",
+                            "source_arc_title": "关系铺垫到规则揭示",
+                            "start_document_title_index": 1,
+                            "end_document_title_index": 4,
+                            "source_arc_role": "主线推进",
+                            "core_events": ["前半段关系铺垫，后半段世界规则被进一步揭示。"],
+                            "main_character_threads": [],
+                            "world_or_rule_reveals": ["世界规则与能力体系被进一步揭示。"],
+                            "transition_from_previous": "当前已读范围起点",
+                            "setup_for_next": "后续继续处理规则影响。",
+                            "pacing_notes": "四个 chapter 从日常铺垫转入规则揭示。",
+                            "chapter_role_map": [
+                                {
+                                    "document_title_index": 1,
+                                    "chapter_title": "第1章",
+                                    "role": "日常关系",
+                                    "reason": "人物日常对话和关系铺垫。",
+                                },
+                                {
+                                    "document_title_index": 2,
+                                    "chapter_title": "第2章",
+                                    "role": "日常关系",
+                                    "reason": "人物日常对话和关系铺垫。",
+                                },
+                                {
+                                    "document_title_index": 3,
+                                    "chapter_title": "第3章",
+                                    "role": "设定揭示",
+                                    "reason": "世界规则与能力体系被进一步揭示。",
+                                },
+                                {
+                                    "document_title_index": 4,
+                                    "chapter_title": "第4章",
+                                    "role": "设定揭示",
+                                    "reason": "世界规则与能力体系被进一步揭示。",
+                                },
+                            ],
+                        }
+                    ]
+                },
+                "",
+            )
+
     db = NovelAgentDB(tmp_path / "source_arc.db")
     with db.connect() as conn:
         db.init_schema(conn)
@@ -889,7 +950,11 @@ def test_source_arc_map_committed_structure_enters_context_and_can_reverse_commi
         for index in range(1, 5):
             summary = "世界规则与能力体系被进一步揭示。" if index >= 3 else "人物日常对话和关系铺垫。"
             ChaptersRepo().upsert(conn, _chapter_payload(book_id="book", index=index, summary=summary))
-        source_arc_service = SourceArcMappingService(repo_root=tmp_path, now_factory=lambda: "now")
+        source_arc_service = SourceArcMappingService(
+            repo_root=tmp_path,
+            model_client=_SourceArcModel(),  # type: ignore[arg-type]
+            now_factory=lambda: "now",
+        )
         source_arc_map = source_arc_service.build_from_chapters(conn, book_id="book")
 
         commit_result = SummaryOutlineCommitService(repo_root=tmp_path, now_factory=lambda: "now").commit_from_source_arc_map(

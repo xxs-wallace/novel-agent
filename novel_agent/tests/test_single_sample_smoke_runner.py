@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from novel_agent.app.orchestrators import MainLayerOrchestrator
 from novel_agent.app.repos.assets_repo import AssetsRepo
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
@@ -15,7 +17,30 @@ from novel_agent.app.services.continuation_generation_service import (
 )
 from novel_agent.app.schemas.orchestration_schema import WriterInputBundle
 from novel_agent.app.schemas.smoke_schema import AuthorizedInputs, SmokeReviewerCheck, SmokeReviewerReport
+from novel_agent.app.services.retrieval_facade import RetrievalFacade
+from novel_agent.app.services.rerank_service import RerankService
+from novel_agent.app.services.scene_brief_service import SceneBriefService
 from novel_agent.schemas import RunConfig
+
+
+class _FakeRetrievalModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, use_fallback_on_error
+        payload = fallback_factory()
+        return payload, ""
+
+
+def _orchestrator(repo_root: Path) -> MainLayerOrchestrator:
+    model_client = _FakeRetrievalModel()
+    return MainLayerOrchestrator(
+        repo_root=repo_root,
+        retrieval_facade=RetrievalFacade(
+            scene_brief_service=SceneBriefService(model_client=model_client),  # type: ignore[arg-type]
+            rerank_service=RerankService(model_client=model_client),  # type: ignore[arg-type]
+        ),
+    )
 
 
 def _seed_source_db(tmp_path: Path) -> Path:
@@ -309,6 +334,7 @@ def test_single_sample_smoke_runner_writes_run_artifacts(tmp_path: Path) -> None
         source_db_path=source_db_path,
         runs_dir=runs_dir,
         repo_root=tmp_path,
+        orchestrator=_orchestrator(tmp_path),
         text_generator=_fake_text_generator,
         reviewer_service=_FakeReviewerService(),  # type: ignore[arg-type]
     )
@@ -368,6 +394,7 @@ def test_single_sample_smoke_runner_uses_generation_service_when_configured(tmp_
         source_db_path=source_db_path,
         runs_dir=runs_dir,
         repo_root=tmp_path,
+        orchestrator=_orchestrator(tmp_path),
         generation_service=_FakeGenerationService(),  # type: ignore[arg-type]
         generation_config=RunConfig(
             prompt=None,
@@ -417,6 +444,7 @@ def test_single_sample_smoke_runner_backfills_profiles_between_two_steps(tmp_pat
         source_db_path=source_db_path,
         runs_dir=runs_dir,
         repo_root=tmp_path,
+        orchestrator=_orchestrator(tmp_path),
         text_generator=_two_step_generator,
         reviewer_service=_FakeReviewerService(),  # type: ignore[arg-type]
     )

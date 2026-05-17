@@ -47,14 +47,45 @@ export function percent(completed: number | undefined, total: number | undefined
 
 export function kbStatus(progress: TaskProgress | null | undefined): string {
   const ready = progress?.modeling_ready ?? {};
-  const values = Object.values(ready);
-  if (!values.length) {
-    return "未生成";
-  }
-  if (values.every(Boolean)) {
+  const explicitReady = ready["桥段 KB"] ?? ready["Creative KB"] ?? ready.creative_kb;
+  if (explicitReady === true) {
     return "已就绪";
   }
-  return `待补齐 ${values.filter((value) => !value).length} 项`;
+  const cards = progress?.counts?.fragment_cards ?? 0;
+  if (cards > 0) {
+    return "已生成部分";
+  }
+  return "未生成";
+}
+
+export interface KbProgressSummary {
+  completed: number;
+  total: number;
+  cards: number;
+  clusters: number;
+}
+
+export function kbProgress(progress: TaskProgress | null | undefined, fallbackTotal = 0): KbProgressSummary {
+  const counts = progress?.counts ?? {};
+  const cards = counts.fragment_cards ?? 0;
+  const completed = counts.fragment_card_docs ?? cards;
+  const total = counts.documents ?? progress?.close_read_progress?.total ?? fallbackTotal;
+  return {
+    completed: Math.max(0, completed),
+    total: Math.max(0, total),
+    cards: Math.max(0, cards),
+    clusters: Math.max(0, counts.fragment_clusters ?? 0)
+  };
+}
+
+export function kbProgressDetail(summary: KbProgressSummary): string {
+  if (!summary.total) {
+    return summary.cards ? `${summary.cards} 卡` : "0/0";
+  }
+  const base = `${Math.min(summary.completed, summary.total)}/${summary.total}`;
+  const cardText = summary.cards && summary.cards !== summary.completed ? ` · ${summary.cards} 卡` : "";
+  const clusterText = summary.clusters ? ` · ${summary.clusters} 簇` : "";
+  return `${base}${cardText}${clusterText}`;
 }
 
 export function writerStatus(task: TaskSummary): string {

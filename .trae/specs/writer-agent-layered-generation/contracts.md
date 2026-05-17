@@ -2,81 +2,90 @@
 
 ## 1. 目的
 
-本文件用于冻结 Writer Agent 章节验收、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
+本文件用于稳定 Writer Agent 的 artifact 审阅、章节验收、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
 
 - [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
 - [design.md](.trae/specs/writer-agent-layered-generation/design.md)
 - [../web-interface/spec.md](.trae/specs/web-interface/spec.md)
 - [../web-interface/design.md](.trae/specs/web-interface/design.md)
 
-本 contract 只定义模块间如何传递“章节验收决策”“长度调整请求”“章节重规划请求”“大纲研究补充问题与回答”，不替代各层内部实现。
+本 contract 只定义模块间如何传递“artifact 审阅决策”“章节验收决策”“大纲研究补充问题与回答”，不替代各层内部实现。
 
 ## 2. Design Principles
 
 - 所有 contract 默认 JSON 兼容
 - 所有对象必须能直接落盘到 `runs/*` 目录
 - 所有对象必须可被状态机直接消费，而不依赖额外自然语言解析
-- 所有对象必须显式区分：
-  - 必填字段
-  - 可选字段
-  - 状态驱动字段
+- 所有对象必须显式区分必填字段、可选字段和状态驱动字段
 - 所有对象必须避免与正式 Memory / KB 事实对象混淆
+- 用户原始输入必须保留原文，不能被摘要、拆题或模型解释替代
 
 ## 3. Shared Conventions
 
 ### 3.1 命名约定
 
-- `decision_id`: 一次章节验收决策的唯一标识
+- `review_id`: 一次 artifact 审阅决策的唯一标识
+- `decision_id`: 一次章节草稿验收决策的唯一标识
+- `run_id`: 一次生成运行的标识
+- `artifact_kind`: 被审阅 artifact 的类型
+- `artifact_id`: 被审阅 artifact 的稳定标识
+- `artifact_path`: 被审阅 artifact 的落盘路径
 - `chapter_id`: 当前章节的稳定标识
 - `draft_id`: 当前待审草稿版本标识
-- `run_id`: 一次生成运行的标识
 - `reviewer_type`: 发起决策的主体类型
 - `question_set_id`: 一组待用户回答问题的稳定标识
 - `question_id`: 问题集内单个问题的稳定标识
+- `source_message_id`: 触发结构化 action 的聊天消息标识
 
 ### 3.2 时间与路径
 
 - 时间统一使用 ISO 8601 UTC 字符串
 - 路径统一使用绝对路径或仓库内可解析相对路径
+- 普通用户视图不得把 path、stage、action 名或内部 id 当作主状态展示
 
 ### 3.3 状态机约定
 
-- `accepted` 只允许进入 `Freeze E`
-- `revise_length` 只允许回到 `wait_length_review`
-- `replan_chapter` 只允许回到 `wait_chapter_review`
-- `discarded` 只允许进入 `halted` 或等待用户下一步显式动作
+- Artifact review gate 只通过 `ArtifactReviewDecision` 或等价结构化 action 继续
 - `needs_user_input` 只允许通过 `continue_after_outline_research_input` 或等价结构化 action 继续
+- 普通聊天消息不得自动绕过 `needs_user_input`
+- 章节草稿只有 `GenerationReviewDecision.status = accepted` 才允许进入正式写回候选
+- 任何不接受草稿的分支都必须回到 Agent Loop，不得触发 Memory / KB 正式写回
 
-## 4. Contract A: GenerationReviewDecision
+## 4. Contract A: ArtifactReviewDecision
 
 ### 4.1 用途
 
-- 表达一次章节验收的结构化结果
-- 驱动验收后的状态跳转
-- 决定当前草稿是否可进入 `Freeze E`
+- 表达用户对一个规划类 artifact 的结构化审阅结果
+- 驱动 Agent Loop 继续、修订或暂停
+- 保留用户通过时的补充 prompt，以及不通过时的修订反馈
+
+适用 artifact 包括但不限于：
+
+- `book_continuation_plan`
+- `world_expansion_pack`
+- `character_cast_plan`
+- `batch_plan`
+- `chapter_package`
+- `chapter_brief`
+- `writeback_summary`
 
 ### 4.2 Frozen Fields
 
 ```json
 {
   "schema_version": "1.0",
-  "decision_id": "review-batch03-ch02-003",
+  "review_id": "artifact-review-run-20260503-001-004",
   "run_id": "run-20260503-001",
-  "chapter_id": "batch03-ch02",
-  "draft_id": "draft-003",
-  "status": "revise_length",
-  "reason_code": "length_too_short",
-  "feedback_text": "字数不足，高潮段需要展开，结尾转折前的心理描写不够。",
-  "next_action_checkpoint": "wait_length_review",
-  "length_plan_update": {
-    "target_chars": 3200,
-    "min_chars": 2800,
-    "max_chars": 3600,
-    "reason_code": "length_too_short"
-  },
-  "chapter_replan_request": null,
-  "supersedes_draft_id": "draft-002",
+  "artifact_kind": "chapter_package",
+  "artifact_id": "batch03-package-001",
+  "artifact_path": "runs/writer/run-20260503-001/chapter_package.json",
+  "artifact_version": "v3",
+  "decision": "approved",
+  "supplement_text": "本章控制在三千字左右，动作段更紧，结尾保留悬念，不要提前解释幕后人身份。",
+  "revision_feedback": "",
+  "source_message_id": "message-123",
   "reviewer_type": "user",
+  "next_action": "continue_agent_loop",
   "created_at": "2026-05-03T12:00:00Z"
 }
 ```
@@ -84,86 +93,66 @@
 ### 4.3 Required Fields
 
 - `schema_version`
-- `decision_id`
-- `chapter_id`
-- `draft_id`
-- `status`
-- `reason_code`
-- `feedback_text`
-- `next_action_checkpoint`
+- `review_id`
+- `run_id`
+- `artifact_kind`
+- `decision`
 - `reviewer_type`
+- `next_action`
 - `created_at`
 
-### 4.4 Status Enum
-
-- `accepted`
-- `revise_length`
-- `replan_chapter`
-- `discarded`
-
-### 4.5 Reason Code Enum
-
-推荐至少支持：
+### 4.4 Decision Enum
 
 - `approved`
-- `length_too_short`
-- `length_too_long`
-- `pacing_mismatch`
-- `structure_mismatch`
-- `direction_mismatch`
-- `character_voice_drift`
-- `continuity_risk`
-- `user_abandoned`
-- `superseded_by_new_draft`
-- `other`
+- `revision_requested`
+- `deferred`
 
-### 4.6 Required Rules
+### 4.5 Required Rules
 
-- 当 `status = accepted` 时：
-  - `reason_code` 必须为 `approved`
-  - `next_action_checkpoint` 必须为 `freeze_e`
-  - `length_plan_update` 必须为空或省略
-  - `chapter_replan_request` 必须为空或省略
-- 当 `status = revise_length` 时：
-  - `next_action_checkpoint` 必须为 `wait_length_review`
-  - `length_plan_update` 必须存在
-  - `chapter_replan_request` 必须为空或省略
-- 当 `status = replan_chapter` 时：
-  - `next_action_checkpoint` 必须为 `wait_chapter_review`
-  - `chapter_replan_request` 必须存在
-  - `length_plan_update` 可以为空；如存在，只可作为参考，不得直接替代新的章节规划
-- 当 `status = discarded` 时：
-  - `next_action_checkpoint` 必须为 `halted`
-  - 不得触发正式回写
+- 当 `decision = approved` 时：
+  - `supplement_text` 可为空，但字段存在时必须保留用户原文
+  - `revision_feedback` 必须为空或省略
+  - `next_action` 必须等价于继续 Agent Loop
+  - 后续模型 prompt 必须能消费 `supplement_text`
+- 当 `decision = revision_requested` 时：
+  - `revision_feedback` 必须非空，并保留用户原文
+  - `supplement_text` 必须为空或省略
+  - Agent 必须把反馈、当前 artifact、上游约束和必要 evidence 交给模型修订
+  - workflow 必须回到同一个 artifact review gate
+- 当 `decision = deferred` 时：
+  - 不得继续生成或写回
+  - workflow 保持可恢复暂停态
 
-### 4.7 Boundary Notes
+### 4.6 Boundary Notes
 
-- `GenerationReviewDecision` 是验收层对象，不是正文对象
-- `GenerationReviewDecision` 只表达“本轮怎么处理当前草稿”，不直接修改上游 `ChapterPackage`
-- 是否真的更新长度计划或章节梗概，必须分别由 `LengthPlanUpdate` 和 `ChapterReplanRequest` 承接
+- `ArtifactReviewDecision` 是交互决策对象，不是正式 Memory 事实对象
+- `supplement_text` 是模型 prompt 材料，不等于用户直接改写 artifact
+- `revision_feedback` 是修订请求，不等于新的 artifact
+- 技术字段可以进入 debug drawer，但普通 UI 主状态应显示自然语言提示
 
-## 5. Contract B: LengthPlanUpdate
+## 5. Contract B: GenerationReviewDecision
 
 ### 5.1 用途
 
-- 表达用户对当前章节长度预算的修订请求
-- 供长度规划层重新确认预算并重新生成草稿
-- 不得修改章节核心方向与结构目标
+- 表达一次章节草稿验收的结构化结果
+- 驱动验收后的 Agent Loop 分支
+- 决定当前草稿是否可进入正式写回候选
 
 ### 5.2 Frozen Fields
 
 ```json
 {
   "schema_version": "1.0",
-  "update_id": "length-update-batch03-ch02-001",
-  "decision_id": "review-batch03-ch02-003",
+  "decision_id": "draft-review-batch03-ch02-003",
+  "run_id": "run-20260503-001",
   "chapter_id": "batch03-ch02",
-  "target_chars": 3200,
-  "min_chars": 2800,
-  "max_chars": 3600,
-  "reason_code": "length_too_short",
-  "feedback_text": "保留现有剧情方向，但高潮前需要增加心理和动作描写。",
-  "preserve_story_direction": true,
+  "draft_id": "draft-003",
+  "status": "rewrite_requested",
+  "reason_code": "pacing_mismatch",
+  "feedback_text": "前半章解释太多，动作段不够紧。保留梗概方向，但重写时把冲突提前，并把心理描写压到关键转折前。",
+  "source_message_id": "message-456",
+  "reviewer_type": "user",
+  "next_action": "agent_loop_rewrite_draft",
   "created_at": "2026-05-03T12:00:00Z"
 }
 ```
@@ -171,111 +160,75 @@
 ### 5.3 Required Fields
 
 - `schema_version`
-- `update_id`
 - `decision_id`
+- `run_id`
 - `chapter_id`
-- `target_chars`
-- `min_chars`
-- `max_chars`
+- `draft_id`
+- `status`
 - `reason_code`
 - `feedback_text`
-- `preserve_story_direction`
+- `reviewer_type`
+- `next_action`
 - `created_at`
 
-### 5.4 Required Rules
+### 5.4 Status Enum
 
-- `target_chars`、`min_chars`、`max_chars` 必须为正整数
-- 必须满足 `min_chars <= target_chars <= max_chars`
-- `preserve_story_direction` 必须为 `true`
-- 该对象只允许在 `GenerationReviewDecision.status = revise_length` 时出现
-- 不得通过该对象要求：
-  - 修改章节核心目标
-  - 修改关系推进目标
-  - 修改章节结构意图
-  - 修改必须出现或禁止出现事项
+- `accepted`
+- `rewrite_requested`
+- `replan_requested`
+- `discarded`
 
-### 5.5 Boundary Notes
+### 5.5 Reason Code Enum
 
-- `LengthPlanUpdate` 只服务于长度预算层
-- 它不是新的 `ChapterBrief`
-- 若用户实际想修改方向、结构或展开方式，必须改走 `ChapterReplanRequest`
+推荐至少支持：
 
-## 6. Contract C: ChapterReplanRequest
+- `approved`
+- `too_short`
+- `too_long`
+- `pacing_mismatch`
+- `structure_mismatch`
+- `direction_mismatch`
+- `character_voice_drift`
+- `continuity_risk`
+- `style_mismatch`
+- `user_abandoned`
+- `superseded_by_new_draft`
+- `other`
+
+### 5.6 Required Rules
+
+- 当 `status = accepted` 时：
+  - `reason_code` 必须为 `approved`
+  - `next_action` 必须等价于进入写回摘要审阅或正式写回候选
+  - `feedback_text` 可以为空
+- 当 `status = rewrite_requested` 时：
+  - `feedback_text` 必须非空，并保留用户原文
+  - `next_action` 必须等价于 Agent Loop 基于当前通过的章节 brief 重写草稿
+  - 不得触发正式写回
+- 当 `status = replan_requested` 时：
+  - `feedback_text` 必须非空，并保留用户原文
+  - `next_action` 必须等价于 Agent Loop 修订 `ChapterPackage` / `ChapterBrief`
+  - workflow 必须回到章节梗概 review gate
+  - 不得触发正式写回
+- 当 `status = discarded` 时：
+  - `next_action` 必须等价于暂停或等待用户下一步
+  - 不得触发正式写回
+
+### 5.7 Boundary Notes
+
+- `GenerationReviewDecision` 是草稿验收对象，不是正文对象
+- 字数、风格和节奏问题都可以通过 `feedback_text` 表达，由 Agent 判断是基于同一 brief 重写，还是回到章节梗概修订
+- 不再要求单独的长度计划更新对象作为正式分支
+
+## 6. Contract C: OutlineResearchQuestionSet
 
 ### 6.1 用途
-
-- 表达用户对当前章节方向、结构或展开方式的不接受
-- 触发退回章节梗概层
-- 作为 `ChapterPackage / ChapterBrief` 重规划的输入之一
-
-### 6.2 Frozen Fields
-
-```json
-{
-  "schema_version": "1.0",
-  "request_id": "replan-batch03-ch02-001",
-  "decision_id": "review-batch03-ch02-004",
-  "chapter_id": "batch03-ch02",
-  "reason_code": "structure_mismatch",
-  "feedback_text": "当前稿在冲突升级前铺垫过长，且关系推进过快，需要重写章节梗概。",
-  "replan_scope": "current_chapter",
-  "must_preserve": [
-    "本章仍需完成危机中的有限合作"
-  ],
-  "must_change": [
-    "延后公开偏袒时点",
-    "减少前半章解释，提前进入行动段"
-  ],
-  "forbidden_carryover": [
-    "不得直接沿用当前草稿中的关系升温节奏"
-  ],
-  "requested_length_direction": {
-    "keep_default_plan": false,
-    "suggested_target_chars": 2600
-  },
-  "created_at": "2026-05-03T12:05:00Z"
-}
-```
-
-### 6.3 Required Fields
-
-- `schema_version`
-- `request_id`
-- `decision_id`
-- `chapter_id`
-- `reason_code`
-- `feedback_text`
-- `replan_scope`
-- `must_preserve`
-- `must_change`
-- `forbidden_carryover`
-- `created_at`
-
-### 6.4 Required Rules
-
-- 该对象只允许在 `GenerationReviewDecision.status = replan_chapter` 时出现
-- `replan_scope` 第一阶段建议固定为：
-  - `current_chapter`
-- `must_change` 至少包含一项
-- `must_preserve` 可为空数组，但字段必须存在
-- `forbidden_carryover` 可为空数组，但字段必须存在
-- `requested_length_direction` 只可表达对下一轮长度规划的建议，不得直接替代 `ChapterLengthPlan`
-
-### 6.5 Boundary Notes
-
-- `ChapterReplanRequest` 是重规划请求，不是新的 `ChapterPackage`
-- 它不直接产出新的章节梗概，只提供重规划约束
-- 它不允许越过章节梗概层直接重写正文
-
-## 7. Contract D: OutlineResearchQuestionSet
-
-### 7.1 用途
 
 - 表达 Outline Research Loop 在 `needs_user_input` 时需要用户补充的问题集
 - 供 Web / CLI / TUI 用同一语义展示问题、收集回答并恢复等待态
 - 驱动用户回答后继续 research 或生成大纲
 
-### 7.2 Frozen Fields
+### 6.2 Frozen Fields
 
 ```json
 {
@@ -304,7 +257,7 @@
 }
 ```
 
-### 7.3 Required Fields
+### 6.3 Required Fields
 
 - `schema_version`
 - `question_set_id`
@@ -315,7 +268,7 @@
 - `actions`
 - `created_at`
 
-### 7.4 Required Rules
+### 6.4 Required Rules
 
 - `questions` 必须至少包含一项
 - 每个问题必须包含稳定 `question_id`、用户可读 `prompt` 和 `required`
@@ -324,7 +277,21 @@
 - 普通聊天消息不得自动继续该问题集；必须收到结构化 submit action
 - 问题集必须可通过落盘 artifact 或 `sufficiency_decision.json` 引用恢复
 
-### 7.5 Answer Submission
+### 6.5 Boundary Notes
+
+- `OutlineResearchQuestionSet` 是用户补充问题对象，不是正式 Memory 事实对象
+- 用户回答成为 Writer planning evidence，不等于直接写入 Character Memory / World KB
+- 新增人物、关系跃迁和世界规则突破仍需遵守对应规划与确认规则
+
+## 7. Contract D: OutlineResearchAnswerSubmission
+
+### 7.1 用途
+
+- 表达用户对 `OutlineResearchQuestionSet` 的结构化回答
+- 保留自然语言原文，并可选提供逐题映射
+- 驱动 `continue_after_outline_research_input` 或等价 action
+
+### 7.2 Frozen Fields
 
 ```json
 {
@@ -345,7 +312,7 @@
 }
 ```
 
-提交对象的必填字段：
+### 7.3 Required Fields
 
 - `schema_version`
 - `submission_id`
@@ -355,35 +322,40 @@
 - `reviewer_type`
 - `created_at`
 
-提交规则：
+### 7.4 Required Rules
 
 - `answer_text` 必须保留用户原始回答
 - `user_answers` 是可选结构化映射；若无法可靠映射，不得伪造缺失问题的答案
 - 必答问题缺失时，workflow 应保持等待态或返回可读补充提示
 - 被接受的回答进入 `planning_notebook` 或等价 artifact 时，来源类型必须是 `user_authorized`
-
-### 7.6 Boundary Notes
-
-- `OutlineResearchQuestionSet` 是用户补充问题对象，不是正式 Memory 事实对象
-- 用户回答成为 Writer planning evidence，不等于直接写入 Character Memory / World KB
-- 新增人物、关系跃迁和世界规则突破仍需遵守对应规划与确认规则
+- 回答提交必须绑定 `question_set_id`
 
 ## 8. Object Relationships
 
-### 8.1 Decision to Update Mapping
-
 ```text
+ArtifactReviewDecision.decision = approved
+  -> preserve supplement_text
+  -> continue Agent Loop with supplement_text as prompt input
+
+ArtifactReviewDecision.decision = revision_requested
+  -> preserve revision_feedback
+  -> revise the same artifact through model
+  -> return to the same review gate
+
+ArtifactReviewDecision.decision = deferred
+  -> pause in recoverable state
+
 GenerationReviewDecision.status = accepted
-  -> no LengthPlanUpdate
-  -> no ChapterReplanRequest
+  -> draft may enter writeback review / writeback candidate
 
-GenerationReviewDecision.status = revise_length
-  -> requires LengthPlanUpdate
-  -> must not include ChapterReplanRequest
+GenerationReviewDecision.status = rewrite_requested
+  -> preserve feedback_text
+  -> Agent Loop rewrites draft without formal writeback
 
-GenerationReviewDecision.status = replan_chapter
-  -> requires ChapterReplanRequest
-  -> may later trigger a new ChapterLengthPlan
+GenerationReviewDecision.status = replan_requested
+  -> preserve feedback_text
+  -> Agent Loop revises ChapterPackage / ChapterBrief
+  -> return to chapter artifact review
 
 GenerationReviewDecision.status = discarded
   -> no writeback
@@ -395,33 +367,35 @@ OutlineResearchQuestionSet.status = pending
   -> may continue research or generate outline
 ```
 
-### 8.2 Writeback Boundary
+## 9. Writeback Boundary
 
-- 只有 `GenerationReviewDecision.status = accepted` 的草稿允许进入 `Freeze E`
-- `revise_length`、`replan_chapter`、`discarded` 都不得触发正式 Memory / KB 回写
+- 只有 `GenerationReviewDecision.status = accepted` 的草稿允许进入正式写回候选
+- `rewrite_requested`、`replan_requested`、`discarded` 都不得触发正式 Memory / KB 回写
+- 写回摘要本身也应作为 review artifact，允许用户通过、要求修订或稍后处理
 
-## 9. Recommended Storage Targets
+## 10. Recommended Storage Targets
 
 建议运行期至少落盘以下文件：
 
+- `artifact_review_decision.json`
+- `user_supplement.json`
 - `generation_review_decision.json`
-- `length_plan_update.json`
-- `chapter_replan_request.json`
 - `outline_research_question_set.json`
 - `outline_research_answer_submission.json`
 
-## 10. Breaking Change Rules
+## 11. Breaking Change Rules
 
 以下变更视为 breaking change：
 
 - 删除必填字段
-- 改变 `status` 或 `reason_code` 的既有语义
-- 改变状态与检查点之间的映射关系
+- 改变 `decision`、`status` 或 `reason_code` 的既有语义
+- 改变 review decision 与 Agent Loop 分支之间的映射关系
 - 改变 `question_set_id` / `question_id` 的稳定性要求
 - 改变用户回答必须保留原文并作为 `user_authorized` evidence 的语义
+- 允许普通聊天消息自动绕过结构化问题集等待态
 
 以下变更视为兼容扩展：
 
 - 新增可选字段
 - 新增非破坏性的 `reason_code`
-- 为 `requested_length_direction` 增加可选提示字段
+- 为 review / answer 对象增加 debug-only 引用字段

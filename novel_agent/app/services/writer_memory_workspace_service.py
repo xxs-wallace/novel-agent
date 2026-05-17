@@ -46,6 +46,7 @@ class WriterMemoryWorkspaceService:
             )
         else:
             self._ensure_writer_schema_and_assets(book_id=book_id, writer_db_path=writer_db_path, memory_root=memory_root)
+            self._sync_creative_kb_from_source(source_db_path=source_db_path, writer_db_path=writer_db_path)
         return WriterMemoryWorkspace(
             source_db_path=source_db_path,
             writer_db_path=writer_db_path,
@@ -111,6 +112,52 @@ class WriterMemoryWorkspaceService:
             self._upsert_writer_assets(conn, book_id=book_id, asset_row=asset_row, paths=paths)
             conn.commit()
 
+    def _sync_creative_kb_from_source(self, *, source_db_path: Path, writer_db_path: Path) -> None:
+        if not source_db_path.exists() or not writer_db_path.exists():
+            return
+
+        source_db = NovelAgentDB(source_db_path)
+        with source_db.connect() as source_conn:
+            source_db.init_schema(source_conn)
+            init_creative_kb_schema(source_conn)
+            source_counts = self._creative_kb_counts(source_conn)
+        if source_counts["fragment_cards"] <= 0:
+            return
+
+        writer_db = NovelAgentDB(writer_db_path)
+        with writer_db.connect() as writer_conn:
+            writer_db.init_schema(writer_conn)
+            init_creative_kb_schema(writer_conn)
+            writer_counts = self._creative_kb_counts(writer_conn)
+            if (
+                writer_counts["fragment_cards"] >= source_counts["fragment_cards"]
+                and writer_counts["fragment_clusters"] >= source_counts["fragment_clusters"]
+            ):
+                return
+
+            attached = False
+            try:
+                writer_conn.execute("ATTACH DATABASE ? AS source_db", (str(source_db_path),))
+                attached = True
+                for table in ("fragment_clusters", "fragment_cards_fts", "fragment_cards", "semantic_aliases"):
+                    writer_conn.execute(f"DELETE FROM {table}")
+                for table in ("fragment_cards", "fragment_clusters", "fragment_cards_fts", "semantic_aliases"):
+                    writer_conn.execute(f"INSERT INTO {table} SELECT * FROM source_db.{table}")
+                writer_conn.commit()
+            except Exception:
+                writer_conn.rollback()
+                raise
+            finally:
+                if attached:
+                    writer_conn.execute("DETACH DATABASE source_db")
+
+    @staticmethod
+    def _creative_kb_counts(conn: sqlite3.Connection) -> dict[str, int]:
+        return {
+            "fragment_cards": _count_table(conn, "fragment_cards"),
+            "fragment_clusters": _count_table(conn, "fragment_clusters"),
+        }
+
     def _writer_asset_paths(self, *, memory_root: Path, book_id: str) -> dict[str, Path]:
         return {
             "world_markdown_path": memory_root / "worlds" / f"{book_id}.world.md",
@@ -149,3 +196,8 @@ class WriterMemoryWorkspaceService:
                 "updated_at": _utc_now(),
             },
         )
+
+
+def _count_table(conn: sqlite3.Connection, table: str) -> int:
+    row = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+    return int(row["count"] or 0) if row is not None else 0

@@ -237,6 +237,15 @@ document -> summary -> event list -> event summary
 
 该层不要求保存原文 offset，不要求把每个人物证据反查到具体 `doc_id`。
 
+Character Evidence Agent 输入中的 `existing_character_roster` 必须携带稳定人物映射：
+
+- `character_id`
+- `canonical_name`
+- `aliases`
+- 必要的短标签，例如阶段、职业、最近出现位置和发言状态
+
+当模型判断正文中的称呼指向 roster 中已有角色时，输出应同时返回 `character_id` 与 `canonical_name`。`character_id` 是后续人物档案更新的优先索引；`canonical_name` 仅作为可读标签和兼容字段。若人物不在 roster 中，`character_id` 为空，并用 `resolution_status = new_or_unresolved` 或等价状态标明需要后续身份归并。这样可以避免同一人物因别名、称谓或临时称呼被 close-read 写成多个档案。
+
 ### 3.8 Source Arc Map
 
 保存 close-read 后的源作品事实型篇章地图：
@@ -586,9 +595,21 @@ source text + toc/bookmarks
 - `character_profiles.story_events_json` 保存人物维度 event list
 - close-read 写回时从 `outline_update.timeline_events` 的 `participants` 反向聚合到相关人物
 - `profile_summary_md` 按两层渲染：
-  - `## 基本属性/关系/能力`
+  - `## 基本属性/能力`
   - `## 剧情时间线`
 - 剧情时间线的每条事件必须显示 `event_id` 与 `documents` 范围，方便模型二次请求原文
+
+关系信息只保存在结构化 `relationships_json`，并由 UI 的“关系网络”或 Writer 的结构化人物上下文单独消费。`profile_summary_md` 不再展开关系明细，最多保留一句“关系见 relationships_json / 关系网络”的提示或完全省略关系段。这样避免“已确认事实 / 基本信息”与“关系网络”展示同一批关系事实，也避免 Writer prompt 同时从摘要文本和结构化关系列表读到重复甚至互相覆盖的关系描述。
+
+人物性证据、基础属性和关系更新都不能长期采用纯 append。新的 close-read 写回应采用“逐人物档案更新 Agent Loop”：
+
+1. Character Evidence Agent 先输出本批次涉及人物，并尽量对齐 `character_id`。
+2. 本地 Agent 按 `character_id` 优先、`canonical_name / aliases` 兜底，分别读取每个涉及人物的现有人物档案。
+3. 对每个涉及人物单独调用 Character Reduce / Profile Update Agent；每条 prompt 只包含该人物的既有档案、该人物在本批次的 ordered evidence、章节摘要和必要的来源索引。
+4. 模型输出该人物的增量更新或重写后的局部字段，覆盖范围包括人物性证据、基础属性、发言状态、近期活动、关系、剧情事件索引；不得一次性把所有人物档案拼入同一条 prompt。
+5. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，剧情事件按 `event_id` 合并。
+
+该 loop 的目的不是让模型自由重写整个档案，而是在有限 evidence 和现有档案之间做语义归并，减少重复、别名分裂和关系冲突。
 
 ### 4.5 世界观维护
 
@@ -1004,8 +1025,10 @@ Detector 的输出进入两个地方：
 - batch 可由多个连续 `documents` 拼接而成
 - 输出 batch-level 人物抽取结果
 - 对每个候选人物输出：
+  - `character_id`
   - `canonical_name`
   - `aliases`
+  - `resolution_status`
   - `is_speaking_character`
   - `speaking_evidence`
   - `personhood_evidence`
@@ -1020,6 +1043,8 @@ Detector 的输出进入两个地方：
 - 输出原文连续子串
 - 输出 offset
 - 直接写入人物档案
+
+当输入提供 `existing_character_roster` 时，Character Evidence Agent 应把正文称呼解析到 roster 中的 `character_id`。若只确认了 canonical name 但不能确认 id，必须通过 `resolution_status` 标注为 `unresolved_alias` 或等价状态，交给后续身份归并服务处理。
 
 ### 10.3 Memory Candidate Agent
 
@@ -1036,6 +1061,23 @@ Detector 的输出进入两个地方：
 - `provisional` 大纲更新候选
 
 该层负责判断哪些人物事实值得写入长期 Memory，并过滤低置信人物候选。
+
+人物更新候选的实际落地应拆为逐人物 loop，而不是一次性 Memory Candidate prompt 输出所有人的最终更新。推荐边界：
+
+- `Memory Candidate Agent` 负责把 Character Evidence 过滤为“本批次值得更新的人物集合”，保留 `character_id`、`canonical_name`、source ids 和 confidence。
+- `Character Reduce / Profile Update Agent` 负责逐人物更新，每次只处理一个人物。
+- 本地 merge 层负责把模型 patch 写回长期档案，并维护结构化去重。
+
+逐人物 prompt 至少包含：
+
+- `target_character_id`
+- `target_canonical_name`
+- `existing_profile`
+- `ordered_character_evidence`
+- `chapter_summary`
+- `profile_update_policy`
+
+`profile_update_policy` 必须声明：不要重复已有同义事实；人物性证据、基础属性和关系都要归并；关系明细写入 `relationships`，不要再复制进 `profile_summary_md`。
 
 ### 10.3.1 Summary / Outline Commit 状态
 

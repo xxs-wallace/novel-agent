@@ -1,4 +1,5 @@
 __all__ = [
+    "ArtifactReviewDecision",
     "ChapterLengthBudget",
     "ChapterLengthPlan",
     "ChapterReplanRequest",
@@ -6,16 +7,29 @@ __all__ = [
     "ContinuityReport",
     "GenerationReviewDecision",
     "LengthPlanUpdate",
+    "OutlineResearchAnswerSubmission",
+    "OutlineResearchQuestion",
+    "OutlineResearchQuestionSet",
+    "OutlineResearchUserAnswer",
     "RunConfig",
     "ScenePlan",
+    "WriterLoopEvent",
+    "WriterLoopStep",
 ]
 
 from novel_agent.app.schemas.orchestration_schema import (
+    ArtifactReviewDecision,
     ChapterLengthBudget,
     ChapterLengthPlan,
     ChapterReplanRequest,
     GenerationReviewDecision,
     LengthPlanUpdate,
+    OutlineResearchAnswerSubmission,
+    OutlineResearchQuestion,
+    OutlineResearchQuestionSet,
+    OutlineResearchUserAnswer,
+    WriterLoopEvent,
+    WriterLoopStep,
 )
 from .continuity import ContinuityIssue, ContinuityReport
 from .run_config import RunConfig

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,16 +21,6 @@ from ..schemas.source_arc_schema import (
 )
 from ..utils.text_utils import normalize_whitespace, safe_excerpt
 from .plot_summary_unit_compression_service import PlotSummaryUnitCompressionService
-
-
-ROLE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("高潮", ("高潮", "决战", "大战", "爆发", "生死", "危机", "击败", "最终", "崩溃")),
-    ("收束", ("收束", "结束", "告别", "回收", "尘埃落定", "余波", "后果")),
-    ("设定揭示", ("世界", "规则", "设定", "能力", "组织", "血统", "禁忌", "真相", "秘密", "体系")),
-    ("日常关系", ("日常", "生活", "闲聊", "对话", "内心", "情绪", "关系", "信任", "误会", "和解", "告白")),
-    ("过渡缓冲", ("前往", "抵达", "离开", "准备", "转场", "过渡", "暂时", "等待", "休整")),
-    ("主线推进", ("调查", "追查", "目标", "任务", "线索", "行动", "冲突", "推进", "发现", "决定")),
-)
 
 
 class SourceArcMappingService:
@@ -89,27 +78,17 @@ class SourceArcMappingService:
         character_profile_summaries: Sequence[str] = (),
     ) -> SourceArcMap:
         ordered_summaries = sorted(summaries, key=lambda item: item.document_title_index)
+        if not self._should_use_model():
+            raise RuntimeError("SourceArcMappingService requires an available model_client")
         compression = self.compression_service.compress_if_needed(ordered_summaries)
-        role_items = self._build_role_items(
-            summaries=ordered_summaries,
-            units=compression.units if compression.used_compression else [],
-        )
-        fallback_arcs = self._group_role_items_into_arcs(
+        arcs = self._build_arcs_with_model(
             book_id=book_id,
-            role_items=role_items,
-            character_names=character_names,
+            summaries=ordered_summaries,
+            plot_summary_units=compression.units if compression.used_compression else [],
+            story_outline_md=story_outline_md,
+            world_summary_md=world_summary_md,
+            character_profile_summaries=character_profile_summaries,
         )
-        arcs = fallback_arcs
-        if self._should_use_model():
-            arcs = self._build_arcs_with_model(
-                book_id=book_id,
-                summaries=ordered_summaries,
-                plot_summary_units=compression.units if compression.used_compression else [],
-                story_outline_md=story_outline_md,
-                world_summary_md=world_summary_md,
-                character_profile_summaries=character_profile_summaries,
-                fallback_arcs=fallback_arcs,
-            )
         return SourceArcMap(
             book_id=book_id,
             generated_at=self.now_factory(),
@@ -216,86 +195,58 @@ class SourceArcMappingService:
                 )
         return "\n".join(lines).strip() + "\n"
 
-    def _build_role_items(
+    def _source_arc_output_schema(
         self,
         *,
         summaries: Sequence[ChapterPlotSummary],
-        units: Sequence[PlotSummaryUnit],
-    ) -> list[SourceArcChapterRole]:
-        if units:
-            return [
-                SourceArcChapterRole(
-                    document_title_index=unit.start_document_title_index,
-                    chapter_title=f"压缩单元 {unit.start_document_title_index}-{unit.end_document_title_index}",
-                    role=self._infer_role(unit.unit_summary),
-                    reason=self._role_reason(unit.unit_summary),
-                    evidence_window=f"{unit.start_document_title_index}-{unit.end_document_title_index}",
-                    target_range=f"{unit.start_document_title_index}-{unit.end_document_title_index}",
-                    source_doc_ids=list(unit.source_doc_ids),
-                )
-                for unit in units
+        plot_summary_units: Sequence[PlotSummaryUnit],
+    ) -> dict[str, Any]:
+        if plot_summary_units:
+            first_index = plot_summary_units[0].start_document_title_index
+            last_index = plot_summary_units[-1].end_document_title_index
+            first_title = f"压缩单元 {first_index}-{plot_summary_units[0].end_document_title_index}"
+        elif summaries:
+            first_index = summaries[0].document_title_index
+            last_index = summaries[-1].document_title_index
+            first_title = summaries[0].chapter_title
+        else:
+            first_index = 0
+            last_index = 0
+            first_title = ""
+        return {
+            "arcs": [
+                {
+                    "source_arc_id": "source-arc-0001",
+                    "source_arc_title": "",
+                    "start_document_title_index": first_index,
+                    "end_document_title_index": last_index,
+                    "source_arc_role": "",
+                    "role_status": "committed",
+                    "evidence_window": f"{first_index}-{last_index}" if first_index and last_index else "",
+                    "target_range": f"{first_index}-{last_index}" if first_index and last_index else "",
+                    "core_events": [],
+                    "main_character_threads": [],
+                    "world_or_rule_reveals": [],
+                    "transition_from_previous": "",
+                    "setup_for_next": "",
+                    "pacing_notes": "",
+                    "chapter_role_map": [
+                        {
+                            "document_title_index": first_index,
+                            "chapter_title": first_title,
+                            "role": "",
+                            "reason": "",
+                            "role_status": "committed",
+                            "evidence_window": f"{first_index}-{first_index}" if first_index else "",
+                            "target_range": f"{first_index}-{first_index}" if first_index else "",
+                            "source_doc_ids": [],
+                            "narrative_function_summary": "",
+                            "emotional_setup_notes": [],
+                        }
+                    ],
+                }
             ]
-        return [
-            SourceArcChapterRole(
-                document_title_index=item.document_title_index,
-                chapter_title=item.chapter_title,
-                role=self._infer_role(self._summary_text(item)),
-                reason=self._role_reason(self._summary_text(item)),
-                evidence_window=f"{item.document_title_index}-{item.document_title_index}",
-                target_range=f"{item.document_title_index}-{item.document_title_index}",
-                source_doc_ids=list(item.source_doc_ids),
-            )
-            for item in summaries
-        ]
-
-    def _group_role_items_into_arcs(
-        self,
-        *,
-        book_id: str,
-        role_items: Sequence[SourceArcChapterRole],
-        character_names: Sequence[str],
-    ) -> list[SourceArc]:
-        if not role_items:
-            return []
-        groups: list[list[SourceArcChapterRole]] = []
-        current: list[SourceArcChapterRole] = [role_items[0]]
-        for item in role_items[1:]:
-            previous = current[-1]
-            if item.role == previous.role:
-                current.append(item)
-                continue
-            groups.append(current)
-            current = [item]
-        groups.append(current)
-
-        arcs: list[SourceArc] = []
-        for index, group in enumerate(groups, start=1):
-            role = self._dominant_role(group)
-            start_index = group[0].document_title_index
-            end_index = group[-1].document_title_index
-            source_arc_id = f"source-arc-{index:04d}"
-            source_arc_title = self._arc_title(role=role, start_index=start_index, end_index=end_index)
-            core_events = [self._role_event_line(item) for item in group]
-            arcs.append(
-                SourceArc(
-                    book_id=book_id,
-                    source_arc_id=source_arc_id,
-                    source_arc_title=source_arc_title,
-                    start_document_title_index=start_index,
-                    end_document_title_index=end_index,
-                    source_arc_role=role,
-                    evidence_window=f"{start_index}-{end_index}",
-                    target_range=f"{start_index}-{end_index}",
-                    core_events=core_events,
-                    main_character_threads=self._character_threads(group, character_names=character_names),
-                    world_or_rule_reveals=self._world_reveals(group),
-                    transition_from_previous=self._transition_from_previous(arcs[-1] if arcs else None, group),
-                    setup_for_next=self._setup_for_next(group),
-                    pacing_notes=self._pacing_notes(role=role, group=group),
-                    chapter_role_map=list(group),
-                )
-            )
-        return arcs
+        }
 
     def _build_arcs_with_model(
         self,
@@ -306,11 +257,11 @@ class SourceArcMappingService:
         story_outline_md: str,
         world_summary_md: str,
         character_profile_summaries: Sequence[str],
-        fallback_arcs: Sequence[SourceArc],
     ) -> list[SourceArc]:
-        fallback_payload = {
-            "arcs": [arc.to_dict() for arc in fallback_arcs],
-        }
+        output_schema = self._source_arc_output_schema(
+            summaries=summaries,
+            plot_summary_units=plot_summary_units,
+        )
         system_prompt, user_prompt = build_source_arc_map_prompt(
             book_id=book_id,
             summaries=summaries,
@@ -318,29 +269,29 @@ class SourceArcMappingService:
             story_outline_md=story_outline_md,
             world_summary_md=world_summary_md,
             character_profile_summaries=character_profile_summaries,
-            fallback_payload=fallback_payload,
+            output_schema=output_schema,
         )
         payload, _ = self.model_client.generate_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            fallback_factory=lambda: fallback_payload,
-            use_fallback_on_error=True,
+            fallback_factory=lambda: output_schema,
+            use_fallback_on_error=False,
         )
         if not isinstance(payload, dict):
-            return list(fallback_arcs)
+            raise RuntimeError("Source Arc Mapping model returned a non-object JSON payload")
         raw_arcs = payload.get("arcs")
         if not isinstance(raw_arcs, list):
-            return list(fallback_arcs)
-        fallback_by_index = {index: arc for index, arc in enumerate(fallback_arcs)}
+            raise RuntimeError("Source Arc Mapping model returned invalid arcs field")
         arcs: list[SourceArc] = []
         for index, item in enumerate(raw_arcs, start=1):
             if not isinstance(item, dict):
                 continue
-            fallback_arc = fallback_by_index.get(index - 1)
-            parsed = self._arc_from_payload(book_id=book_id, index=index, payload=item, fallback_arc=fallback_arc)
+            parsed = self._arc_from_payload(book_id=book_id, index=index, payload=item)
             if parsed is not None:
                 arcs.append(parsed)
-        return arcs or list(fallback_arcs)
+        if not arcs:
+            raise RuntimeError("Source Arc Mapping model returned no usable arcs")
+        return arcs
 
     def _arc_from_payload(
         self,
@@ -348,67 +299,31 @@ class SourceArcMappingService:
         book_id: str,
         index: int,
         payload: dict[str, Any],
-        fallback_arc: SourceArc | None,
     ) -> SourceArc | None:
-        start_index = self._payload_int(
-            payload,
-            "start_document_title_index",
-            fallback_arc.start_document_title_index if fallback_arc else 0,
-        )
-        end_index = self._payload_int(
-            payload,
-            "end_document_title_index",
-            fallback_arc.end_document_title_index if fallback_arc else start_index,
-        )
-        if start_index < 0 and fallback_arc is None:
+        start_index = self._required_payload_int(payload, "start_document_title_index")
+        end_index = self._required_payload_int(payload, "end_document_title_index")
+        if start_index < 0:
             return None
         if end_index < start_index:
-            end_index = start_index
-        role = self._payload_text(payload, "source_arc_role", fallback_arc.source_arc_role if fallback_arc else "主线推进")
-        chapter_role_map = self._chapter_role_map_from_payload(
-            payload=payload,
-            fallback_items=list(fallback_arc.chapter_role_map) if fallback_arc else [],
-        )
+            raise RuntimeError("Source Arc Mapping model returned an invalid arc range")
+        role = self._required_payload_text(payload, "source_arc_role")
+        chapter_role_map = self._chapter_role_map_from_payload(payload=payload)
         return SourceArc(
             book_id=book_id,
-            source_arc_id=self._payload_text(payload, "source_arc_id", f"source-arc-{index:04d}"),
-            source_arc_title=self._payload_text(
-                payload,
-                "source_arc_title",
-                fallback_arc.source_arc_title if fallback_arc else self._arc_title(role=role, start_index=start_index, end_index=end_index),
-            ),
+            source_arc_id=self._payload_text(payload, "source_arc_id") or f"source-arc-{index:04d}",
+            source_arc_title=self._required_payload_text(payload, "source_arc_title"),
             start_document_title_index=start_index,
             end_document_title_index=end_index,
             source_arc_role=role,
-            role_status=self._payload_text(payload, "role_status", fallback_arc.role_status if fallback_arc else "committed"),
-            evidence_window=self._payload_text(
-                payload,
-                "evidence_window",
-                fallback_arc.evidence_window if fallback_arc else f"{start_index}-{end_index}",
-            ),
-            target_range=self._payload_text(
-                payload,
-                "target_range",
-                fallback_arc.target_range if fallback_arc else f"{start_index}-{end_index}",
-            ),
-            core_events=self._payload_str_list(payload, "core_events", fallback_arc.core_events if fallback_arc else []),
-            main_character_threads=self._payload_str_list(
-                payload,
-                "main_character_threads",
-                fallback_arc.main_character_threads if fallback_arc else [],
-            ),
-            world_or_rule_reveals=self._payload_str_list(
-                payload,
-                "world_or_rule_reveals",
-                fallback_arc.world_or_rule_reveals if fallback_arc else [],
-            ),
-            transition_from_previous=self._payload_text(
-                payload,
-                "transition_from_previous",
-                fallback_arc.transition_from_previous if fallback_arc else "",
-            ),
-            setup_for_next=self._payload_text(payload, "setup_for_next", fallback_arc.setup_for_next if fallback_arc else ""),
-            pacing_notes=self._payload_text(payload, "pacing_notes", fallback_arc.pacing_notes if fallback_arc else ""),
+            role_status=self._payload_text(payload, "role_status") or "committed",
+            evidence_window=self._payload_text(payload, "evidence_window") or f"{start_index}-{end_index}",
+            target_range=self._payload_text(payload, "target_range") or f"{start_index}-{end_index}",
+            core_events=self._required_payload_str_list(payload, "core_events"),
+            main_character_threads=self._payload_str_list(payload, "main_character_threads"),
+            world_or_rule_reveals=self._payload_str_list(payload, "world_or_rule_reveals"),
+            transition_from_previous=self._payload_text(payload, "transition_from_previous"),
+            setup_for_next=self._payload_text(payload, "setup_for_next"),
+            pacing_notes=self._required_payload_text(payload, "pacing_notes"),
             chapter_role_map=chapter_role_map,
         )
 
@@ -416,164 +331,78 @@ class SourceArcMappingService:
         self,
         *,
         payload: dict[str, Any],
-        fallback_items: Sequence[SourceArcChapterRole],
     ) -> list[SourceArcChapterRole]:
         raw_items = payload.get("chapter_role_map")
         if not isinstance(raw_items, list):
-            return list(fallback_items)
+            return []
         parsed: list[SourceArcChapterRole] = []
-        fallback_by_index = {index: item for index, item in enumerate(fallback_items)}
-        for index, item in enumerate(raw_items):
+        for item in raw_items:
             if not isinstance(item, dict):
                 continue
-            fallback = fallback_by_index.get(index)
-            title_index = self._payload_int(
-                item,
-                "document_title_index",
-                fallback.document_title_index if fallback else 0,
-            )
-            if title_index < 0 and fallback is None:
+            title_index = self._required_payload_int(item, "document_title_index")
+            if title_index < 0:
                 continue
             parsed.append(
                 SourceArcChapterRole(
                     document_title_index=title_index,
-                    chapter_title=self._payload_text(item, "chapter_title", fallback.chapter_title if fallback else ""),
-                    role=self._payload_text(item, "role", fallback.role if fallback else "主线推进"),
-                    reason=self._payload_text(item, "reason", fallback.reason if fallback else ""),
-                    role_status=self._payload_text(item, "role_status", fallback.role_status if fallback else "committed"),
-                    evidence_window=self._payload_text(
-                        item,
-                        "evidence_window",
-                        fallback.evidence_window if fallback else f"{title_index}-{title_index}",
-                    ),
-                    target_range=self._payload_text(
-                        item,
-                        "target_range",
-                        fallback.target_range if fallback else f"{title_index}-{title_index}",
-                    ),
-                    source_doc_ids=self._payload_int_list(item, "source_doc_ids", fallback.source_doc_ids if fallback else []),
-                    narrative_function_summary=self._payload_text(
-                        item,
-                        "narrative_function_summary",
-                        fallback.narrative_function_summary if fallback else "",
-                    ),
-                    emotional_setup_notes=self._payload_str_list(
-                        item,
-                        "emotional_setup_notes",
-                        fallback.emotional_setup_notes if fallback else [],
-                    ),
+                    chapter_title=self._required_payload_text(item, "chapter_title"),
+                    role=self._required_payload_text(item, "role"),
+                    reason=self._payload_text(item, "reason"),
+                    role_status=self._payload_text(item, "role_status") or "committed",
+                    evidence_window=self._payload_text(item, "evidence_window") or f"{title_index}-{title_index}",
+                    target_range=self._payload_text(item, "target_range") or f"{title_index}-{title_index}",
+                    source_doc_ids=self._payload_int_list(item, "source_doc_ids"),
+                    narrative_function_summary=self._payload_text(item, "narrative_function_summary"),
+                    emotional_setup_notes=self._payload_str_list(item, "emotional_setup_notes"),
                 )
             )
-        return parsed or list(fallback_items)
-
-    def _dominant_role(self, group: Sequence[SourceArcChapterRole]) -> str:
-        counts = Counter(item.role for item in group)
-        return counts.most_common(1)[0][0]
-
-    def _infer_role(self, text: str) -> str:
-        normalized = normalize_whitespace(text)
-        for role, keywords in ROLE_KEYWORDS:
-            if any(keyword in normalized for keyword in keywords):
-                return role
-        return "主线推进"
-
-    def _role_reason(self, text: str) -> str:
-        normalized = normalize_whitespace(text)
-        for role, keywords in ROLE_KEYWORDS:
-            matched = [keyword for keyword in keywords if keyword in normalized][:3]
-            if matched:
-                return f"命中{role}线索：" + "、".join(matched)
-        return "未命中特定结构词，按主线推进处理"
-
-    def _role_event_line(self, item: SourceArcChapterRole) -> str:
-        return f"[{item.document_title_index}] {item.chapter_title}: {item.reason}"
-
-    def _arc_title(self, *, role: str, start_index: int, end_index: int) -> str:
-        if start_index == end_index:
-            return f"{role}单元（{start_index}）"
-        return f"{role}单元（{start_index}-{end_index}）"
-
-    def _character_threads(
-        self,
-        group: Sequence[SourceArcChapterRole],
-        *,
-        character_names: Sequence[str],
-    ) -> list[str]:
-        joined = " ".join(f"{item.chapter_title} {item.reason}" for item in group)
-        threads: list[str] = []
-        for name in character_names:
-            if name and name in joined:
-                threads.append(f"{name} 在 {group[0].document_title_index}-{group[-1].document_title_index} 段落中持续出现")
-            if len(threads) >= 6:
-                break
-        if threads:
-            return threads
-        return ["人物线需结合章节摘要进一步确认"]
-
-    def _world_reveals(self, group: Sequence[SourceArcChapterRole]) -> list[str]:
-        reveals = [
-            self._role_event_line(item)
-            for item in group
-            if item.role == "设定揭示" or any(keyword in item.reason for keyword in ("世界", "规则", "设定", "能力", "真相"))
-        ]
-        return reveals[:6]
-
-    def _transition_from_previous(
-        self,
-        previous_arc: SourceArc | None,
-        group: Sequence[SourceArcChapterRole],
-    ) -> str:
-        if previous_arc is None:
-            return "源作品开篇或当前已读范围的起点"
-        return f"由 {previous_arc.source_arc_role} 转入 {group[0].role}"
-
-    def _setup_for_next(self, group: Sequence[SourceArcChapterRole]) -> str:
-        last = group[-1]
-        return f"[{last.document_title_index}] 后续应关注该段落留下的人物状态、未回收线索与结构转场"
-
-    def _pacing_notes(self, *, role: str, group: Sequence[SourceArcChapterRole]) -> str:
-        length = len(group)
-        if role in {"日常关系", "过渡缓冲"}:
-            return f"低冲突但有铺垫价值，持续 {length} 个结构单元"
-        if role == "高潮":
-            return f"高强度冲突或危机段，持续 {length} 个结构单元"
-        if role == "设定揭示":
-            return f"设定信息密度较高，持续 {length} 个结构单元"
-        return f"剧情推进段，持续 {length} 个结构单元"
+        return parsed
 
     def _summary_text(self, item: ChapterPlotSummary) -> str:
         return normalize_whitespace(item.summary_md or item.summary_short)
 
-    def _payload_text(self, payload: dict[str, Any], key: str, fallback: str) -> str:
+    def _required_payload_text(self, payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)
         text = normalize_whitespace(str(value or ""))
-        return text or fallback
+        if not text:
+            raise RuntimeError(f"Source Arc Mapping model returned empty {key}")
+        return text
 
-    def _payload_int(self, payload: dict[str, Any], key: str, fallback: int) -> int:
+    def _payload_text(self, payload: dict[str, Any], key: str) -> str:
+        value = payload.get(key)
+        return normalize_whitespace(str(value or ""))
+
+    def _required_payload_int(self, payload: dict[str, Any], key: str) -> int:
         value = payload.get(key)
         try:
             return int(value)
         except (TypeError, ValueError):
-            return int(fallback)
+            raise RuntimeError(f"Source Arc Mapping model returned invalid {key}") from None
 
-    def _payload_str_list(self, payload: dict[str, Any], key: str, fallback: Sequence[str]) -> list[str]:
+    def _required_payload_str_list(self, payload: dict[str, Any], key: str) -> list[str]:
+        items = self._payload_str_list(payload, key)
+        if not items:
+            raise RuntimeError(f"Source Arc Mapping model returned empty {key}")
+        return items
+
+    def _payload_str_list(self, payload: dict[str, Any], key: str) -> list[str]:
         value = payload.get(key)
         if not isinstance(value, list):
-            return list(fallback)
+            return []
         items = [normalize_whitespace(str(item)) for item in value if normalize_whitespace(str(item))]
-        return items or list(fallback)
+        return items
 
-    def _payload_int_list(self, payload: dict[str, Any], key: str, fallback: Sequence[int]) -> list[int]:
+    def _payload_int_list(self, payload: dict[str, Any], key: str) -> list[int]:
         value = payload.get(key)
         if not isinstance(value, list):
-            return list(fallback)
+            return []
         items: list[int] = []
         for item in value:
             try:
                 items.append(int(item))
             except (TypeError, ValueError):
                 continue
-        return items or list(fallback)
+        return items
 
     def _should_use_model(self) -> bool:
         if self.model_client is None:

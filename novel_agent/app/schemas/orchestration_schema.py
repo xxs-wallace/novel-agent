@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Sequence, cast
 
 from .context_assembly_schema import ContextAssemblyPayload
@@ -50,17 +51,64 @@ FREEZE_STAGE_TO_DOWNSTREAM = {
 }
 FREEZE_ARTIFACT_KINDS = {"json", "text", "markdown"}
 FREEZE_RECORD_STATUSES = {"frozen", "invalidated"}
+WRITER_AGENT_STATES = {
+    "agent_running",
+    "reviewing_artifact",
+    "needs_user_input",
+    "generating_draft",
+    "reviewing_draft",
+    "writeback_review",
+    "completed",
+    "halted",
+    "error",
+}
+ARTIFACT_REVIEW_DECISIONS = {"approved", "revision_requested", "deferred"}
+ARTIFACT_REVIEW_NEXT_ACTIONS = {
+    "continue_agent_loop",
+    "revise_artifact",
+    "defer_review",
+}
+WRITER_LOOP_EVENT_KINDS = {
+    "local_tool_call",
+    "user_question",
+    "artifact_generated",
+    "artifact_review",
+    "draft_review",
+    "writeback_review",
+}
+WRITER_LOOP_STEP_STATUSES = {
+    "started",
+    "completed",
+    "waiting",
+    "failed",
+}
 GENERATION_REVIEW_STATUSES = {
     "accepted",
-    "revise_length",
-    "replan_chapter",
+    "rewrite_requested",
+    "replan_requested",
     "discarded",
+}
+LEGACY_GENERATION_REVIEW_STATUS_ALIASES = {
+    "revise_length": "rewrite_requested",
+    "replan_chapter": "replan_requested",
 }
 GENERATION_REVIEW_CHECKPOINTS = {
     "freeze_e",
     "wait_length_review",
     "wait_chapter_review",
     "halted",
+}
+GENERATION_REVIEW_NEXT_ACTIONS = {
+    "writeback_review",
+    "agent_loop_rewrite_draft",
+    "agent_loop_replan_chapter",
+    "halted",
+}
+LEGACY_GENERATION_REVIEW_CHECKPOINT_TO_ACTION = {
+    "freeze_e": "writeback_review",
+    "wait_length_review": "agent_loop_rewrite_draft",
+    "wait_chapter_review": "agent_loop_replan_chapter",
+    "halted": "halted",
 }
 CHAPTER_REPLAN_SCOPES = {"current_chapter"}
 FACT_STATUSES = {
@@ -85,6 +133,7 @@ SUFFICIENCY_STATUSES = {
     "proceed_with_assumptions",
     "blocked",
 }
+OUTLINE_RESEARCH_QUESTION_SET_STATUSES = {"pending", "submitted", "deferred"}
 
 
 def _normalize_text(value: object) -> str:
@@ -112,7 +161,33 @@ def _normalize_evidence_level(value: object) -> str:
     return EVIDENCE_LEVEL_ALIASES.get(normalized_level) or EVIDENCE_LEVEL_ALIASES.get(alias_key) or normalized_level
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 FreezeStage = Literal["freeze_a", "freeze_b", "freeze_c", "freeze_d", "freeze_e"]
+WriterAgentState = Literal[
+    "agent_running",
+    "reviewing_artifact",
+    "needs_user_input",
+    "generating_draft",
+    "reviewing_draft",
+    "writeback_review",
+    "completed",
+    "halted",
+    "error",
+]
+ArtifactReviewDecisionValue = Literal["approved", "revision_requested", "deferred"]
+ArtifactReviewNextAction = Literal["continue_agent_loop", "revise_artifact", "defer_review"]
+WriterLoopEventKind = Literal[
+    "local_tool_call",
+    "user_question",
+    "artifact_generated",
+    "artifact_review",
+    "draft_review",
+    "writeback_review",
+]
+WriterLoopStepStatus = Literal["started", "completed", "waiting", "failed"]
 EvidenceLevel = Literal[
     "original_fact",
     "confirmed_analysis",
@@ -123,8 +198,8 @@ FreezeArtifactKind = Literal["json", "text", "markdown"]
 FreezeRecordStatus = Literal["frozen", "invalidated"]
 GenerationReviewStatus = Literal[
     "accepted",
-    "revise_length",
-    "replan_chapter",
+    "rewrite_requested",
+    "replan_requested",
     "discarded",
 ]
 GenerationReviewCheckpoint = Literal[
@@ -140,6 +215,7 @@ ResearchPriority = Literal["high", "medium", "low"]
 CharacterMentionStatus = Literal["resolved", "ambiguous", "missing"]
 CharacterMentionType = Literal["name", "alias", "title", "new_character_hint"]
 SufficiencyStatus = Literal["enough", "needs_user_input", "proceed_with_assumptions", "blocked"]
+OutlineResearchQuestionSetStatus = Literal["pending", "submitted", "deferred"]
 
 
 @dataclass(slots=True)
@@ -161,7 +237,9 @@ class TraceableSource:
         self.note = _normalize_text(self.note)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["legacy_migration_only"] = True
+        return payload
 
 
 def _normalize_fact_status(value: object) -> str:
@@ -177,6 +255,12 @@ def _normalize_fact_status(value: object) -> str:
         "unknown": "missing",
     }
     return aliases.get(normalized, normalized)
+
+
+def _normalize_generation_review_status(value: object) -> tuple[str, str]:
+    normalized = _normalize_text(value).lower().replace("-", "_")
+    migrated = LEGACY_GENERATION_REVIEW_STATUS_ALIASES.get(normalized, normalized)
+    return migrated, normalized if migrated != normalized else ""
 
 
 def _coerce_sources(items: Sequence[object] | None) -> list[TraceableSource]:
@@ -219,7 +303,9 @@ class ExtractedCharacterMention:
             raise ValueError("character mention text is required")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["legacy_migration_only"] = True
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ExtractedCharacterMention":
@@ -487,7 +573,9 @@ class ResearchBudget:
         self.max_return_tokens_per_request = max(64, int(self.max_return_tokens_per_request or 64))
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["legacy_migration_only"] = True
+        return payload
 
 
 @dataclass(slots=True)
@@ -795,6 +883,254 @@ class SufficiencyDecision:
             remaining_risks=[str(item) for item in (data.get("remaining_risks") or [])],
             required_actions=[str(item) for item in (data.get("required_actions") or [])],
             sources=_coerce_sources(cast(Sequence[object], data.get("sources") or [])),
+        )
+
+
+@dataclass(slots=True)
+class OutlineResearchQuestion:
+    question_id: str
+    prompt: str
+    required: bool = True
+    hint: str = ""
+    gap_id: str = ""
+    risk_level: str = ""
+
+    def __post_init__(self) -> None:
+        self.question_id = _normalize_text(self.question_id)
+        self.prompt = _normalize_text(self.prompt)
+        self.hint = _normalize_text(self.hint)
+        self.gap_id = _normalize_text(self.gap_id)
+        self.risk_level = _normalize_text(self.risk_level)
+        if not self.question_id:
+            raise ValueError("question_id is required")
+        if not self.prompt:
+            raise ValueError("prompt is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "question_id": self.question_id,
+            "prompt": self.prompt,
+            "required": bool(self.required),
+            "hint": self.hint,
+            "gap_id": self.gap_id,
+            "risk_level": self.risk_level,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutlineResearchQuestion":
+        return cls(
+            question_id=str(data.get("question_id") or ""),
+            prompt=str(data.get("prompt") or data.get("question") or ""),
+            required=bool(data.get("required", True)),
+            hint=str(data.get("hint") or ""),
+            gap_id=str(data.get("gap_id") or ""),
+            risk_level=str(data.get("risk_level") or ""),
+        )
+
+
+@dataclass(slots=True)
+class OutlineResearchQuestionSet:
+    question_set_id: str
+    run_id: str
+    questions: list[OutlineResearchQuestion]
+    schema_version: str = "1.0"
+    stage: str = "outline_research_user_input"
+    status: OutlineResearchQuestionSetStatus = "pending"
+    source_artifact_id: str = ""
+    artifact_path: str = ""
+    actions: dict[str, str] = field(
+        default_factory=lambda: {
+            "submit": "continue_after_outline_research_input",
+            "defer": "defer_outline_research_answers",
+        }
+    )
+    created_at: str = field(default_factory=_utc_now_iso)
+
+    def __post_init__(self) -> None:
+        self.schema_version = _normalize_text(self.schema_version) or "1.0"
+        self.question_set_id = _normalize_text(self.question_set_id)
+        self.run_id = _normalize_text(self.run_id)
+        self.stage = _normalize_text(self.stage) or "outline_research_user_input"
+        normalized_status = _normalize_text(self.status).lower()
+        if normalized_status not in OUTLINE_RESEARCH_QUESTION_SET_STATUSES:
+            raise ValueError("status must be pending, submitted, or deferred")
+        self.status = cast(OutlineResearchQuestionSetStatus, normalized_status)
+        self.source_artifact_id = _normalize_text(self.source_artifact_id)
+        self.artifact_path = _normalize_text(self.artifact_path)
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        self.questions = [
+            item
+            if isinstance(item, OutlineResearchQuestion)
+            else OutlineResearchQuestion.from_dict(cast(Mapping[str, Any], item))
+            for item in self.questions
+            if isinstance(item, (OutlineResearchQuestion, Mapping))
+        ]
+        self.actions = {
+            "submit": _normalize_text(
+                (self.actions or {}).get("submit") or "continue_after_outline_research_input"
+            ),
+            "defer": _normalize_text((self.actions or {}).get("defer") or "defer_outline_research_answers"),
+        }
+        if not self.question_set_id:
+            raise ValueError("question_set_id is required")
+        if not self.run_id:
+            raise ValueError("run_id is required")
+        if not self.questions:
+            raise ValueError("questions must include at least one item")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "question_set_id": self.question_set_id,
+            "run_id": self.run_id,
+            "stage": self.stage,
+            "status": self.status,
+            "source_artifact_id": self.source_artifact_id,
+            "artifact_path": self.artifact_path,
+            "questions": [item.to_dict() for item in self.questions],
+            "actions": dict(self.actions),
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutlineResearchQuestionSet":
+        return cls(
+            schema_version=str(data.get("schema_version") or "1.0"),
+            question_set_id=str(data.get("question_set_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            stage=str(data.get("stage") or "outline_research_user_input"),
+            status=cast(OutlineResearchQuestionSetStatus, str(data.get("status") or "pending")),
+            source_artifact_id=str(data.get("source_artifact_id") or ""),
+            artifact_path=str(data.get("artifact_path") or ""),
+            questions=[
+                OutlineResearchQuestion.from_dict(item)
+                for item in (data.get("questions") or [])
+                if isinstance(item, Mapping)
+            ],
+            actions=dict(data.get("actions") or {}),
+            created_at=str(data.get("created_at") or ""),
+        )
+
+    @classmethod
+    def from_sufficiency_decision(
+        cls,
+        *,
+        run_id: str,
+        decision: SufficiencyDecision,
+        artifact_path: str = "",
+        source_artifact_id: str = "",
+    ) -> "OutlineResearchQuestionSet":
+        safe_decision_id = _normalize_text(decision.decision_id).replace(" ", "-") or "needs-user-input"
+        questions: list[OutlineResearchQuestion] = []
+        for index, prompt in enumerate(decision.user_questions, start=1):
+            gap = decision.blocking_gaps[index - 1] if index - 1 < len(decision.blocking_gaps) else ""
+            questions.append(
+                OutlineResearchQuestion(
+                    question_id=f"q{index}",
+                    prompt=prompt,
+                    required=True,
+                    hint=gap,
+                    gap_id=f"gap-{index:03d}" if gap else "",
+                    risk_level="high" if gap else "",
+                )
+            )
+        return cls(
+            question_set_id=f"outline-research-{run_id}-{safe_decision_id}",
+            run_id=run_id,
+            questions=questions,
+            source_artifact_id=source_artifact_id,
+            artifact_path=artifact_path,
+        )
+
+
+@dataclass(slots=True)
+class OutlineResearchUserAnswer:
+    question_id: str
+    answer_text: str
+
+    def __post_init__(self) -> None:
+        self.question_id = _normalize_text(self.question_id)
+        self.answer_text = _normalize_text(self.answer_text)
+        if not self.question_id:
+            raise ValueError("question_id is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"question_id": self.question_id, "answer_text": self.answer_text}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutlineResearchUserAnswer":
+        return cls(
+            question_id=str(data.get("question_id") or ""),
+            answer_text=str(data.get("answer_text") or ""),
+        )
+
+
+@dataclass(slots=True)
+class OutlineResearchAnswerSubmission:
+    submission_id: str
+    question_set_id: str
+    run_id: str
+    answer_text: str
+    user_answers: list[OutlineResearchUserAnswer] = field(default_factory=list)
+    schema_version: str = "1.0"
+    source_message_id: str = ""
+    reviewer_type: str = "user"
+    created_at: str = field(default_factory=_utc_now_iso)
+
+    def __post_init__(self) -> None:
+        self.schema_version = _normalize_text(self.schema_version) or "1.0"
+        self.submission_id = _normalize_text(self.submission_id)
+        self.question_set_id = _normalize_text(self.question_set_id)
+        self.run_id = _normalize_text(self.run_id)
+        self.answer_text = _normalize_text(self.answer_text)
+        self.source_message_id = _normalize_text(self.source_message_id)
+        self.reviewer_type = _normalize_text(self.reviewer_type) or "user"
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        self.user_answers = [
+            item
+            if isinstance(item, OutlineResearchUserAnswer)
+            else OutlineResearchUserAnswer.from_dict(cast(Mapping[str, Any], item))
+            for item in self.user_answers
+            if isinstance(item, (OutlineResearchUserAnswer, Mapping))
+        ]
+        if not self.submission_id:
+            raise ValueError("submission_id is required")
+        if not self.question_set_id:
+            raise ValueError("question_set_id is required")
+        if not self.run_id:
+            raise ValueError("run_id is required")
+        if not self.answer_text:
+            raise ValueError("answer_text is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "submission_id": self.submission_id,
+            "question_set_id": self.question_set_id,
+            "run_id": self.run_id,
+            "source_message_id": self.source_message_id,
+            "answer_text": self.answer_text,
+            "user_answers": [item.to_dict() for item in self.user_answers],
+            "reviewer_type": self.reviewer_type,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutlineResearchAnswerSubmission":
+        return cls(
+            schema_version=str(data.get("schema_version") or "1.0"),
+            submission_id=str(data.get("submission_id") or ""),
+            question_set_id=str(data.get("question_set_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            source_message_id=str(data.get("source_message_id") or ""),
+            answer_text=str(data.get("answer_text") or ""),
+            user_answers=[
+                OutlineResearchUserAnswer.from_dict(item)
+                for item in (data.get("user_answers") or [])
+                if isinstance(item, Mapping)
+            ],
+            reviewer_type=str(data.get("reviewer_type") or "user"),
+            created_at=str(data.get("created_at") or ""),
         )
 
 
@@ -1367,6 +1703,195 @@ class StateDelta:
 
 
 @dataclass(slots=True)
+class ArtifactReviewDecision:
+    schema_version: str = "1.0"
+    review_id: str = ""
+    run_id: str = ""
+    artifact_kind: str = ""
+    decision: ArtifactReviewDecisionValue = "approved"
+    reviewer_type: str = "user"
+    next_action: ArtifactReviewNextAction = "continue_agent_loop"
+    created_at: str = ""
+    artifact_id: str = ""
+    artifact_path: str = ""
+    artifact_version: str = ""
+    supplement_text: str = ""
+    revision_feedback: str = ""
+    source_message_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.schema_version = _normalize_text(self.schema_version) or "1.0"
+        self.review_id = _normalize_text(self.review_id)
+        self.run_id = _normalize_text(self.run_id)
+        self.artifact_kind = _normalize_text(self.artifact_kind)
+        normalized_decision = _normalize_text(self.decision).lower()
+        if normalized_decision not in ARTIFACT_REVIEW_DECISIONS:
+            raise ValueError("decision must be approved, revision_requested, or deferred")
+        self.decision = normalized_decision  # type: ignore[assignment]
+        self.reviewer_type = _normalize_text(self.reviewer_type) or "user"
+        normalized_action = _normalize_text(self.next_action).lower()
+        if normalized_action not in ARTIFACT_REVIEW_NEXT_ACTIONS:
+            raise ValueError("next_action must be continue_agent_loop, revise_artifact, or defer_review")
+        self.next_action = normalized_action  # type: ignore[assignment]
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        self.artifact_id = _normalize_text(self.artifact_id)
+        self.artifact_path = _normalize_text(self.artifact_path)
+        self.artifact_version = _normalize_text(self.artifact_version)
+        self.supplement_text = str(self.supplement_text or "")
+        self.revision_feedback = str(self.revision_feedback or "")
+        self.source_message_id = _normalize_text(self.source_message_id)
+        missing = [
+            name
+            for name in ("schema_version", "review_id", "run_id", "artifact_kind", "decision", "reviewer_type", "next_action", "created_at")
+            if not _normalize_text(getattr(self, name))
+        ]
+        if missing:
+            raise ValueError(f"ArtifactReviewDecision missing required fields: {', '.join(missing)}")
+        if self.decision == "approved":
+            if self.revision_feedback.strip():
+                raise ValueError("approved review decisions must not include revision_feedback")
+            if self.next_action != "continue_agent_loop":
+                raise ValueError("approved review decisions must continue the Agent Loop")
+        elif self.decision == "revision_requested":
+            if not self.revision_feedback.strip():
+                raise ValueError("revision_requested decisions require revision_feedback")
+            if self.supplement_text.strip():
+                raise ValueError("revision_requested decisions must not include supplement_text")
+            if self.next_action != "revise_artifact":
+                raise ValueError("revision_requested decisions must request artifact revision")
+        else:
+            if self.next_action != "defer_review":
+                raise ValueError("deferred review decisions must defer review")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "review_id": self.review_id,
+            "run_id": self.run_id,
+            "artifact_kind": self.artifact_kind,
+            "artifact_id": self.artifact_id,
+            "artifact_path": self.artifact_path,
+            "artifact_version": self.artifact_version,
+            "decision": self.decision,
+            "supplement_text": self.supplement_text,
+            "revision_feedback": self.revision_feedback,
+            "source_message_id": self.source_message_id,
+            "reviewer_type": self.reviewer_type,
+            "next_action": self.next_action,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ArtifactReviewDecision":
+        return cls(
+            schema_version=str(data.get("schema_version") or "1.0"),
+            review_id=str(data.get("review_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            artifact_kind=str(data.get("artifact_kind") or ""),
+            artifact_id=str(data.get("artifact_id") or ""),
+            artifact_path=str(data.get("artifact_path") or ""),
+            artifact_version=str(data.get("artifact_version") or ""),
+            decision=cast(ArtifactReviewDecisionValue, str(data.get("decision") or "approved")),
+            supplement_text=str(data.get("supplement_text") or ""),
+            revision_feedback=str(data.get("revision_feedback") or ""),
+            source_message_id=str(data.get("source_message_id") or ""),
+            reviewer_type=str(data.get("reviewer_type") or "user"),
+            next_action=cast(ArtifactReviewNextAction, str(data.get("next_action") or "continue_agent_loop")),
+            created_at=str(data.get("created_at") or ""),
+        )
+
+
+@dataclass(slots=True)
+class WriterLoopEvent:
+    event_id: str
+    run_id: str
+    event_kind: WriterLoopEventKind
+    agent_state: WriterAgentState
+    technical_stage: str = ""
+    summary: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.event_id = _normalize_text(self.event_id)
+        self.run_id = _normalize_text(self.run_id)
+        normalized_kind = _normalize_text(self.event_kind).lower()
+        if normalized_kind not in WRITER_LOOP_EVENT_KINDS:
+            raise ValueError("event_kind must be a supported Writer loop event kind")
+        self.event_kind = normalized_kind  # type: ignore[assignment]
+        normalized_state = _normalize_text(self.agent_state).lower()
+        if normalized_state not in WRITER_AGENT_STATES:
+            raise ValueError("agent_state must be a supported Writer agent state")
+        self.agent_state = normalized_state  # type: ignore[assignment]
+        self.technical_stage = _normalize_text(self.technical_stage)
+        self.summary = _normalize_text(self.summary)
+        self.payload = {str(key): value for key, value in self.payload.items()}
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        if not self.event_id or not self.run_id:
+            raise ValueError("event_id and run_id are required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "event_kind": self.event_kind,
+            "agent_state": self.agent_state,
+            "technical_stage": self.technical_stage,
+            "summary": self.summary,
+            "payload": dict(self.payload),
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(slots=True)
+class WriterLoopStep:
+    step_id: str
+    run_id: str
+    status: WriterLoopStepStatus
+    agent_state: WriterAgentState
+    technical_stage: str = ""
+    event_ids: list[str] = field(default_factory=list)
+    prompt_input_path: str = ""
+    output_artifact_path: str = ""
+    created_at: str = ""
+    completed_at: str = ""
+
+    def __post_init__(self) -> None:
+        self.step_id = _normalize_text(self.step_id)
+        self.run_id = _normalize_text(self.run_id)
+        normalized_status = _normalize_text(self.status).lower()
+        if normalized_status not in WRITER_LOOP_STEP_STATUSES:
+            raise ValueError("status must be started, completed, waiting, or failed")
+        self.status = normalized_status  # type: ignore[assignment]
+        normalized_state = _normalize_text(self.agent_state).lower()
+        if normalized_state not in WRITER_AGENT_STATES:
+            raise ValueError("agent_state must be a supported Writer agent state")
+        self.agent_state = normalized_state  # type: ignore[assignment]
+        self.technical_stage = _normalize_text(self.technical_stage)
+        self.event_ids = _normalize_string_list(self.event_ids)
+        self.prompt_input_path = _normalize_text(self.prompt_input_path)
+        self.output_artifact_path = _normalize_text(self.output_artifact_path)
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        self.completed_at = _normalize_text(self.completed_at)
+        if not self.step_id or not self.run_id:
+            raise ValueError("step_id and run_id are required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step_id": self.step_id,
+            "run_id": self.run_id,
+            "status": self.status,
+            "agent_state": self.agent_state,
+            "technical_stage": self.technical_stage,
+            "event_ids": list(self.event_ids),
+            "prompt_input_path": self.prompt_input_path,
+            "output_artifact_path": self.output_artifact_path,
+            "created_at": self.created_at,
+            "completed_at": self.completed_at,
+        }
+
+
+@dataclass(slots=True)
 class LengthPlanUpdate:
     schema_version: str
     update_id: str
@@ -1399,7 +1924,9 @@ class LengthPlanUpdate:
         self.created_at = _normalize_text(self.created_at)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["legacy_migration_only"] = True
+        return payload
 
 
 @dataclass(slots=True)
@@ -1448,6 +1975,7 @@ class ChapterReplanRequest:
             if self.requested_length_direction is not None
             else None
         )
+        payload["legacy_migration_only"] = True
         return payload
 
 
@@ -1460,11 +1988,13 @@ class GenerationReviewDecision:
     status: GenerationReviewStatus
     reason_code: str
     feedback_text: str
-    next_action_checkpoint: GenerationReviewCheckpoint
+    next_action_checkpoint: GenerationReviewCheckpoint | str = ""
     run_id: str = ""
+    next_action: str = ""
     length_plan_update: LengthPlanUpdate | None = None
     chapter_replan_request: ChapterReplanRequest | None = None
     supersedes_draft_id: str = ""
+    source_message_id: str = ""
     reviewer_type: str = "user"
     created_at: str = ""
 
@@ -1473,52 +2003,72 @@ class GenerationReviewDecision:
         self.decision_id = _normalize_text(self.decision_id)
         self.chapter_id = _normalize_text(self.chapter_id)
         self.draft_id = _normalize_text(self.draft_id)
-        normalized_status = _normalize_text(self.status).lower()
+        normalized_status, legacy_status = _normalize_generation_review_status(self.status)
         if normalized_status not in GENERATION_REVIEW_STATUSES:
             raise ValueError(
-                "status must be accepted, revise_length, replan_chapter, or discarded"
+                "status must be accepted, rewrite_requested, replan_requested, or discarded"
             )
         self.status = normalized_status  # type: ignore[assignment]
+        legacy_rework_payload = self.length_plan_update is not None or self.chapter_replan_request is not None
         self.reason_code = _normalize_text(self.reason_code)
         self.feedback_text = _normalize_text(self.feedback_text)
         normalized_checkpoint = _normalize_text(self.next_action_checkpoint).lower()
-        if normalized_checkpoint not in GENERATION_REVIEW_CHECKPOINTS:
+        if normalized_checkpoint and normalized_checkpoint not in GENERATION_REVIEW_CHECKPOINTS:
             raise ValueError(
                 "next_action_checkpoint must be freeze_e, wait_length_review, "
                 "wait_chapter_review, or halted"
             )
         self.next_action_checkpoint = normalized_checkpoint  # type: ignore[assignment]
         self.run_id = _normalize_text(self.run_id)
+        normalized_next_action = _normalize_text(self.next_action).lower()
+        if not normalized_next_action and normalized_checkpoint:
+            normalized_next_action = LEGACY_GENERATION_REVIEW_CHECKPOINT_TO_ACTION.get(normalized_checkpoint, "")
+        if not normalized_next_action:
+            normalized_next_action = {
+                "accepted": "writeback_review",
+                "rewrite_requested": "agent_loop_rewrite_draft",
+                "replan_requested": "agent_loop_replan_chapter",
+                "discarded": "halted",
+            }.get(self.status, "")
+        if normalized_next_action not in GENERATION_REVIEW_NEXT_ACTIONS:
+            raise ValueError(
+                "next_action must be writeback_review, agent_loop_rewrite_draft, "
+                "agent_loop_replan_chapter, or halted"
+            )
+        self.next_action = normalized_next_action
         self.supersedes_draft_id = _normalize_text(self.supersedes_draft_id)
+        self.source_message_id = _normalize_text(self.source_message_id)
         self.reviewer_type = _normalize_text(self.reviewer_type)
         self.created_at = _normalize_text(self.created_at)
-        self._validate_status_rules()
+        self._validate_status_rules(legacy_status=legacy_status, legacy_rework_payload=legacy_rework_payload)
 
-    def _validate_status_rules(self) -> None:
+    def _validate_status_rules(self, *, legacy_status: str = "", legacy_rework_payload: bool = False) -> None:
         if self.status == "accepted":
             if self.reason_code != "approved":
                 raise ValueError("accepted decisions must use reason_code 'approved'")
-            if self.next_action_checkpoint != "freeze_e":
-                raise ValueError("accepted decisions must point to freeze_e")
+            if self.next_action != "writeback_review":
+                raise ValueError("accepted decisions must point to writeback_review")
             if self.length_plan_update is not None or self.chapter_replan_request is not None:
                 raise ValueError("accepted decisions must not include rework payloads")
             return
-        if self.status == "revise_length":
-            if self.next_action_checkpoint != "wait_length_review":
-                raise ValueError("revise_length decisions must point to wait_length_review")
-            if self.length_plan_update is None:
-                raise ValueError("revise_length decisions require length_plan_update")
-            if self.chapter_replan_request is not None:
-                raise ValueError("revise_length decisions must not include chapter_replan_request")
+        if self.status == "rewrite_requested":
+            if self.next_action != "agent_loop_rewrite_draft":
+                raise ValueError("rewrite_requested decisions must point to agent_loop_rewrite_draft")
+            if not self.feedback_text:
+                raise ValueError("rewrite_requested decisions require feedback_text")
+            if not legacy_status and legacy_rework_payload:
+                raise ValueError("rewrite_requested decisions must not include legacy rework payloads")
             return
-        if self.status == "replan_chapter":
-            if self.next_action_checkpoint != "wait_chapter_review":
-                raise ValueError("replan_chapter decisions must point to wait_chapter_review")
-            if self.chapter_replan_request is None:
-                raise ValueError("replan_chapter decisions require chapter_replan_request")
+        if self.status == "replan_requested":
+            if self.next_action != "agent_loop_replan_chapter":
+                raise ValueError("replan_requested decisions must point to agent_loop_replan_chapter")
+            if not self.feedback_text:
+                raise ValueError("replan_requested decisions require feedback_text")
+            if not legacy_status and legacy_rework_payload:
+                raise ValueError("replan_requested decisions must not include legacy rework payloads")
             return
-        if self.next_action_checkpoint != "halted":
-            raise ValueError("discarded decisions must point to halted")
+        if self.next_action != "halted":
+            raise ValueError("discarded decisions must halt")
         if self.length_plan_update is not None or self.chapter_replan_request is not None:
             raise ValueError("discarded decisions must not include rework payloads")
 
@@ -1532,6 +2082,7 @@ class GenerationReviewDecision:
             "status": self.status,
             "reason_code": self.reason_code,
             "feedback_text": self.feedback_text,
+            "next_action": self.next_action,
             "next_action_checkpoint": self.next_action_checkpoint,
             "length_plan_update": (
                 self.length_plan_update.to_dict()
@@ -1544,8 +2095,14 @@ class GenerationReviewDecision:
                 else None
             ),
             "supersedes_draft_id": self.supersedes_draft_id,
+            "source_message_id": self.source_message_id,
             "reviewer_type": self.reviewer_type,
             "created_at": self.created_at,
+            "legacy_migration_only": bool(
+                self.next_action_checkpoint
+                or self.length_plan_update is not None
+                or self.chapter_replan_request is not None
+            ),
         }
 
 

@@ -119,13 +119,21 @@ class CharacterProfileService:
                 book_id=book_id,
                 names=[incoming_name, *update_aliases],
             )
+            id_row = self._row_for_character_id(conn, book_id=book_id, character_id=update.get("character_id"))
+            if id_row is not None and all(self._row_identity(row) != self._row_identity(id_row) for row in matched_rows):
+                matched_rows.insert(0, id_row)
+                known_name_map.update(self._known_name_map_for_rows([id_row]))
             all_known_names = [incoming_name, *update_aliases]
             for row in matched_rows:
                 all_known_names.append(self._normalize_name(row["canonical_name"]))
                 all_known_names.extend(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
             canonical_name = self._choose_canonical_name(
                 all_known_names,
-                preferred_name=update.get("preferred_canonical_name"),
+                preferred_name=(
+                    id_row["canonical_name"]
+                    if id_row is not None
+                    else update.get("preferred_canonical_name")
+                ),
             )
             base_profile = self._merge_existing_rows(matched_rows)
             mentioned_doc_ids_for_update = self._doc_ids_for_names(
@@ -317,6 +325,32 @@ class CharacterProfileService:
             for item in row_names:
                 known_name_map[item] = canonical_name
         return matched_rows, known_name_map
+
+    def _row_for_character_id(self, conn, *, book_id: str, character_id: object) -> Any | None:
+        try:
+            normalized_id = int(character_id or 0)
+        except (TypeError, ValueError):
+            return None
+        if normalized_id <= 0:
+            return None
+        return self.profiles_repo.get_by_id(conn, book_id=book_id, character_id=normalized_id)
+
+    def _row_identity(self, row: Any) -> int:
+        try:
+            return int(row["character_id"])
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    def _known_name_map_for_rows(self, rows: list[Any]) -> dict[str, str]:
+        known_name_map: dict[str, str] = {}
+        for row in rows:
+            canonical_name = self._normalize_name(row["canonical_name"])
+            row_names = {canonical_name}
+            row_names.update(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
+            for item in row_names:
+                if item:
+                    known_name_map[item] = canonical_name
+        return known_name_map
 
     def _doc_ids_for_names(self, mapping: dict[str, list[int]], names: list[str]) -> list[int]:
         doc_ids: list[int] = []
@@ -748,11 +782,22 @@ class CharacterProfileService:
             candidate = ""
         if not current:
             return candidate
-        if not candidate or candidate in current:
+        if not candidate:
             return current
         if current in candidate:
             return candidate
-        return f"{current}；{candidate}"[:500]
+        fragments: list[str] = []
+        seen: set[str] = set()
+        for raw_part in re.split(r"[；;。\n]+", f"{current}；{candidate}"):
+            part = self._normalize_text(raw_part)
+            if not part or not self._is_fact_like_text(part):
+                continue
+            key = re.sub(r"\W+", "", part.lower())
+            if any(key and (key in existing or existing in key) for existing in seen):
+                continue
+            seen.add(key)
+            fragments.append(part)
+        return "；".join(fragments)[:500]
 
     def _merge_profile_evidence_level(
         self,
@@ -964,11 +1009,10 @@ class CharacterProfileService:
         parts.append(f"- 发言状态：{snapshot.speaking_character_status}")
         if snapshot.personhood_evidence_summary:
             parts.append(f"- 人物性证据：{snapshot.personhood_evidence_summary}")
-        parts.extend(["", "## 基本属性/关系/能力"])
+        parts.extend(["", "## 基本属性/能力"])
         fact_lines: list[str] = []
         fact_lines.extend(self._format_attribute_lines("职业", snapshot.occupations, limit=3))
         fact_lines.extend(self._format_ability_lines(snapshot.abilities, limit=3))
-        fact_lines.extend(self._format_relationship_lines(snapshot.relationships, limit=4))
         fact_lines.extend(self._format_attribute_lines("性格", snapshot.personality, limit=4))
         fact_lines.extend(self._format_age_lines(snapshot.age_timeline, limit=3))
         if fact_lines:

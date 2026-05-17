@@ -14,7 +14,7 @@ def build_character_evidence_coverage_prompt(prompt_input: dict[str, Any]) -> tu
         "3. 如果章节摘要提到某人物，但原文 documents 不能支撑其真实出场/发言/行动/关系变化，不要输出。\n"
         "4. 如果原文中有反复出现、正式行动、明确发言、被称呼或与他人发生关系的人物，而 existing_character_evidence 漏掉了，必须输出。\n"
         "5. existing_character_roster 只用于判断别名/既有人物归并，不是候选名单；roster 外的新人物也应输出。\n"
-        "6. 能确认指向既有人物时 canonical_name 使用 roster 中 canonical_name，原文称呼放入 aliases；确认是新人物时 canonical_name 使用原文中最稳定的人物称呼。\n"
+        "6. 能确认指向既有人物时 character_id 使用 roster 中 character_id，canonical_name 使用 roster 中 canonical_name，原文称呼放入 aliases；确认是新人物时 canonical_name 使用原文中最稳定的人物称呼，character_id 置空。\n"
         "7. 每个输出人物必须包含 source_doc_ids 和 source_title_indexes；跨多个 document 出现时可以列多个 doc_id。\n"
         "8. candidate_type 使用 character / ambiguous / non_person / object / scene 等短标签；低置信或弱共现候选请标 ambiguous 或不输出。\n"
         "9. 严禁把动词、物品、抽象名词、场景词当人物名。\n"
@@ -27,7 +27,9 @@ def build_character_evidence_coverage_prompt(prompt_input: dict[str, Any]) -> tu
         '  "coverage_notes": "一句话说明是否发现漏召回，可为空",\n'
         '  "characters": [\n'
         "    {\n"
+        '      "character_id": "123",\n'
         '      "canonical_name": "漏掉的人物",\n'
+        '      "resolution_status": "resolved_existing",\n'
         '      "aliases": [],\n'
         '      "is_speaking_character": true,\n'
         '      "speaking_evidence": "有明确说话归因。",\n'

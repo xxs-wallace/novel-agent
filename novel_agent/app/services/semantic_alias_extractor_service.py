@@ -37,18 +37,13 @@ class SemanticAliasExtractorService:
             return SemanticAliasExtractionResult()
         extraction_run_id = f"semantic-alias-{uuid.uuid4().hex[:12]}"
         system_prompt, user_prompt = self._build_prompt(book_id=book_id, documents=sampled_documents)
-        try:
-            payload, _raw_text = self.model_client.generate_json(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                fallback_factory=lambda: self._fallback_payload(book_id=book_id, documents=sampled_documents),
-                use_fallback_on_error=True,
-            )
-        except Exception as exc:
-            payload = self._fallback_payload(book_id=book_id, documents=sampled_documents)
-            warnings = [f"semantic alias extraction used fallback: {exc}"]
-        else:
-            warnings = []
+        payload, _raw_text = self.model_client.generate_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback_factory=lambda: self._fallback_payload(book_id=book_id, documents=sampled_documents),
+            use_fallback_on_error=False,
+        )
+        warnings: list[str] = []
         return SemanticAliasExtractionResult(
             aliases=self._payload_to_aliases(
                 book_id=book_id,

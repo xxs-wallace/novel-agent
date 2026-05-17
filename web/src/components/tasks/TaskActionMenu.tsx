@@ -7,6 +7,7 @@ interface TaskActionMenuProps {
   onAction: (action: string, payload?: Record<string, unknown>) => void;
   onStartWriter: () => void;
   onResetCloseRead: () => void;
+  onDeleteWriterRunPreview: () => void;
   onDeletePreview: () => void;
 }
 
@@ -16,6 +17,7 @@ export function TaskActionMenu({
   onAction,
   onStartWriter,
   onResetCloseRead,
+  onDeleteWriterRunPreview,
   onDeletePreview
 }: TaskActionMenuProps) {
   const [open, setOpen] = useState(false);
@@ -50,6 +52,13 @@ export function TaskActionMenu({
           </button>
           <button type="button" role="menuitem" onClick={() => run(onStartWriter)}>
             开始续写
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(() => onAction("resume", { requested_from: "task_menu" }))}>
+            恢复续写
+          </button>
+          <button type="button" role="menuitem" className="danger-menu-item" onClick={() => run(onDeleteWriterRunPreview)}>
+            <Trash2 size={15} aria-hidden="true" />
+            删除最近续写
           </button>
           <button type="button" role="menuitem" onClick={() => run(onResetCloseRead)}>
             重置阅读

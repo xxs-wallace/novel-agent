@@ -96,21 +96,27 @@ class MemoryCandidateService:
         if not grouped:
             return []
         result: list[dict[str, Any]] = []
-        for canonical_name in sorted(grouped):
-            evidence_items = sorted(grouped[canonical_name], key=self._evidence_sort_key)
+        for identity_key in sorted(grouped):
+            evidence_items = sorted(grouped[identity_key], key=self._evidence_sort_key)
+            canonical_name = str(evidence_items[0].get("canonical_name", "")).strip()
+            character_id = str(evidence_items[0].get("character_id", "") or "").strip()
             result.append(
                 {
                     "book_id": prompt_input.get("book_id"),
+                    "character_id": character_id,
                     "canonical_name": canonical_name,
                     "existing_profile": self._find_existing_profile(
                         prompt_input.get("character_profiles", []),
                         canonical_name=canonical_name,
+                        character_id=character_id,
                     ),
                     "ordered_character_evidence": evidence_items,
                     "chapter_summary": self._character_reduce_summary(summary_payload),
                     "reduce_policy": {
                         "same_character_must_be_reduced_serially": True,
                         "relationships_are_merged_inside_character_reduce": True,
+                        "character_id_is_primary_identity_when_present": True,
+                        "personhood_and_relationships_must_be_deduplicated": True,
                         "drop_low_value_candidate_types": sorted(LOW_VALUE_CANDIDATE_TYPES),
                         "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
                     },
@@ -139,9 +145,13 @@ class MemoryCandidateService:
             evidence_payload=evidence_payload,
         )
         update = next((item for item in updates if item.get("canonical_name") == canonical_name), None)
+        if update is not None and reduce_input.get("character_id"):
+            update = dict(update)
+            update["character_id"] = str(reduce_input.get("character_id") or "").strip()
         return {
             "should_update": update is not None,
             "canonical_name": canonical_name,
+            "character_id": str(reduce_input.get("character_id") or "").strip(),
             "character_update": update,
         }
 
@@ -165,6 +175,8 @@ class MemoryCandidateService:
             seen.add(canonical_name)
             normalized = dict(update)
             normalized["canonical_name"] = canonical_name
+            if output.get("character_id") and not normalized.get("character_id"):
+                normalized["character_id"] = str(output.get("character_id") or "").strip()
             updates.append(normalized)
         return {"character_updates": updates}
 
@@ -269,6 +281,7 @@ class MemoryCandidateService:
             recent_activity = activity_evidence or relationship_evidence or summary_short
             updates.append(
                 {
+                    "character_id": str(character.get("character_id") or "").strip(),
                     "canonical_name": canonical_name,
                     "aliases": self._clean_aliases(character.get("aliases", [])),
                     "personality": [],
@@ -407,10 +420,17 @@ class MemoryCandidateService:
                 continue
             item = dict(character)
             item["canonical_name"] = canonical_name
+            item["character_id"] = str(item.get("character_id") or "").strip()
             item["source_doc_ids"] = self._safe_int_list(item.get("source_doc_ids"))
             item["source_title_indexes"] = self._safe_int_list(item.get("source_title_indexes"))
-            grouped.setdefault(canonical_name, []).append(item)
+            grouped.setdefault(self._character_identity_key(item), []).append(item)
         return grouped
+
+    def _character_identity_key(self, character: dict[str, Any]) -> str:
+        character_id = str(character.get("character_id") or "").strip()
+        if character_id:
+            return f"id:{character_id}"
+        return f"name:{str(character.get('canonical_name', '')).strip()}"
 
     def clean_evidence_name(self, raw_name: object, *, character: dict[str, Any] | None = None) -> str:
         name = str(raw_name or "").strip()
@@ -464,12 +484,21 @@ class MemoryCandidateService:
             str(item.get("canonical_name", "")),
         )
 
-    def _find_existing_profile(self, profiles: object, *, canonical_name: str) -> dict[str, Any] | None:
+    def _find_existing_profile(
+        self,
+        profiles: object,
+        *,
+        canonical_name: str,
+        character_id: str = "",
+    ) -> dict[str, Any] | None:
         if not isinstance(profiles, list):
             return None
         for profile in profiles:
             if not isinstance(profile, dict):
                 continue
+            profile_id = str(profile.get("character_id") or "").strip()
+            if character_id and profile_id == character_id:
+                return profile
             profile_name = str(profile.get("canonical_name", "")).strip()
             aliases = profile.get("aliases", [])
             alias_values = aliases if isinstance(aliases, list) else []

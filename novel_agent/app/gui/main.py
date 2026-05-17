@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import traceback
 from pathlib import Path
 
 from novel_agent.app.bootstrap import resolve_repo_root
@@ -56,8 +57,8 @@ class PipelineWorker(QtCore.QObject):
                 for line in iter(process.stdout.readline, b""):
                     self.log_received.emit(line.decode("utf-8", errors="replace"))
             self.finished.emit(process.wait())
-        except Exception as exc:  # noqa: BLE001 - surface prototype failures in the GUI.
-            self.failed.emit(str(exc))
+        except Exception:  # noqa: BLE001 - surface prototype failures in the GUI.
+            self.failed.emit(traceback.format_exc())
 
     def terminate(self) -> None:
         if self._process is not None and self._process.poll() is None:

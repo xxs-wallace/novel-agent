@@ -144,7 +144,9 @@ class WorldStateService:
 
     def _build_summary(self, world_markdown: str) -> str:
         fallback_text = self._build_structured_summary(world_markdown)
-        if self.model_client is None or self.model_client.settings.dry_run:
+        if self.model_client is None:
+            raise RuntimeError("WorldStateService summary generation requires an available model_client")
+        if self.model_client.settings.dry_run:
             return fallback_text
         system_prompt, user_prompt = build_world_summary_prompt(world_markdown)
         text = self.model_client.generate_text(

@@ -1582,14 +1582,16 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
 
     def _generate_json(self, *, system_prompt: str, payload: Mapping[str, Any], fallback: Mapping[str, Any]) -> dict[str, Any]:
         if self.model_client is None:
-            return dict(fallback)
+            raise RuntimeError("Outline research model adapter requires an available model_client")
         result, raw = self.model_client.generate_json(
             system_prompt=system_prompt,
             user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
             fallback_factory=lambda: dict(fallback),
             use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
         )
-        output = dict(result) if isinstance(result, Mapping) else dict(fallback)
+        if not isinstance(result, Mapping):
+            raise RuntimeError("Outline research model returned a non-object JSON payload")
+        output = dict(result)
         if raw:
             output.setdefault("model_reasoning_debug", {"raw_visible_output": raw[:4000]})
         return output
@@ -1624,24 +1626,22 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             fallback={"requests": fallback_requests},
         )
         requests = payload.get("requests")
-        normalized = [dict(item) for item in requests if isinstance(item, Mapping)] if isinstance(requests, list) else fallback_requests
-        if not any(str(item.get("request_type") or item.get("type")) == "story_detail" for item in normalized):
+        if not isinstance(requests, list):
+            raise RuntimeError("Outline research model returned invalid requests field")
+        normalized = []
+        for item in requests:
+            if not isinstance(item, Mapping):
+                raise RuntimeError("Outline research model returned a non-object request item")
+            normalized.append(dict(item))
+        initial_round = not prior_results and not budget_state.get("total_requests_used")
+        if initial_round and not any(str(item.get("request_type") or item.get("type")) == "story_detail" for item in normalized):
             desired_actions = [
                 str(item)
                 for item in (seed_packet.user_intent.get("desired_actions") or [])
                 if str(item).strip()
             ]
             if desired_actions:
-                normalized.insert(
-                    0,
-                    ResearchRequest(
-                        request_id="research-story-btree-01",
-                        request_type="story_detail",
-                        query=_safe_excerpt(desired_actions[0], limit=360),
-                        purpose="通过 BTree Memory Query 确认用户授权概述与 prefix 历史事实的承接关系。",
-                        priority="high",
-                    ).to_dict(),
-                )
+                raise RuntimeError("Outline research model omitted required story_detail request")
         return normalized
 
     def decide_sufficiency(

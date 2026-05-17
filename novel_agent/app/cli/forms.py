@@ -189,10 +189,15 @@ class ChapterAcceptanceForm:
     @classmethod
     def for_status(cls, status: str, *, target_chars: int = 0) -> "ChapterAcceptanceForm":
         normalized = status.strip().lower()
+        normalized = {
+            "revise_length": "rewrite_requested",
+            "revise_chapter_length": "rewrite_requested",
+            "replan_chapter": "replan_requested",
+        }.get(normalized, normalized)
         reason_by_status = {
             "accepted": "approved",
-            "revise_length": "length_or_pacing_revision_requested",
-            "replan_chapter": "chapter_plan_revision_requested",
+            "rewrite_requested": "rewrite_requested",
+            "replan_requested": "chapter_plan_revision_requested",
             "discarded": "discarded_by_user",
         }
         target = target_chars if target_chars > 0 else 4000
@@ -202,7 +207,7 @@ class ChapterAcceptanceForm:
             target_chars=target,
             min_chars=max(1, target * 85 // 100),
             max_chars=max(target, target * 115 // 100),
-            must_change=["需要调整章节规划"] if normalized == "replan_chapter" else [],
+            must_change=["需要调整章节规划"] if normalized == "replan_requested" else [],
         )
 
     @classmethod
@@ -241,7 +246,7 @@ class ChapterAcceptanceForm:
             f"原因代码: {self.reason_code}",
             f"反馈: {self.feedback_text}",
         ]
-        if self.status == "revise_length":
+        if self.status in {"rewrite_requested", "revise_length"}:
             lines.extend(
                 [
                     f"目标字数: {self.target_chars}",
@@ -250,7 +255,7 @@ class ChapterAcceptanceForm:
                     "必须保留: " + "; ".join(self.must_preserve),
                 ]
             )
-        if self.status == "replan_chapter":
+        if self.status in {"replan_requested", "replan_chapter"}:
             lines.extend(
                 [
                     "必须保留: " + "; ".join(self.must_preserve),
@@ -263,47 +268,41 @@ class ChapterAcceptanceForm:
 
     def to_workflow_payload(self) -> dict[str, Any]:
         normalized = self.status.strip().lower()
-        if normalized not in {"accepted", "revise_length", "replan_chapter", "discarded"}:
-            raise ValueError("决策必须是 accepted / revise_length / replan_chapter / discarded。")
+        normalized = {
+            "revise_length": "rewrite_requested",
+            "revise_chapter_length": "rewrite_requested",
+            "replan_chapter": "replan_requested",
+        }.get(normalized, normalized)
+        if normalized not in {"accepted", "rewrite_requested", "replan_requested", "discarded"}:
+            raise ValueError("决策必须是 accepted / rewrite_requested / replan_requested / discarded。")
         payload: dict[str, Any] = {
             "status": normalized,
             "reason_code": self.reason_code or self._default_reason_code(normalized),
             "feedback_text": self.feedback_text,
         }
-        if normalized == "revise_length":
+        if normalized == "rewrite_requested":
             target = self.target_chars or 4000
             min_chars = self.min_chars or max(1, target * 85 // 100)
             max_chars = self.max_chars or max(target, target * 115 // 100)
             if not min_chars <= target <= max_chars:
                 raise ValueError("最小字数必须 <= 目标字数 <= 最大字数。")
-            payload["length_plan_update"] = {
-                "target_chars": target,
-                "min_chars": min_chars,
-                "max_chars": max_chars,
-                "reason_code": payload["reason_code"],
-                "feedback_text": self.feedback_text,
-                "preserve_story_direction": True,
-            }
-        if normalized == "replan_chapter":
+            payload["target_chars"] = target
+            payload["min_chars"] = min_chars
+            payload["max_chars"] = max_chars
+        if normalized == "replan_requested":
             must_change = list(self.must_change) or [self.feedback_text or "调整章节目标、事件安排或展开方式"]
-            payload["chapter_replan_request"] = {
-                "reason_code": payload["reason_code"],
-                "feedback_text": self.feedback_text,
-                "replan_scope": "current_chapter",
-                "must_preserve": list(self.must_preserve),
-                "must_change": must_change,
-                "forbidden_carryover": list(self.forbidden_carryover),
-                "requested_length_direction": {"notes": self.requested_length_direction}
-                if self.requested_length_direction
-                else None,
-            }
+            payload["must_preserve"] = list(self.must_preserve)
+            payload["must_change"] = must_change
+            payload["forbidden_carryover"] = list(self.forbidden_carryover)
+            if self.requested_length_direction:
+                payload["requested_length_direction"] = {"notes": self.requested_length_direction}
         return payload
 
     @staticmethod
     def _default_reason_code(status: str) -> str:
         return {
             "accepted": "approved",
-            "revise_length": "length_or_pacing_revision_requested",
-            "replan_chapter": "chapter_plan_revision_requested",
+            "rewrite_requested": "rewrite_requested",
+            "replan_requested": "chapter_plan_revision_requested",
             "discarded": "discarded_by_user",
         }.get(status, status)

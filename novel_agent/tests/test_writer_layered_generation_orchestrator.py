@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -15,6 +17,40 @@ from novel_agent.app.repos.fragment_cards_repo import FragmentCardsRepo
 from novel_agent.app.schemas.creative_kb_schema import FragmentCard, StyleFeatures
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
+
+
+class FakeWriterModelClient:
+    """Deterministic test adapter; production no-model paths must not use this."""
+
+    def __init__(self) -> None:
+        self.settings = SimpleNamespace(dry_run=False)
+        self.json_calls: list[tuple[str, str]] = []
+        self.text_calls: list[tuple[str, str]] = []
+
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory,
+        use_fallback_on_error: bool = False,
+    ) -> tuple[dict[str, Any] | list[Any], str]:
+        _ = use_fallback_on_error
+        self.json_calls.append((system_prompt, user_prompt))
+        payload = fallback_factory()
+        return payload, json.dumps(payload, ensure_ascii=False)
+
+    def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_text: str | None = None,
+    ) -> str:
+        self.text_calls.append((system_prompt, user_prompt))
+        if fallback_text is not None:
+            return fallback_text
+        return "测试正文。"
 
 
 def _seed_assets(conn, *, book_id: str, repo_root: Path) -> None:
@@ -158,7 +194,7 @@ def _build_orchestrator(tmp_path: Path) -> tuple[NovelAgentDB, WriterLayeredGene
     orchestrator = WriterLayeredGenerationOrchestrator(
         repo_root=repo_root,
         run_writer=run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     return db, orchestrator
 

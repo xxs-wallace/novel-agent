@@ -41,6 +41,7 @@ from novel_agent.app.services.outline_research_service import (
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
+    FakeWriterModelClient,
     _seed_assets,
     _seed_document,
     _seed_fragment_card,
@@ -67,7 +68,7 @@ def _build_db_and_orchestrator(
     orchestrator = WriterLayeredGenerationOrchestrator(
         repo_root=repo_root,
         run_writer=run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
         outline_research_adapter=adapter,
     )
     return db, orchestrator
@@ -649,9 +650,58 @@ def test_workflow_needs_user_input_then_continues_without_unconfirmed_character_
     state = workflow.load_workflow_state(run_id="run-user-input")
     assert initial["stage"] == "outline_research_user_input"
     assert initial["sufficiency_decision"]["user_questions"] == ["顾迟是否为新增人物？"]
+    assert initial["question_set"]["question_set_id"] == "outline-research-run-user-input-needs-answer"
+    question_set = _load_run_data(planner.run_writer, "run-user-input", "outline_research_question_set.json")
+    assert question_set["run_id"] == "run-user-input"
+    assert question_set["questions"][0]["question_id"] == "q1"
+    assert question_set["actions"]["submit"] == "continue_after_outline_research_input"
     assert state["current_stage"] == "freeze_a_review"
     assert continued["character_requirement_report"]["named_new_characters"] == []
+    submission = _load_run_data(planner.run_writer, "run-user-input", "outline_research_answer_submission.json")
+    assert submission["answer_text"] == "不是新增人物，本轮不加入。"
+    assert submission["user_answers"] == [{"question_id": "q1", "answer_text": "不是新增人物，本轮不加入。"}]
     assert _load_run_data(planner.run_writer, "run-user-input", "planning_notebook.json")["confirmed_facts"][0]["fact_status"] == "user_authorized"
+
+
+def test_outline_research_missing_required_answer_does_not_fabricate_user_evidence(tmp_path: Path) -> None:
+    db, planner = _build_db_and_orchestrator(tmp_path, adapter=_AnswerAwareAdapter())
+    executor = RestrictedWriterExecutor(repo_root=planner.repo_root, run_writer=planner.run_writer)
+    workflow = WriterInteractiveWorkflow(
+        planner=planner,
+        executor=executor,
+        rollback_manager=WriterRollbackManager(run_writer=planner.run_writer),
+        run_writer=planner.run_writer,
+    )
+    book_id = "book-missing-answer"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=planner.repo_root)
+        conn.commit()
+
+        initial = workflow.prepare_planning(
+            conn,
+            run_id="run-missing-answer",
+            book_id=book_id,
+            product_mode="assist",
+            intent_payload={"major_characters": ["沈青", "顾迟"], "desired_actions": ["沈青追查旧案"]},
+        )
+        result = workflow.continue_after_outline_research_input(
+            conn,
+            run_id="run-missing-answer",
+            book_id=book_id,
+            product_mode="assist",
+            question_set_id=initial["question_set"]["question_set_id"],
+            answer_text="",
+            user_answers=[],
+        )
+
+    assert result["stage"] == "outline_research_user_input"
+    assert result["missing_required_questions"] == ["q1"]
+    assert workflow.load_workflow_state(run_id="run-missing-answer")["current_stage"] == "outline_research_user_input"
+    notebook = _load_run_data(planner.run_writer, "run-missing-answer", "planning_notebook.json")
+    assert [fact for fact in notebook["confirmed_facts"] if fact["fact_status"] == "user_authorized"] == []
+    assert not (planner.run_writer.layout.run_dir("run-missing-answer") / "outline_research_answer_submission.json").exists()
 
 
 def test_proceed_with_assumptions_writes_formal_book_plan_assumptions(tmp_path: Path) -> None:

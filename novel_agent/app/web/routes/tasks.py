@@ -46,6 +46,15 @@ def delete_task(
     return session.delete_task(task_id=task_id, confirm=confirm, include_runs=include_runs)
 
 
+@router.delete("/tasks/{task_id}/writer-runs/latest")
+def delete_latest_writer_run(
+    task_id: str,
+    confirm: bool = Query(False),
+    session: WebSessionService = Depends(get_session_service),
+) -> dict[str, object]:
+    return session.delete_latest_writer_run(task_id=task_id, confirm=confirm)
+
+
 @router.post("/tasks/{task_id}/reset-close-read", response_model=WebActionResult)
 def reset_close_read(task_id: str, session: WebSessionService = Depends(get_session_service)) -> WebActionResult:
     return session.reset_close_read(task_id=task_id)

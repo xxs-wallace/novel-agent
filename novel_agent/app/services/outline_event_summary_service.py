@@ -107,7 +107,7 @@ class OutlineEventSummaryService:
 
     def _decide_compression(self, events: list[OutlineEventCard]) -> dict[str, Any]:
         if self.model_client is None:
-            return self._fallback_decision(events)
+            raise RuntimeError("OutlineEventSummaryService requires an available model_client")
         fallback = lambda: self._fallback_decision(events)
         payload, _raw = self.model_client.generate_json(
             system_prompt=(
@@ -130,7 +130,9 @@ class OutlineEventSummaryService:
             fallback_factory=fallback,
             use_fallback_on_error=bool(self.model_client.settings.dry_run),
         )
-        return dict(payload) if isinstance(payload, Mapping) else fallback()
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("Outline event summary model returned a non-object JSON payload")
+        return dict(payload)
 
     def _fallback_decision(self, events: list[OutlineEventCard]) -> dict[str, Any]:
         tail_count = min(self.fallback_tail_events, max(0, len(events) - 1))

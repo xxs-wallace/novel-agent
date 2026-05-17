@@ -8,11 +8,16 @@ from pathlib import Path
 from typing import Any, Mapping, cast
 
 from ..app.schemas.orchestration_schema import (
+    ArtifactReviewDecision,
     ChapterReplanRequest,
     FreezeArtifact,
     FreezeManifest,
     FreezeRecord,
     LengthPlanUpdate,
+    OutlineResearchAnswerSubmission,
+    OutlineResearchQuestionSet,
+    WriterLoopEvent,
+    WriterLoopStep,
 )
 from ..schemas import RunConfig
 from .layout import RunLayout
@@ -126,6 +131,67 @@ class RunWriter:
             merged["created_at"] = self._now_iso()
         return self.write_json(run_id, "generation_review_decision.json", merged)
 
+    def write_artifact_review_decision(
+        self,
+        run_id: str,
+        payload: Any,
+        *,
+        defaults: Mapping[str, Any] | None = None,
+    ) -> Path:
+        merged = self._merge_serialized_defaults(payload=payload, defaults=defaults)
+        merged["run_id"] = str(merged.get("run_id") or run_id).strip() or run_id
+        if not str(merged.get("schema_version") or "").strip():
+            merged["schema_version"] = "1.0"
+        if not str(merged.get("created_at") or "").strip():
+            merged["created_at"] = self._now_iso()
+        normalized = ArtifactReviewDecision.from_dict(merged).to_dict()
+        path = self.write_json(run_id, "artifact_review_decision.json", normalized)
+        review_id = str(normalized.get("review_id") or "").strip()
+        if review_id:
+            self.write_json(run_id, f"artifact_review_decisions/{review_id}.json", normalized)
+        return path
+
+    def write_user_supplement(
+        self,
+        run_id: str,
+        payload: Any,
+        *,
+        review_id: str = "",
+    ) -> Path:
+        serialized = self._serialize_payload(payload)
+        supplement = dict(serialized) if isinstance(serialized, Mapping) else {"supplement_text": str(serialized or "")}
+        supplement.setdefault("schema_version", "1.0")
+        supplement.setdefault("run_id", run_id)
+        supplement.setdefault("created_at", self._now_iso())
+        if review_id:
+            supplement.setdefault("review_id", review_id)
+        return self.write_json(run_id, "user_supplement.json", supplement)
+
+    def append_writer_loop_event(self, run_id: str, payload: Any) -> Path:
+        serialized = self._serialize_payload(payload)
+        normalized = (
+            WriterLoopEvent(**serialized).to_dict()
+            if isinstance(serialized, Mapping)
+            else payload.to_dict()
+        )
+        run_dir = self.prepare_run_dir(run_id)
+        path = run_dir / "writer_loop_trace.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+        return path
+
+    def write_writer_loop_step(self, run_id: str, payload: Any) -> Path:
+        serialized = self._serialize_payload(payload)
+        normalized = (
+            WriterLoopStep(**serialized).to_dict()
+            if isinstance(serialized, Mapping)
+            else payload.to_dict()
+        )
+        step_id = str(normalized.get("step_id") or "step").strip() or "step"
+        self.write_json(run_id, f"writer_loop_steps/{step_id}.json", normalized)
+        return self.write_json(run_id, "writer_loop_step.json", normalized)
+
     def write_length_plan_update(
         self,
         run_id: str,
@@ -156,6 +222,20 @@ class RunWriter:
         normalized = ChapterReplanRequest(**merged).to_dict()
         return self.write_json(run_id, "chapter_replan_request.json", normalized)
 
+    def write_outline_research_question_set(self, run_id: str, payload: Any) -> Path:
+        serialized = self._serialize_payload(payload)
+        normalized = OutlineResearchQuestionSet.from_dict(serialized).to_dict() if isinstance(serialized, Mapping) else payload.to_dict()
+        return self.write_json(run_id, "outline_research_question_set.json", normalized)
+
+    def write_outline_research_answer_submission(self, run_id: str, payload: Any) -> Path:
+        serialized = self._serialize_payload(payload)
+        normalized = (
+            OutlineResearchAnswerSubmission.from_dict(serialized).to_dict()
+            if isinstance(serialized, Mapping)
+            else payload.to_dict()
+        )
+        return self.write_json(run_id, "outline_research_answer_submission.json", normalized)
+
     def write_text(self, run_id: str, name: str, content: str) -> Path:
         run_dir = self.prepare_run_dir(run_id)
         path = run_dir / name
@@ -164,11 +244,18 @@ class RunWriter:
 
     def rebuild_accepted_chapters_markdown(self, run_id: str) -> Path:
         index = self._load_draft_retention_index(run_id)
-        accepted_records = [
-            dict(record)
-            for record in index.values()
-            if str(record.get("retention_status") or "") == "accepted"
-        ]
+        accepted_records = []
+        for record in index.values():
+            archived = record.get("archived_artifacts") if isinstance(record.get("archived_artifacts"), dict) else {}
+            has_writeback = bool(str(record.get("memory_writeback_source_path") or "").strip()) or bool(
+                str((archived or {}).get("memory_writeback.json") or "").strip()
+            )
+            if (
+                str(record.get("retention_status") or "") == "accepted"
+                or bool(record.get("eligible_for_writeback"))
+                or has_writeback
+            ):
+                accepted_records.append(dict(record))
         accepted_records.sort(
             key=lambda record: (
                 str(record.get("chapter_id") or ""),
@@ -225,8 +312,8 @@ class RunWriter:
             "continuity_report.json",
             "state_delta.json",
             "generation_review_decision.json",
-            "length_plan_update.json",
-            "chapter_replan_request.json",
+            "artifact_review_decision.json",
+            "user_supplement.json",
         }
         if include_memory_writeback:
             retained_artifacts.add("memory_writeback.json")
@@ -247,16 +334,21 @@ class RunWriter:
         if include_memory_writeback and (run_dir / "memory_writeback.json").exists():
             memory_writeback_source_path = str(run_dir / "memory_writeback.json")
 
+        incoming_retention_status = retention_status
+        incoming_decision_status = decision_status
+        if str(record.get("retention_status") or "") == "accepted" and retention_status != "accepted":
+            incoming_retention_status = "accepted"
+            incoming_decision_status = "accepted"
         record.update(
             {
                 "draft_id": draft_id,
                 "chapter_id": chapter_id,
                 "decision_id": decision_id,
-                "decision_status": decision_status,
-                "retention_status": retention_status,
-                "active_for_consumption": retention_status in {"drafted", "accepted"},
-                "eligible_for_writeback": retention_status == "accepted",
-                "eligible_for_canon": retention_status == "accepted",
+                "decision_status": incoming_decision_status,
+                "retention_status": incoming_retention_status,
+                "active_for_consumption": incoming_retention_status in {"drafted", "accepted"},
+                "eligible_for_writeback": incoming_retention_status == "accepted",
+                "eligible_for_canon": incoming_retention_status == "accepted",
                 "supersedes_draft_id": supersedes_draft_id,
                 "superseded_by_draft_id": str(record.get("superseded_by_draft_id") or "").strip(),
                 "reviewer_type": reviewer_type,

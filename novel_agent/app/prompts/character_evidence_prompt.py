@@ -17,11 +17,11 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         "5. personhood_evidence 说明该候选为什么像真实角色，例如被称呼、发言、执行人物行动、具有身份称谓或与他人发生关系。\n"
         "6. activity_or_state_evidence 描述当前 document 中可用于更新人物档案的行动、状态、心理或阶段变化。\n"
         "7. relationship_evidence 描述当前 document 中可用于更新关系档案的互动或关系变化。\n"
-        "8. 如果输入提供 existing_character_roster，请结合正文判断当前称呼是否指向已有角色；能确认时 canonical_name 使用 roster 中的 canonical_name，原文称呼可放入 aliases。\n"
+        "8. 如果输入提供 existing_character_roster，请结合正文判断当前称呼是否指向已有角色；能确认时 character_id 必须使用 roster 中的 character_id，canonical_name 使用 roster 中的 canonical_name，原文称呼可放入 aliases。\n"
         "9. 不要因为称谓、职业、关系词或叙述视角变化就创建新人；如果正文中的“老板/丈夫/我/她”等能和 roster 中已有角色对应，应输出既有 canonical_name。\n"
         "10. 如果 character_roster_scope=recent_32 且 can_request_full_roster=true，当正文出现无法和最近 32 人确认对应的人物、疑似新人物或远期旧人物时，返回 request_full_roster=true；此时 characters 可为空或只保留已能确认的角色。\n"
         "11. 如果 character_roster_scope=full 或 can_request_full_roster=false，必须在当前输入下给出最终 characters，不要继续请求名册。\n"
-        "12. 如果正文明确出现 roster 外的新人物名，再输出新 canonical_name；如果不确定，标 ambiguous 或不输出，不要硬猜。\n"
+        "12. 如果正文明确出现 roster 外的新人物名，再输出新 canonical_name，并将 character_id 置空、resolution_status 标为 new_or_unresolved；如果不确定，标 ambiguous 或不输出，不要硬猜。\n"
         "13. candidate_type 使用 character / ambiguous / non_person / object / scene 等短标签；低置信或弱共现候选请标 ambiguous 或不输出。\n"
         "14. 严禁把动词、物品、抽象名词、场景词当人物名，如“张开/高跟鞋/上下打量/学院”。\n"
         "15. 每个人物必须返回 source_doc_ids 和 source_title_indexes，用于后续按故事顺序归纳；只需轻量来源引用，不要 offset。\n"
@@ -37,7 +37,9 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         '  "request_full_roster_reason": "",\n'
         '  "characters": [\n'
         "    {\n"
+        '      "character_id": "123",\n'
         '      "canonical_name": "角色甲",\n'
+        '      "resolution_status": "resolved_existing",\n'
         '      "aliases": [],\n'
         '      "is_speaking_character": true,\n'
         '      "speaking_evidence": "他说出关键回应，文本有明确说话归因。",\n'

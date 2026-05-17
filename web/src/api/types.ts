@@ -51,12 +51,81 @@ export interface DecisionCardModel {
   actions: DecisionAction[];
 }
 
+export interface WriterQuestion {
+  question_id: string;
+  prompt: string;
+  required: boolean;
+  hint: string;
+  gap_id: string;
+  risk_level: string;
+}
+
+export interface WriterQuestionSet {
+  schema_version: string;
+  question_set_id: string;
+  run_id: string;
+  stage: string;
+  status: string;
+  questions: WriterQuestion[];
+  source_artifact_id: string;
+  artifact_path: string;
+  actions: Record<string, string>;
+  submit_action: string;
+  defer_action: string;
+  technical_available: boolean;
+}
+
+export interface WriterReviewAction {
+  action: string;
+  label: string;
+  payload: Record<string, unknown>;
+  description: string;
+  variant: "primary" | "secondary" | "danger";
+  requires_input: boolean;
+  input_role: string;
+}
+
+export interface WriterArtifactReview {
+  schema_version: string;
+  run_id: string;
+  review_id: string;
+  artifact_kind: string;
+  artifact_id: string;
+  title: string;
+  summary: string;
+  next_prompt: string;
+  detail_artifact_id: string;
+  actions: WriterReviewAction[];
+  technical_available: boolean;
+  technical_details: Record<string, unknown>;
+}
+
+export interface WriterDraftReview {
+  schema_version: string;
+  run_id: string;
+  review_id: string;
+  chapter_id: string;
+  draft_id: string;
+  title: string;
+  preview: string;
+  word_count: number;
+  target_word_count?: number | null;
+  continuity_summary: string;
+  detail_artifact_id: string;
+  actions: WriterReviewAction[];
+  technical_available: boolean;
+  technical_details: Record<string, unknown>;
+}
+
 export interface ConversationMessage {
   message_id: string;
   task_id: string;
   role: MessageRole;
   content: string;
   payload: Record<string, unknown>;
+  writer_question_set?: WriterQuestionSet | null;
+  writer_artifact_review?: WriterArtifactReview | null;
+  writer_draft_review?: WriterDraftReview | null;
   decision_cards: DecisionCardModel[];
   created_at: string;
 }
@@ -160,4 +229,14 @@ export interface DeleteTaskPreview {
   would_delete?: Record<string, unknown>;
   deleted?: Record<string, unknown>;
   message?: string;
+}
+
+export interface WriterRunDeletePreview {
+  task_id: string;
+  confirmed: boolean;
+  run_id: string;
+  candidate_paths: string[];
+  deleted_paths: string[];
+  errors: string[];
+  message: string;
 }

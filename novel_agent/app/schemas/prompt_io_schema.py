@@ -141,6 +141,9 @@ class CharacterEvidenceBatchInput:
     documents: list[CharacterEvidenceInputDocument] = field(default_factory=list)
     document_separator_hint: str = "[DOC doc_id=<id> title_index=<index> title=<title>] ... [/DOC]"
     existing_context_summary: str = ""
+    existing_character_roster: list[dict[str, Any]] = field(default_factory=list)
+    character_roster_scope: str = "recent_32"
+    can_request_full_roster: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -157,6 +160,8 @@ class CharacterEvidencePromptInput:
 @dataclass(slots=True)
 class CharacterEvidenceCharacterOutput:
     canonical_name: str
+    character_id: str = ""
+    resolution_status: str = ""
     aliases: list[str] = field(default_factory=list)
     is_speaking_character: bool = False
     speaking_evidence: str = ""
@@ -174,6 +179,8 @@ class CharacterEvidenceCharacterOutput:
 class CharacterEvidencePromptOutput:
     doc_id: int
     document_title_index: int
+    request_full_roster: bool = False
+    request_full_roster_reason: str = ""
     characters: list[CharacterEvidenceCharacterOutput] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

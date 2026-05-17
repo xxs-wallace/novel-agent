@@ -31,6 +31,7 @@ Writer tasks 中已说明：只有涉及章节验收对象时才读 Writer `cont
 6. 不得绕过 `.trae/specs/novel-continuation-mvp/contracts.md` 或 Writer contracts 自行改跨层 contract 语义。
 7. 如果是实现任务，默认不要直接勾选 `tasks.md`；只有明确作为 QA / 验收角色时才允许勾选。
 8. 默认测试不得触发真实 LLM；模型调用使用 fake adapter / stub。只有 benchmark spec 明确要求真实模型验收时才运行真实 API。
+9. 不得用本地 heuristic / deterministic fallback 伪装模型已完成语义判断。凡是需要模型理解正文、摘要、人物、关系、篇章结构、规划或评审的生产链路，缺少模型、模型 id 缺失、模型不可访问、请求失败或 JSON 解析失败时，只能在有限次数和时间内重试；重试后仍失败必须显式 `failed` / `blocked` / `skipped` / `needs_model`，或抛出可恢复错误。来自用户操作的异常必须在最上层 catch 后通知用户任务失败；来自后台任务的模型异常必须标记任务失败，并保存可供用户点击查看的错误栈。只有 spec 明确允许的 dry-run、测试、兼容迁移或安全保底路径可以 fallback，并且必须在产物、状态或 trace 中标注 `dry_run` / `fallback` / `provisional`，不得标为 `success`、`ready`、`committed` 或正常验收结果。
 
 ## Product Flow Rules
 

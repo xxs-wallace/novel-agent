@@ -1,8 +1,8 @@
 import { Plus, RefreshCw } from "lucide-react";
 import { type MouseEvent, useState } from "react";
 
-import type { CreateTaskRequest, DeleteTaskPreview, TaskSummary } from "../../api/types";
-import { blockingBadge, kbStatus, percent, toPublicStatusText, writerStatus } from "../../utils/status";
+import type { CreateTaskRequest, DeleteTaskPreview, TaskSummary, WriterRunDeletePreview } from "../../api/types";
+import { blockingBadge, kbProgress, kbProgressDetail, kbStatus, percent, toPublicStatusText, writerStatus } from "../../utils/status";
 import { CreateTaskDialog } from "./CreateTaskDialog";
 import { TaskActionMenu } from "./TaskActionMenu";
 
@@ -17,6 +17,7 @@ interface TaskRailProps {
   onStartWriter: () => void;
   onResetCloseRead: (taskId: string) => Promise<unknown>;
   onDeleteTask: (taskId: string, confirm: boolean) => Promise<DeleteTaskPreview>;
+  onDeleteLatestWriterRun: (taskId: string, confirm: boolean) => Promise<WriterRunDeletePreview>;
   onRefresh: () => Promise<unknown> | void;
 }
 
@@ -31,10 +32,12 @@ export function TaskRail({
   onStartWriter,
   onResetCloseRead,
   onDeleteTask,
+  onDeleteLatestWriterRun,
   onRefresh
 }: TaskRailProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [deletePreview, setDeletePreview] = useState<{ taskId: string; preview: DeleteTaskPreview } | null>(null);
+  const [writerRunDeletePreview, setWriterRunDeletePreview] = useState<{ taskId: string; preview: WriterRunDeletePreview } | null>(null);
   const [pendingSwitchTaskId, setPendingSwitchTaskId] = useState("");
 
   async function previewDelete(taskId: string) {
@@ -48,6 +51,19 @@ export function TaskRail({
     }
     await onDeleteTask(deletePreview.taskId, true);
     setDeletePreview(null);
+  }
+
+  async function previewWriterRunDelete(taskId: string) {
+    const preview = await onDeleteLatestWriterRun(taskId, false);
+    setWriterRunDeletePreview({ taskId, preview });
+  }
+
+  async function confirmWriterRunDelete() {
+    if (!writerRunDeletePreview) {
+      return;
+    }
+    await onDeleteLatestWriterRun(writerRunDeletePreview.taskId, true);
+    setWriterRunDeletePreview(null);
   }
 
   function selectTask(taskId: string) {
@@ -124,6 +140,8 @@ export function TaskRail({
           const selected = task.task_id === selectedTaskId;
           const readPct = percent(task.read_completed, task.total_documents);
           const closeReadPct = percent(task.close_read_completed, task.total_documents);
+          const kb = kbProgress(task.progress, task.total_documents);
+          const kbPct = percent(kb.completed, kb.total);
           const badge = blockingBadge(task.progress);
           return (
             <article
@@ -142,6 +160,7 @@ export function TaskRail({
                   onAction={(action, payload) => onAction(task.task_id, action, payload)}
                   onStartWriter={() => startWriterForTask(task.task_id)}
                   onResetCloseRead={() => void onResetCloseRead(task.task_id)}
+                  onDeleteWriterRunPreview={() => void previewWriterRunDelete(task.task_id)}
                   onDeletePreview={() => void previewDelete(task.task_id)}
                 />
               </div>
@@ -152,6 +171,7 @@ export function TaskRail({
               <div className="progress-stack">
                 <ProgressLine label="导入原文" value={readPct} detail={`${task.read_completed}/${task.total_documents || 0}`} />
                 <ProgressLine label="阅读" value={closeReadPct} detail={`${task.close_read_completed}/${task.total_documents || 0}`} />
+                <ProgressLine label="Creative KB" value={kbPct} detail={kbProgressDetail(kb)} />
               </div>
               <div className="task-status-grid">
                 <span>KB</span>
@@ -181,6 +201,26 @@ export function TaskRail({
               </button>
               <button type="button" className="danger-button" onClick={() => void confirmDelete()}>
                 确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {writerRunDeletePreview ? (
+        <div className="dialog-backdrop">
+          <div role="dialog" aria-modal="true" aria-labelledby="delete-writer-run-title" className="dialog-card">
+            <div className="dialog-header">
+              <h2 id="delete-writer-run-title">删除最近续写预览</h2>
+            </div>
+            <p>将删除任务 {writerRunDeletePreview.taskId} 最近一次 Writer 运行产物。</p>
+            <pre className="preview-box">{JSON.stringify(writerRunDeletePreview.preview, null, 2)}</pre>
+            <div className="dialog-actions">
+              <button type="button" className="secondary-button" onClick={() => setWriterRunDeletePreview(null)}>
+                取消
+              </button>
+              <button type="button" className="danger-button" onClick={() => void confirmWriterRunDelete()}>
+                确认删除最近续写
               </button>
             </div>
           </div>

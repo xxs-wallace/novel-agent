@@ -19,6 +19,7 @@ from novel_agent.app.run_interactive import build_writer_workflow
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 from novel_agent.schemas import (
+    ArtifactReviewDecision,
     ChapterReplanRequest,
     GenerationReviewDecision,
     LengthPlanUpdate,
@@ -30,11 +31,13 @@ from novel_agent.app.schemas.orchestration_schema import (
     ModelingStatus,
     WorldExpansionPack,
 )
+from novel_agent.app.orchestrators.scoped_artifact_revision import ScopedArtifactRevisionLLMInput
 from novel_agent.app.orchestrators.writer_planning_types import (
     CharacterRequirementReport,
     NamedNewCharacter,
 )
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
+    FakeWriterModelClient,
     _build_orchestrator,
     _seed_assets,
     _seed_document,
@@ -81,7 +84,42 @@ def test_generation_review_decision_status_variants_are_available_from_runtime_e
     assert discarded.to_dict()["next_action_checkpoint"] == "halted"
 
 
-def test_generation_review_decision_revise_length_requires_length_plan_update() -> None:
+def test_generation_review_decision_rewrite_requested_preserves_feedback_text() -> None:
+    feedback = " 前半章解释太多，重写时把冲突提前。 "
+    decision = GenerationReviewDecision(
+        schema_version="1.0",
+        decision_id="review-003",
+        chapter_id="chapter-001",
+        draft_id="draft-003",
+        status="rewrite_requested",
+        reason_code="pacing_mismatch",
+        feedback_text=feedback,
+        next_action="agent_loop_rewrite_draft",
+        reviewer_type="user",
+        created_at="2026-05-03T12:10:00Z",
+    )
+
+    assert decision.to_dict()["status"] == "rewrite_requested"
+    assert decision.to_dict()["feedback_text"] == "前半章解释太多，重写时把冲突提前。"
+    assert decision.to_dict()["next_action"] == "agent_loop_rewrite_draft"
+    assert decision.to_dict()["length_plan_update"] is None
+
+    with pytest.raises(ValueError, match="feedback_text"):
+        GenerationReviewDecision(
+            schema_version="1.0",
+            decision_id="review-004",
+            chapter_id="chapter-001",
+            draft_id="draft-004",
+            status="rewrite_requested",
+            reason_code="pacing_mismatch",
+            feedback_text="",
+            next_action="agent_loop_rewrite_draft",
+            reviewer_type="user",
+            created_at="2026-05-03T12:11:00Z",
+        )
+
+
+def test_generation_review_decision_legacy_revise_length_is_migration_only() -> None:
     length_update = LengthPlanUpdate(
         schema_version="1.0",
         update_id="length-001",
@@ -108,26 +146,47 @@ def test_generation_review_decision_revise_length_requires_length_plan_update() 
         created_at="2026-05-03T12:10:00Z",
     )
 
-    assert decision.to_dict()["status"] == "revise_length"
+    assert decision.to_dict()["status"] == "rewrite_requested"
     assert decision.to_dict()["length_plan_update"]["target_chars"] == 3200
+    assert decision.to_dict()["length_plan_update"]["legacy_migration_only"] is True
+    assert decision.to_dict()["legacy_migration_only"] is True
     assert decision.to_dict()["next_action_checkpoint"] == "wait_length_review"
 
-    with pytest.raises(ValueError, match="length_plan_update"):
+
+def test_generation_review_decision_replan_requested_preserves_feedback_text() -> None:
+    decision = GenerationReviewDecision(
+        schema_version="1.0",
+        decision_id="review-005",
+        chapter_id="chapter-001",
+        draft_id="draft-005",
+        status="replan_requested",
+        reason_code="structure_mismatch",
+        feedback_text=" 当前章方向需要回退重规划。 ",
+        next_action="agent_loop_replan_chapter",
+        reviewer_type="user",
+        created_at="2026-05-03T12:15:00Z",
+    )
+
+    assert decision.to_dict()["status"] == "replan_requested"
+    assert decision.to_dict()["feedback_text"] == "当前章方向需要回退重规划。"
+    assert decision.to_dict()["next_action"] == "agent_loop_replan_chapter"
+
+    with pytest.raises(ValueError, match="feedback_text"):
         GenerationReviewDecision(
             schema_version="1.0",
-            decision_id="review-004",
+            decision_id="review-006",
             chapter_id="chapter-001",
-            draft_id="draft-004",
-            status="revise_length",
-            reason_code="length_too_short",
-            feedback_text="缺少长度修订对象。",
-            next_action_checkpoint="wait_length_review",
+            draft_id="draft-006",
+            status="replan_requested",
+            reason_code="direction_mismatch",
+            feedback_text="",
+            next_action="agent_loop_replan_chapter",
             reviewer_type="user",
-            created_at="2026-05-03T12:11:00Z",
+            created_at="2026-05-03T12:16:00Z",
         )
 
 
-def test_generation_review_decision_replan_chapter_requires_replan_request() -> None:
+def test_generation_review_decision_legacy_replan_chapter_is_migration_only() -> None:
     replan_request = ChapterReplanRequest(
         schema_version="1.0",
         request_id="replan-001",
@@ -155,23 +214,11 @@ def test_generation_review_decision_replan_chapter_requires_replan_request() -> 
         created_at="2026-05-03T12:15:00Z",
     )
 
-    assert decision.to_dict()["status"] == "replan_chapter"
+    assert decision.to_dict()["status"] == "replan_requested"
     assert decision.to_dict()["chapter_replan_request"]["replan_scope"] == "current_chapter"
+    assert decision.to_dict()["chapter_replan_request"]["legacy_migration_only"] is True
+    assert decision.to_dict()["legacy_migration_only"] is True
     assert decision.to_dict()["next_action_checkpoint"] == "wait_chapter_review"
-
-    with pytest.raises(ValueError, match="chapter_replan_request"):
-        GenerationReviewDecision(
-            schema_version="1.0",
-            decision_id="review-006",
-            chapter_id="chapter-001",
-            draft_id="draft-006",
-            status="replan_chapter",
-            reason_code="direction_mismatch",
-            feedback_text="缺少章节重规划请求。",
-            next_action_checkpoint="wait_chapter_review",
-            reviewer_type="user",
-            created_at="2026-05-03T12:16:00Z",
-        )
 
 
 def test_requirement_coverage_accepts_runtime_writer_aliases(tmp_path: Path) -> None:
@@ -217,6 +264,7 @@ def test_restricted_writer_executor_exposes_draft_generation_interface(tmp_path:
     executor = RestrictedWriterExecutor(
         repo_root=tmp_path,
         run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     execution_input = {
         "chapter_title": "测试扩写",
@@ -563,7 +611,11 @@ def test_chapter_package_is_constrained_to_batch_boundaries(tmp_path: Path) -> N
 
 def test_prepare_freeze_a_can_disable_character_cast_planning(tmp_path: Path) -> None:
     run_writer = RunWriter(RunLayout(tmp_path / "runs"))
-    orchestrator = WriterLayeredGenerationOrchestrator(repo_root=tmp_path, run_writer=run_writer)
+    orchestrator = WriterLayeredGenerationOrchestrator(
+        repo_root=tmp_path,
+        run_writer=run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
 
     orchestrator.check_modeling_status = lambda _conn, *, book_id: ModelingStatus(  # type: ignore[method-assign]
         book_id=book_id,
@@ -665,6 +717,7 @@ def test_run_writer_rework_artifacts_persist_contract_defaults(tmp_path: Path) -
         "feedback_text": "保留现有方向，但需要补足关键段落。",
         "preserve_story_direction": True,
         "created_at": length_update_doc["data"]["created_at"],
+        "legacy_migration_only": True,
     }
 
     replan_request_path = writer.write_chapter_replan_request(
@@ -701,6 +754,7 @@ def test_run_writer_rework_artifacts_persist_contract_defaults(tmp_path: Path) -
             "suggested_target_chars": 2600,
         },
         "created_at": replan_request_doc["data"]["created_at"],
+        "legacy_migration_only": True,
     }
 
 
@@ -871,6 +925,259 @@ def _write_replan_review_decision(
     orchestrator.run_writer.write_generation_review_decision(run_id, decision)
 
 
+class _EchoRevisionAdapter:
+    def __init__(self) -> None:
+        self.inputs: list[ScopedArtifactRevisionLLMInput] = []
+
+    def generate_candidate(self, llm_input: ScopedArtifactRevisionLLMInput) -> dict[str, Any]:
+        self.inputs.append(llm_input)
+        revised = dict(llm_input.target_artifact)
+        notes = [str(item) for item in (revised.get("review_notes") or []) if str(item).strip()]
+        notes.append(f"用户反馈：{llm_input.user_feedback}")
+        revised["review_notes"] = notes
+        return {
+            "revision_id": f"revision-{llm_input.request['request_id']}",
+            "request_id": llm_input.request["request_id"],
+            "status": "candidate",
+            "target_artifact_type": llm_input.request["target_artifact_type"],
+            "target_artifact_path": llm_input.request["target_artifact_path"],
+            "change_summary": "按用户反馈更新 review_notes。",
+            "validation": {"adapter": "echo"},
+            "created_at": "2026-05-03T13:00:00Z",
+            "revised_artifact": revised,
+        }
+
+
+def test_artifact_review_decision_contract_preserves_raw_user_text(tmp_path: Path) -> None:
+    writer = RunWriter(layout=RunLayout(base_dir=tmp_path / "runs"))
+    supplement_text = "  本章控制在三千字左右，动作段更紧。  "
+    feedback_text = "  标题太直白，把伏笔藏到第二个场景。  "
+
+    approved = ArtifactReviewDecision(
+        review_id="review-1",
+        run_id="run-1",
+        artifact_kind="chapter_package",
+        decision="approved",
+        supplement_text=supplement_text,
+        next_action="continue_agent_loop",
+    )
+    revision = ArtifactReviewDecision(
+        review_id="review-2",
+        run_id="run-1",
+        artifact_kind="chapter_package",
+        decision="revision_requested",
+        revision_feedback=feedback_text,
+        next_action="revise_artifact",
+    )
+    writer.write_artifact_review_decision("run-1", approved)
+    writer.write_user_supplement("run-1", {"supplement_text": supplement_text}, review_id=approved.review_id)
+    writer.write_artifact_review_decision("run-1", revision)
+
+    supplement_doc = _load_run_artifact_data(writer.layout.run_dir("run-1") / "user_supplement.json")
+    revision_doc = _load_run_artifact_data(writer.layout.run_dir("run-1") / "artifact_review_decision.json")
+
+    assert approved.to_dict()["supplement_text"] == supplement_text
+    assert revision.to_dict()["revision_feedback"] == feedback_text
+    assert supplement_doc["supplement_text"] == supplement_text
+    assert revision_doc["revision_feedback"] == feedback_text
+
+
+def test_legacy_wait_length_state_recovers_to_chapter_review_migration_target(tmp_path: Path) -> None:
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    workflow = WriterInteractiveWorkflow(
+        planner=WriterLayeredGenerationOrchestrator(repo_root=tmp_path, run_writer=run_writer),
+        executor=RestrictedWriterExecutor(repo_root=tmp_path, run_writer=run_writer),
+        rollback_manager=WriterRollbackManager(run_writer=run_writer),
+        run_writer=run_writer,
+    )
+    run_dir = run_writer.prepare_run_dir("run-legacy")
+    chapter_package_path = run_dir / "chapter_package.json"
+    run_writer.write_json("run-legacy", "chapter_package.json", {"package_id": "pkg-1", "batch_id": "batch-1", "chapters": []})
+    run_writer.write_json(
+        "run-legacy",
+        "workflow_state.json",
+        {
+            "run_id": "run-legacy",
+            "book_id": "book-1",
+            "product_mode": "assist",
+            "current_stage": "wait_length_review",
+            "pending_checkpoint": {
+                "stage": "wait_length_review",
+                "artifact_path": str(run_dir / "chapter_length_plan.json"),
+            },
+        },
+    )
+
+    state = workflow.load_workflow_state(run_id="run-legacy")
+    checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-legacy")
+
+    assert state is not None
+    assert state["agent_state"] == "reviewing_artifact"
+    assert state["migration_target_stage"] == "chapter_review"
+    assert checkpoint is not None
+    assert checkpoint["legacy_stage"] == "wait_length_review"
+    assert checkpoint["stage"] == "chapter_review"
+    assert checkpoint["artifact_path"] == str(chapter_package_path)
+
+
+def test_approved_chapter_review_supplement_enters_execution_prompt_without_legacy_gates(tmp_path: Path) -> None:
+    db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
+    _, workflow = build_writer_workflow(
+        repo_root=planner_orchestrator.repo_root,
+        db_path=db.db_path,
+        runs_dir=planner_orchestrator.run_writer.layout.base_dir,
+        dry_run=True,
+    )
+    supplement_text = "本章控制在三千字左右，动作段更紧，结尾保留悬念。"
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        workflow.initialize_workflow(run_id="run-1", book_id="book-1", product_mode="assist")
+        workflow.prepare_chapter_package(run_id="run-1", book_id="book-1", product_mode="assist", chapter_count=2)
+        chapter_package_path = workflow.run_writer.layout.run_dir("run-1") / "chapter_package.json"
+        chapter_package_doc = json.loads(chapter_package_path.read_text(encoding="utf-8"))
+        chapter_package_doc["data"]["chapters"][0]["must_include"] = []
+        chapter_package_doc["data"]["chapters"][0]["relationship_targets"] = []
+        chapter_package_path.write_text(json.dumps(chapter_package_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+        result = workflow.review_writer_artifact(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            product_mode="assist",
+            decision="approved",
+            supplement_text=supplement_text,
+        )
+
+    run_dir = workflow.run_writer.layout.run_dir("run-1")
+    state = workflow.load_workflow_state(run_id="run-1")
+    execution_input = _load_run_artifact_data(run_dir / "chapter_execution_input.json")
+    prompt = workflow.executor.build_draft_prompt(execution_input)
+    checkpoints = _load_run_artifact_data(run_dir / "workflow_checkpoints.json")["checkpoints"]
+    checkpoint_stages = [item["stage"] for item in checkpoints]
+
+    assert result["decision"]["supplement_text"] == supplement_text
+    assert _load_run_artifact_data(run_dir / "user_supplement.json")["supplement_text"] == supplement_text
+    assert execution_input["user_supplement"]["supplement_text"] == supplement_text
+    assert supplement_text in prompt["user_prompt"]
+    assert (run_dir / "chapter_writing_guidance.json").exists()
+    assert state is not None
+    assert state["agent_state"] == "reviewing_draft"
+    assert state["current_stage"] == "wait_chapter_acceptance"
+    assert "wait_length_review" not in checkpoint_stages
+    assert "freeze_d_review" not in checkpoint_stages
+
+
+def test_prepare_execution_input_includes_relevant_character_relationship_facts(tmp_path: Path) -> None:
+    db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
+    run_dir = planner_orchestrator.run_writer.layout.run_dir("run-1")
+    chapter_package_path = run_dir / "chapter_package.json"
+    chapter_package_doc = json.loads(chapter_package_path.read_text(encoding="utf-8"))
+    chapter_id = str(chapter_package_doc["data"]["chapters"][0]["chapter_id"])
+    chapter_package_doc["data"]["chapters"][0]["must_include"] = ["沈青与顾迟在旧码头会合。"]
+    chapter_package_doc["data"]["chapters"][0]["relationship_targets"] = []
+    chapter_package_path.write_text(json.dumps(chapter_package_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    outline_path = planner_orchestrator.repo_root / "memory" / "outlines" / "book-1.outline.md"
+    outline_path.write_text(
+        outline_path.read_text(encoding="utf-8") + "\n- 沈青与顾迟在旧案调查中维持谨慎合作。\n",
+        encoding="utf-8",
+    )
+    planner_orchestrator.confirm_chapter_package(run_id="run-1")
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": "book-1",
+                "canonical_name": "顾迟",
+                "aliases": ["迟"],
+                "profile_summary_md": "# 顾迟\n\n- 情报中间人。\n",
+                "relationships": [
+                    {
+                        "target_name": "沈青",
+                        "relation_type": "合作",
+                        "status_summary": "与沈青是谨慎合作关系，尚未建立完全信任。",
+                        "evidence_level": "explicit",
+                    }
+                ],
+                "personality": [],
+                "occupations": [],
+                "age_timeline": [],
+                "abilities": [],
+                "recent_activity": [],
+                "story_events": [],
+                "chapter_indexes": [10],
+                "importance_score": 80,
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        executor = RestrictedWriterExecutor(
+            repo_root=planner_orchestrator.repo_root,
+            run_writer=planner_orchestrator.run_writer,
+            model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+        )
+        result = executor.prepare_execution_input(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            chapter_id=chapter_id,
+        )
+
+    execution_input = result["chapter_execution_input"]
+    fact_inputs = execution_input["fact_inputs"]
+    prompt = executor.build_draft_prompt(execution_input)
+    rendered_profiles = json.dumps(fact_inputs.get("character_profiles"), ensure_ascii=False)
+
+    assert "character_profiles" in fact_inputs
+    assert "relationship_fact_policy" in fact_inputs
+    assert "顾迟" in rendered_profiles
+    assert "沈青" in rendered_profiles
+    assert "谨慎合作关系" in rendered_profiles
+    assert "story_outline_evidence" in fact_inputs
+    assert "人物身份、亲属关系" in prompt["user_prompt"]
+    assert "谨慎合作关系" in prompt["user_prompt"]
+
+
+def test_revision_requested_updates_same_artifact_and_returns_same_review_gate(tmp_path: Path) -> None:
+    db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
+    revision_adapter = _EchoRevisionAdapter()
+    _, workflow = build_writer_workflow(
+        repo_root=planner_orchestrator.repo_root,
+        db_path=db.db_path,
+        runs_dir=planner_orchestrator.run_writer.layout.base_dir,
+        dry_run=True,
+        revision_adapter=revision_adapter,
+    )
+    feedback_text = "第二章标题不要泄露结尾，把伏笔留到最后一场。"
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        workflow.initialize_workflow(run_id="run-1", book_id="book-1", product_mode="assist")
+        workflow.prepare_chapter_package(run_id="run-1", book_id="book-1", product_mode="assist", chapter_count=2)
+        result = workflow.review_writer_artifact(
+            run_id="run-1",
+            decision="revision_requested",
+            artifact_kind="chapter_package",
+            revision_feedback=feedback_text,
+        )
+
+    run_dir = workflow.run_writer.layout.run_dir("run-1")
+    state = workflow.load_workflow_state(run_id="run-1")
+    review_doc = _load_run_artifact_data(run_dir / "artifact_review_decision.json")
+    revised_package = _load_run_artifact_data(run_dir / "chapter_package.json")
+
+    assert result["status"] == "revision_requested"
+    assert result["revision"]["status"] == "revised"
+    assert review_doc["revision_feedback"] == feedback_text
+    assert revision_adapter.inputs
+    assert revision_adapter.inputs[0].user_feedback == feedback_text
+    assert feedback_text in str(revised_package["review_notes"])
+    assert state is not None
+    assert state["agent_state"] == "reviewing_artifact"
+    assert state["pending_checkpoint"]["stage"] == "chapter_review"
+
+
 def test_restricted_writer_executor_blocks_illegal_relationship_progression(tmp_path: Path) -> None:
     db, orchestrator = _prepare_freeze_c_chain(tmp_path)
     chapter_package_path = orchestrator.run_writer.layout.run_dir("run-1") / "chapter_package.json"
@@ -883,7 +1190,7 @@ def test_restricted_writer_executor_blocks_illegal_relationship_progression(tmp_
     executor = RestrictedWriterExecutor(
         repo_root=orchestrator.repo_root,
         run_writer=orchestrator.run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     with db.connect() as conn:
         result = executor.prepare_execution_input(
@@ -905,6 +1212,55 @@ def test_restricted_writer_executor_blocks_illegal_relationship_progression(tmp_
     assert execution_result["canon_ready"] is False
     issue_types = {item["type"] for item in execution_result["continuity_report"]["issues"]}
     assert "missing_relationship_bridge" in issue_types
+
+
+def test_execute_current_chapter_still_registers_draft_review_when_continuity_blocks(tmp_path: Path) -> None:
+    db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
+    chapter_package_path = planner_orchestrator.run_writer.layout.run_dir("run-1") / "chapter_package.json"
+    chapter_package_doc = json.loads(chapter_package_path.read_text(encoding="utf-8"))
+    chapter_id = str(chapter_package_doc["data"]["chapters"][0]["chapter_id"])
+    chapter_package_doc["data"]["chapters"][0]["relationship_targets"][0]["required_bridge"] = ["共同危机", "公开站队"]
+    chapter_package_path.write_text(json.dumps(chapter_package_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    planner_orchestrator.confirm_chapter_package(run_id="run-1")
+
+    _, workflow = build_writer_workflow(
+        repo_root=planner_orchestrator.repo_root,
+        db_path=db.db_path,
+        runs_dir=planner_orchestrator.run_writer.layout.base_dir,
+        dry_run=True,
+    )
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        workflow.initialize_workflow(run_id="run-1", book_id="book-1", product_mode="assist")
+        workflow.prepare_execution(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            chapter_id=chapter_id,
+            product_mode="assist",
+        )
+        workflow.continue_after_execution_review(run_id="run-1")
+        result = workflow.execute_current_chapter(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            product_mode="assist",
+        )
+
+    state = workflow.load_workflow_state(run_id="run-1")
+    checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-1")
+    decision_path = workflow.run_writer.layout.run_dir("run-1") / "generation_review_decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))["data"]
+
+    assert result["canon_ready"] is False
+    assert state is not None
+    assert state["current_stage"] == "wait_chapter_acceptance"
+    assert state["agent_state"] == "reviewing_draft"
+    assert checkpoint is not None
+    assert checkpoint["stage"] == "wait_chapter_acceptance"
+    assert decision["status"] == ""
+    assert decision["chapter_id"] == chapter_id
 
 
 def test_execute_current_chapter_persists_pending_generation_review_decision_artifact(tmp_path: Path) -> None:
@@ -983,7 +1339,7 @@ def test_executor_requires_accepted_review_decision_before_auto_writeback(tmp_pa
     executor = RestrictedWriterExecutor(
         repo_root=orchestrator.repo_root,
         run_writer=orchestrator.run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     with db.connect() as conn:
         executor.prepare_execution_input(
@@ -1034,7 +1390,7 @@ def test_executor_writeback_promotes_planned_character_to_formal_memory_after_ac
     executor = RestrictedWriterExecutor(
         repo_root=orchestrator.repo_root,
         run_writer=orchestrator.run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     with db.connect() as conn:
         executor.prepare_execution_input(
@@ -1164,7 +1520,7 @@ def _prepare_batch_execution_workflow(
     return db, planner_orchestrator, workflow, chapter_id
 
 
-def test_batch_workflow_execute_current_chapter_routes_revise_length_to_wait_length_review_without_writeback(
+def test_batch_workflow_execute_current_chapter_routes_legacy_revise_length_to_rewrite_without_writeback(
     tmp_path: Path,
 ) -> None:
     db, planner_orchestrator, workflow, chapter_id = _prepare_batch_execution_workflow(tmp_path)
@@ -1186,17 +1542,17 @@ def test_batch_workflow_execute_current_chapter_routes_revise_length_to_wait_len
     freeze_e = workflow.run_writer.get_freeze_record("run-1", "freeze_e")
 
     assert result["canon_ready"] is True
-    assert result["review_decision_status"] == "revise_length"
+    assert result["review_decision_status"] == "rewrite_requested"
     assert result["accepted_for_writeback"] is False
     assert result["writeback_committed"] is False
     assert result["memory_writeback"] == {}
     assert state is not None
-    assert state["current_stage"] == "wait_length_review"
+    assert state["current_stage"] == "freeze_d"
+    assert state["current_state"] == "generating_draft"
     assert state["last_rollback"] is None
     assert state["terminal_stage"] is None
-    assert state["pending_checkpoint"]["stage"] == "wait_length_review"
-    assert resumed_checkpoint is not None
-    assert resumed_checkpoint["stage"] == "wait_length_review"
+    assert state["pending_checkpoint"] is None
+    assert resumed_checkpoint is None
     assert freeze_c is not None
     assert freeze_c.status == "frozen"
     assert freeze_d is not None
@@ -1204,7 +1560,7 @@ def test_batch_workflow_execute_current_chapter_routes_revise_length_to_wait_len
     assert freeze_e is None
 
 
-def test_chapter_length_plan_review_sits_between_freeze_c_and_freeze_d(tmp_path: Path) -> None:
+def test_chapter_review_approval_skips_length_review_and_allows_execution_prep(tmp_path: Path) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
     _, workflow = build_writer_workflow(
         repo_root=planner_orchestrator.repo_root,
@@ -1216,18 +1572,18 @@ def test_chapter_length_plan_review_sits_between_freeze_c_and_freeze_d(tmp_path:
 
     workflow.continue_after_chapter_review(run_id="run-1")
     state = workflow.load_workflow_state(run_id="run-1")
-    length_checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-1")
+    resume_checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-1")
     run_dir = workflow.run_writer.layout.run_dir("run-1")
-    length_plan_doc = json.loads((run_dir / "chapter_length_plan.json").read_text(encoding="utf-8"))
-    chapter_id = str(length_plan_doc["data"]["budgets"][0]["chapter_id"])
-    target_chars = int(length_plan_doc["data"]["budgets"][0]["target_chars"])
+    chapter_package = _load_run_artifact_data(run_dir / "chapter_package.json")
+    chapter_id = str(chapter_package["chapters"][0]["chapter_id"])
 
     assert state is not None
-    assert state["current_stage"] == "wait_length_review"
-    assert length_checkpoint is not None
-    assert length_checkpoint["stage"] == "wait_length_review"
+    assert state["current_stage"] == "freeze_c"
+    assert state["current_state"] == "agent_running"
+    assert state["pending_checkpoint"] is None
+    assert resume_checkpoint is None
+    assert not (run_dir / "chapter_length_plan.json").exists()
 
-    workflow.continue_after_length_review(run_id="run-1")
     with db.connect() as conn:
         db.init_schema(conn)
         workflow.prepare_execution(
@@ -1240,8 +1596,14 @@ def test_chapter_length_plan_review_sits_between_freeze_c_and_freeze_d(tmp_path:
 
     execution_input_doc = json.loads((run_dir / "chapter_execution_input.json").read_text(encoding="utf-8"))
     budget_doc = json.loads((run_dir / "chapter_length_budget.json").read_text(encoding="utf-8"))
-    assert execution_input_doc["data"]["length_budget"]["target_chars"] == target_chars
-    assert budget_doc["data"]["target_chars"] == target_chars
+    state_after_execution = workflow.load_workflow_state(run_id="run-1")
+    assert execution_input_doc["data"]["chapter_id"] == chapter_id
+    assert execution_input_doc["data"]["length_budget"]["chapter_id"] == chapter_id
+    assert budget_doc["data"]["chapter_id"] == chapter_id
+    assert state_after_execution is not None
+    assert state_after_execution["current_stage"] == "freeze_d"
+    assert state_after_execution["current_state"] == "generating_draft"
+    assert workflow.resume_from_latest_checkpoint(run_id="run-1") is None
 
 
 def test_continue_after_length_review_applies_interactive_length_overrides(tmp_path: Path) -> None:
@@ -1254,6 +1616,7 @@ def test_continue_after_length_review_applies_interactive_length_overrides(tmp_p
     )
     workflow.initialize_workflow(run_id="run-1", book_id="book-1", product_mode="assist")
     workflow.continue_after_chapter_review(run_id="run-1")
+    workflow.prepare_chapter_length_plan(run_id="run-1", product_mode="assist")
     run_dir = workflow.run_writer.layout.run_dir("run-1")
     original_plan = _load_run_artifact_data(run_dir / "chapter_length_plan.json")
     first_chapter_id = str(original_plan["budgets"][0]["chapter_id"])
@@ -1297,7 +1660,7 @@ def test_continue_after_length_review_applies_interactive_length_overrides(tmp_p
     assert state["current_stage"] == "length_confirmed"
 
 
-def test_revise_length_updates_chapter_length_plan_before_rewrite(tmp_path: Path) -> None:
+def test_legacy_revise_length_rewrite_request_injects_draft_feedback_without_writeback(tmp_path: Path) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
     planner_orchestrator.confirm_chapter_package(run_id="run-1")
     _, workflow = build_writer_workflow(
@@ -1307,12 +1670,10 @@ def test_revise_length_updates_chapter_length_plan_before_rewrite(tmp_path: Path
         dry_run=True,
     )
     workflow.initialize_workflow(run_id="run-1", book_id="book-1", product_mode="assist")
-    workflow.prepare_chapter_length_plan(run_id="run-1", product_mode="assist")
-    workflow.continue_after_length_review(run_id="run-1")
 
     run_dir = workflow.run_writer.layout.run_dir("run-1")
-    length_plan_doc = json.loads((run_dir / "chapter_length_plan.json").read_text(encoding="utf-8"))
-    chapter_id = str(length_plan_doc["data"]["budgets"][0]["chapter_id"])
+    chapter_package = _load_run_artifact_data(run_dir / "chapter_package.json")
+    chapter_id = str(chapter_package["chapters"][0]["chapter_id"])
     with db.connect() as conn:
         db.init_schema(conn)
         workflow.prepare_execution(
@@ -1322,31 +1683,35 @@ def test_revise_length_updates_chapter_length_plan_before_rewrite(tmp_path: Path
             chapter_id=chapter_id,
             product_mode="assist",
         )
-    _write_revise_length_review_decision(planner_orchestrator, run_id="run-1", chapter_id=chapter_id)
-
-    outcome = workflow.continue_after_chapter_acceptance(run_id="run-1")
-    updated_plan_doc = json.loads((run_dir / "chapter_length_plan.json").read_text(encoding="utf-8"))
-    updated_budget = next(
-        item for item in updated_plan_doc["data"]["budgets"] if item["chapter_id"] == chapter_id
-    )
-
-    assert outcome["stage"] == "wait_length_review"
-    assert updated_budget["target_chars"] == 3200
-    assert updated_budget["min_chars"] == 2800
-    assert updated_budget["max_chars"] == 3600
-
-    workflow.continue_after_length_review(run_id="run-1")
-    with db.connect() as conn:
-        db.init_schema(conn)
-        workflow.prepare_execution(
+        workflow.execute_current_chapter(
             conn,
             run_id="run-1",
             book_id="book-1",
-            chapter_id=chapter_id,
             product_mode="assist",
         )
-    rewritten_input_doc = json.loads((run_dir / "chapter_execution_input.json").read_text(encoding="utf-8"))
-    assert rewritten_input_doc["data"]["length_budget"]["target_chars"] == 3200
+        _write_revise_length_review_decision(planner_orchestrator, run_id="run-1", chapter_id=chapter_id)
+        rewrite_result = workflow.rewrite_current_chapter(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            product_mode="assist",
+        )
+
+    rewrite_request = _load_run_artifact_data(run_dir / "draft_rewrite_request.json")
+    rewritten_input = _load_run_artifact_data(run_dir / "chapter_execution_input.json")
+    state = workflow.load_workflow_state(run_id="run-1")
+
+    assert rewrite_result["draft_path"].endswith("draft.md")
+    assert rewrite_request["feedback_text"] == "字数偏短，先回到长度审阅。"
+    assert rewritten_input["draft_feedback"]["feedback_text"] == "字数偏短，先回到长度审阅。"
+    assert "draft_feedback.feedback_text" in "\n".join(rewritten_input["writer_rules"])
+    assert not (run_dir / "memory_writeback.json").exists()
+    assert workflow.run_writer.get_freeze_record("run-1", "freeze_e") is None
+    assert state is not None
+    assert (run_dir / "generation_review_decisions" / "run-1-revise-length.json").exists()
+    assert state["current_stage"] == "wait_chapter_acceptance"
+    assert state["current_decision_id"] != "run-1-revise-length"
+    assert state["current_decision_id"].endswith("draft-002")
 
 
 def test_batch_workflow_execute_current_chapter_routes_replan_chapter_to_wait_chapter_review_without_writeback(
@@ -1371,17 +1736,18 @@ def test_batch_workflow_execute_current_chapter_routes_replan_chapter_to_wait_ch
     freeze_e = workflow.run_writer.get_freeze_record("run-1", "freeze_e")
 
     assert result["canon_ready"] is True
-    assert result["review_decision_status"] == "replan_chapter"
+    assert result["review_decision_status"] == "replan_requested"
     assert result["accepted_for_writeback"] is False
     assert result["writeback_committed"] is False
     assert result["memory_writeback"] == {}
     assert state is not None
-    assert state["current_stage"] == "wait_chapter_review"
+    assert state["current_stage"] == "chapter_review"
+    assert state["current_state"] == "reviewing_artifact"
     assert state["last_rollback"] is None
     assert state["terminal_stage"] is None
-    assert state["pending_checkpoint"]["stage"] == "wait_chapter_review"
+    assert state["pending_checkpoint"]["stage"] == "chapter_review"
     assert resumed_checkpoint is not None
-    assert resumed_checkpoint["stage"] == "wait_chapter_review"
+    assert resumed_checkpoint["stage"] == "chapter_review"
     assert freeze_c is not None
     assert freeze_c.status == "frozen"
     assert freeze_d is not None
@@ -1442,7 +1808,7 @@ def test_rollback_manager_supports_progressive_and_cascade_rollbacks(tmp_path: P
     executor = RestrictedWriterExecutor(
         repo_root=orchestrator.repo_root,
         run_writer=orchestrator.run_writer,
-        model_client=None,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
     )
     with db.connect() as conn:
         executor.prepare_execution_input(conn, run_id="run-1", book_id="book-1", chapter_id=chapter_id)
@@ -1580,7 +1946,9 @@ def test_workflow_waiting_review_states_are_persisted_and_resumable(tmp_path: Pa
     assert state_after_length is not None
     assert state_after_length["current_stage"] == "wait_length_review"
     assert resumed_length is not None
-    assert resumed_length["stage"] == "wait_length_review"
+    assert resumed_length["stage"] == "chapter_review"
+    assert resumed_length["legacy_stage"] == "wait_length_review"
+    assert "legacy/migration-only" in resumed_length["migration_note"]
 
     chapter_review_checkpoint = workflow.register_wait_chapter_review(
         run_id="run-wait-states",
@@ -1776,9 +2144,11 @@ def test_assist_workflow_records_confirmations_and_approves_writeback(tmp_path: 
             product_mode="assist",
         )
         execution_checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-assist-full")
-        assert execution_checkpoint is not None
-        assert execution_checkpoint["stage"] == "freeze_d_review"
-        workflow.continue_after_execution_review(run_id="run-assist-full")
+        execution_state = workflow.load_workflow_state(run_id="run-assist-full")
+        assert execution_checkpoint is None
+        assert execution_state is not None
+        assert execution_state["current_stage"] == "freeze_d"
+        assert execution_state["current_state"] == "generating_draft"
 
         execution_result = workflow.execute_current_chapter(
             conn,
@@ -1810,7 +2180,7 @@ def test_assist_workflow_records_confirmations_and_approves_writeback(tmp_path: 
     assert confirmed_by_stage["freeze_a_review"]["source"] == "continue_after_planning_review"
     assert confirmed_by_stage["batch_review"]["source"] == "continue_after_batch_review"
     assert confirmed_by_stage["chapter_review"]["source"] == "continue_after_chapter_review"
-    assert confirmed_by_stage["freeze_d_review"]["source"] == "continue_after_execution_review"
+    assert "freeze_d_review" not in confirmed_by_stage
     assert confirmed_by_stage["wait_chapter_acceptance"]["source"] == "continue_after_chapter_acceptance"
     assert confirmed_by_stage["wait_chapter_acceptance"]["confirmed_at"]
     assert confirmed_by_stage["writeback_review"]["source"] == "approve_writeback"
@@ -2062,30 +2432,37 @@ def test_continue_after_chapter_acceptance_routes_review_decision_statuses(tmp_p
             "run_id": "run-revise-length",
             "product_mode": "assist",
             "writer": _write_revise_length_review_decision,
-            "expected_stage": "wait_length_review",
-            "expected_pending_stage": "wait_length_review",
-            "expected_resume_stage": "wait_length_review",
-            "expects_length_plan_update": True,
+            "expected_stage": "freeze_d",
+            "expected_outcome_stage": "generating_draft",
+            "expected_agent_state": "generating_draft",
+            "expected_pending_stage": None,
+            "expected_resume_stage": None,
+            "expects_legacy_payload": "length_plan_update",
             "expects_chapter_replan_request": False,
         },
         {
             "run_id": "run-replan-chapter",
             "product_mode": "assist",
             "writer": _write_replan_review_decision,
-            "expected_stage": "wait_chapter_review",
-            "expected_pending_stage": "wait_chapter_review",
-            "expected_resume_stage": "wait_chapter_review",
+            "expected_stage": "chapter_review",
+            "expected_outcome_stage": "chapter_review",
+            "expected_agent_state": "reviewing_artifact",
+            "expected_pending_stage": "chapter_review",
+            "expected_resume_stage": "chapter_review",
             "expects_length_plan_update": False,
-            "expects_chapter_replan_request": True,
+            "expects_legacy_payload": "chapter_replan_request",
         },
         {
             "run_id": "run-discarded",
             "product_mode": "assist",
             "writer": _write_discarded_review_decision,
             "expected_stage": "halted",
+            "expected_outcome_stage": "halted",
+            "expected_agent_state": "halted",
             "expected_pending_stage": None,
             "expected_resume_stage": None,
             "expects_length_plan_update": False,
+            "expects_legacy_payload": "",
             "expects_chapter_replan_request": False,
         },
     ]
@@ -2114,9 +2491,12 @@ def test_continue_after_chapter_acceptance_routes_review_decision_statuses(tmp_p
         draft_index_doc = json.loads((run_dir / "draft_retention_index.json").read_text(encoding="utf-8"))
         draft_record = draft_index_doc["data"]["drafts"][decision_data["draft_id"]]
 
-        assert outcome["stage"] == case["expected_stage"]
+        expected_outcome_stage = str(case.get("expected_outcome_stage") or case["expected_stage"])
+        assert outcome["stage"] == expected_outcome_stage
         assert state is not None
         assert state["current_stage"] == case["expected_stage"]
+        if case.get("expected_agent_state"):
+            assert state["current_state"] == case["expected_agent_state"]
         assert decision_data["run_id"] == run_id
         assert decision_data["chapter_id"] == "chapter-001"
         assert decision_data["draft_id"]
@@ -2127,24 +2507,13 @@ def test_continue_after_chapter_acceptance_routes_review_decision_statuses(tmp_p
         assert draft_record["archived_artifacts"]["generation_review_decision.json"].endswith(
             f"drafts/{decision_data['draft_id']}/generation_review_decision.json"
         )
-        length_plan_update_path = run_dir / "length_plan_update.json"
-        chapter_replan_request_path = run_dir / "chapter_replan_request.json"
-        if case["expects_length_plan_update"]:
-            length_plan_update_doc = json.loads(length_plan_update_path.read_text(encoding="utf-8"))
-            assert length_plan_update_doc["data"]["decision_id"] == decision_data["decision_id"]
-            assert length_plan_update_doc["data"]["chapter_id"] == "chapter-001"
-            assert length_plan_update_doc["data"]["reason_code"] == decision_data["reason_code"]
-            assert not chapter_replan_request_path.exists()
-        else:
-            assert not length_plan_update_path.exists()
-        if case["expects_chapter_replan_request"]:
-            chapter_replan_request_doc = json.loads(chapter_replan_request_path.read_text(encoding="utf-8"))
-            assert chapter_replan_request_doc["data"]["decision_id"] == decision_data["decision_id"]
-            assert chapter_replan_request_doc["data"]["chapter_id"] == "chapter-001"
-            assert chapter_replan_request_doc["data"]["reason_code"] == decision_data["reason_code"]
-            assert not length_plan_update_path.exists()
-        else:
-            assert not chapter_replan_request_path.exists()
+        assert not (run_dir / "length_plan_update.json").exists()
+        assert not (run_dir / "chapter_replan_request.json").exists()
+        legacy_payload_name = str(case.get("expects_legacy_payload") or "")
+        if legacy_payload_name:
+            assert decision_data[legacy_payload_name]["decision_id"] == decision_data["decision_id"]
+            assert decision_data[legacy_payload_name]["chapter_id"] == "chapter-001"
+            assert decision_data[legacy_payload_name]["legacy_migration_only"] is True
         if case["expected_pending_stage"] is None:
             assert pending_checkpoint is None
         else:
@@ -2183,16 +2552,18 @@ def test_continue_after_chapter_acceptance_routes_review_decision_statuses(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("decision_writer", "expected_stage"),
+    ("decision_writer", "expected_outcome_stage", "expected_state_stage", "expected_resume_stage"),
     [
-        (_write_revise_length_review_decision, "wait_length_review"),
-        (_write_replan_review_decision, "wait_chapter_review"),
+        (_write_revise_length_review_decision, "generating_draft", "freeze_d", None),
+        (_write_replan_review_decision, "chapter_review", "chapter_review", "chapter_review"),
     ],
 )
 def test_rejection_wait_paths_do_not_invalidate_freezes_or_create_rollbacks(
     tmp_path: Path,
     decision_writer,
-    expected_stage: str,
+    expected_outcome_stage: str,
+    expected_state_stage: str,
+    expected_resume_stage: str | None,
 ) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
     chapter_package_path = planner_orchestrator.run_writer.layout.run_dir("run-1") / "chapter_package.json"
@@ -2240,12 +2611,15 @@ def test_rejection_wait_paths_do_not_invalidate_freezes_or_create_rollbacks(
     freeze_e = workflow.run_writer.get_freeze_record("run-1", "freeze_e")
     resumed_checkpoint = workflow.resume_from_latest_checkpoint(run_id="run-1")
 
-    assert outcome["stage"] == expected_stage
+    assert outcome["stage"] == expected_outcome_stage
     assert state is not None
-    assert state["current_stage"] == expected_stage
+    assert state["current_stage"] == expected_state_stage
     assert state["last_rollback"] is None
-    assert resumed_checkpoint is not None
-    assert resumed_checkpoint["stage"] == expected_stage
+    if expected_resume_stage is None:
+        assert resumed_checkpoint is None
+    else:
+        assert resumed_checkpoint is not None
+        assert resumed_checkpoint["stage"] == expected_resume_stage
     assert not rollback_events_path.exists()
     assert freeze_c is not None
     assert freeze_c.status == "frozen"
@@ -2254,7 +2628,7 @@ def test_rejection_wait_paths_do_not_invalidate_freezes_or_create_rollbacks(
     assert freeze_e is None
 
 
-def test_wait_chapter_review_can_continue_to_length_review(tmp_path: Path) -> None:
+def test_legacy_wait_chapter_review_continues_to_freeze_c_without_length_review(tmp_path: Path) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
     _, workflow = build_writer_workflow(
         repo_root=planner_orchestrator.repo_root,
@@ -2282,11 +2656,12 @@ def test_wait_chapter_review_can_continue_to_length_review(tmp_path: Path) -> No
         if item["stage"] == "wait_chapter_review" and item["status"] == "confirmed"
     ]
 
-    assert "chapter_length_plan" in outcome
+    assert outcome["next_agent_state"] == "generating_draft"
+    assert not (run_dir / "chapter_length_plan.json").exists()
     assert state is not None
-    assert state["current_stage"] == "wait_length_review"
-    assert resumed_checkpoint is not None
-    assert resumed_checkpoint["stage"] == "wait_length_review"
+    assert state["current_stage"] == "freeze_c"
+    assert state["current_state"] == "agent_running"
+    assert resumed_checkpoint is None
     assert confirmed_wait_chapter_review
 
 
@@ -2354,16 +2729,17 @@ def test_provisioning_new_draft_marks_previous_draft_as_superseded(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    ("decision_writer", "artifact_name"),
+    ("decision_writer", "legacy_payload_name", "expected_status"),
     [
-        (_write_revise_length_review_decision, "length_plan_update.json"),
-        (_write_replan_review_decision, "chapter_replan_request.json"),
+        (_write_revise_length_review_decision, "length_plan_update", "rewrite_requested"),
+        (_write_replan_review_decision, "chapter_replan_request", "replan_requested"),
     ],
 )
-def test_review_rework_artifacts_are_persisted_with_same_chapter_execution_draft(
+def test_legacy_review_rework_payloads_stay_embedded_migration_only_with_same_draft(
     tmp_path: Path,
     decision_writer,
-    artifact_name: str,
+    legacy_payload_name: str,
+    expected_status: str,
 ) -> None:
     db, planner_orchestrator, workflow, chapter_id = _prepare_batch_execution_workflow(tmp_path)
     run_id = "run-1"
@@ -2387,23 +2763,26 @@ def test_review_rework_artifacts_are_persisted_with_same_chapter_execution_draft
     workflow.continue_after_chapter_acceptance(run_id=run_id)
 
     decision_data = _load_run_artifact_data(run_dir / "generation_review_decision.json")
-    rework_artifact_data = _load_run_artifact_data(run_dir / artifact_name)
     draft_index_doc = _load_run_artifact_data(run_dir / "draft_retention_index.json")
     draft_record = draft_index_doc["drafts"][draft_id]
+    legacy_payload = decision_data[legacy_payload_name]
 
     archived_decision_path = Path(draft_record["archived_artifacts"]["generation_review_decision.json"])
-    archived_rework_artifact_path = Path(draft_record["archived_artifacts"][artifact_name])
 
     assert decision_data["run_id"] == run_id
     assert decision_data["chapter_id"] == chapter_id
     assert decision_data["draft_id"] == draft_id
+    assert decision_data["status"] == expected_status
     assert decision_data["decision_id"] == draft_record["decision_id"]
-    assert rework_artifact_data["decision_id"] == decision_data["decision_id"]
-    assert rework_artifact_data["chapter_id"] == chapter_id
+    assert legacy_payload["decision_id"] == decision_data["decision_id"]
+    assert legacy_payload["chapter_id"] == chapter_id
+    assert legacy_payload["legacy_migration_only"] is True
     assert draft_record["draft_id"] == draft_id
     assert draft_record["chapter_id"] == chapter_id
     assert Path(draft_record["artifact_dir"]) == run_dir / "drafts" / draft_id
     assert archived_decision_path == run_dir / "drafts" / draft_id / "generation_review_decision.json"
-    assert archived_rework_artifact_path == run_dir / "drafts" / draft_id / artifact_name
+    assert "length_plan_update.json" not in draft_record["archived_artifacts"]
+    assert "chapter_replan_request.json" not in draft_record["archived_artifacts"]
+    assert not (run_dir / "length_plan_update.json").exists()
+    assert not (run_dir / "chapter_replan_request.json").exists()
     assert _load_run_artifact_data(archived_decision_path) == decision_data
-    assert _load_run_artifact_data(archived_rework_artifact_path) == rework_artifact_data

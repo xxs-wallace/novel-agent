@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ...runs.writer import RunWriter
-from ..schemas.orchestration_schema import FreezeRecord
+from ..schemas.orchestration_schema import (
+    ArtifactReviewDecision,
+    FreezeRecord,
+    OutlineResearchAnswerSubmission,
+    OutlineResearchQuestionSet,
+    OutlineResearchUserAnswer,
+    WriterLoopEvent,
+    WriterLoopStep,
+)
 from .scoped_artifact_revision import (
     ModelScopedArtifactRevisionAdapter,
     RevisionResultError,
@@ -35,9 +43,54 @@ BATCH_MODE = "batch"
 AUTO_NOVEL_MODE = "auto_novel"
 PRODUCT_MODES = {ASSIST_MODE, BATCH_MODE, AUTO_NOVEL_MODE}
 MODE_CONFIRMATION_POINTS = {
-    ASSIST_MODE: ["freeze_a_review", "batch_review", "chapter_review", "freeze_d_review", "writeback_review"],
+    ASSIST_MODE: ["freeze_a_review", "batch_review", "chapter_review", "writeback_review"],
     BATCH_MODE: ["batch_review", "chapter_review"],
     AUTO_NOVEL_MODE: [],
+}
+AGENT_STATES = {
+    "agent_running",
+    "reviewing_artifact",
+    "needs_user_input",
+    "generating_draft",
+    "reviewing_draft",
+    "writeback_review",
+    "completed",
+    "halted",
+    "error",
+}
+LEGACY_STAGE_TO_AGENT_STATE = {
+    "initialized": "agent_running",
+    "outline_research_user_input": "needs_user_input",
+    "outline_research_blocked": "halted",
+    "freeze_a_review": "reviewing_artifact",
+    "batch_review": "reviewing_artifact",
+    "chapter_review": "reviewing_artifact",
+    "wait_chapter_review": "reviewing_artifact",
+    "wait_length_review": "reviewing_artifact",
+    "freeze_d_review": "generating_draft",
+    "ready_for_freeze_d": "generating_draft",
+    "length_confirmed": "agent_running",
+    "freeze_a": "agent_running",
+    "freeze_b": "agent_running",
+    "freeze_c": "agent_running",
+    "freeze_d": "generating_draft",
+    "wait_chapter_acceptance": "reviewing_draft",
+    "writeback_review": "writeback_review",
+    "freeze_e": "completed",
+    "completed": "completed",
+    "halted": "halted",
+    "error": "error",
+}
+LEGACY_STAGE_MIGRATION_TARGETS = {
+    "wait_length_review": "chapter_review",
+    "freeze_d_review": "freeze_d",
+}
+REVIEW_STAGE_ARTIFACT_KINDS = {
+    "freeze_a_review": "book_continuation_plan",
+    "batch_review": "batch_plan",
+    "chapter_review": "chapter_package",
+    "wait_chapter_review": "chapter_package",
+    "writeback_review": "writeback_summary",
 }
 RESUMABLE_WORKFLOW_STAGES = {
     "outline_research_user_input",
@@ -128,7 +181,7 @@ class WriterInteractiveWorkflow:
         if result.get("stage") in {"outline_research_user_input", "outline_research_blocked"}:
             checkpoint = dict(result.get("checkpoint") or {})
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = str(result.get("stage") or "")
+            self._set_workflow_position(state, technical_stage=str(result.get("stage") or ""))
             if result.get("stage") == "outline_research_blocked":
                 state["terminal_stage"] = "outline_research_blocked"
         elif mode == ASSIST_MODE:
@@ -140,9 +193,9 @@ class WriterInteractiveWorkflow:
                 source="prepare_planning",
             )
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "freeze_a_review"
+            self._set_workflow_position(state, technical_stage="freeze_a_review")
         else:
-            state["current_stage"] = "freeze_a"
+            self._set_workflow_position(state, technical_stage="freeze_a")
             state["pending_checkpoint"] = None
         self._save_workflow_state(run_id, state)
         return result
@@ -154,17 +207,63 @@ class WriterInteractiveWorkflow:
         run_id: str,
         book_id: str,
         product_mode: str,
-        user_answers: Mapping[str, str],
+        user_answers: Mapping[str, str] | list[Mapping[str, Any]],
+        question_set_id: str = "",
+        source_message_id: str = "",
+        answer_text: str = "",
         user_world_notes: str = "",
         character_seed_payloads: list[Mapping[str, Any]] | None = None,
         roster_hint_payloads: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         mode = self._normalize_mode(product_mode)
+        question_set = self._load_outline_research_question_set(run_id)
+        normalized_answers = self._normalize_outline_research_answers(
+            question_set=question_set,
+            user_answers=user_answers,
+            answer_text=answer_text,
+        )
+        raw_answer_text = self._outline_research_raw_answer_text(answer_text=answer_text, answers=normalized_answers)
+        if question_set is not None:
+            if question_set_id and question_set_id != question_set.question_set_id:
+                raise ValueError("提交的问题集与当前等待的问题集不一致。")
+            missing_required = self._missing_required_outline_answers(
+                question_set=question_set,
+                answers=normalized_answers,
+            )
+            if missing_required:
+                return self._outline_research_missing_answer_payload(
+                    run_id=run_id,
+                    book_id=book_id,
+                    product_mode=mode,
+                    question_set=question_set,
+                    missing_question_ids=missing_required,
+                )
+        if not raw_answer_text:
+            raise ValueError("请先填写回答内容。")
+        submission_question_set_id = question_set.question_set_id if question_set is not None else question_set_id
+        if not submission_question_set_id:
+            submission_question_set_id = f"outline-research-{run_id}-manual"
+        submission = OutlineResearchAnswerSubmission(
+            submission_id=f"outline-answer-{run_id}-{uuid.uuid4().hex[:8]}",
+            question_set_id=submission_question_set_id,
+            run_id=run_id,
+            source_message_id=source_message_id,
+            answer_text=raw_answer_text,
+            user_answers=[
+                OutlineResearchUserAnswer(question_id=question_id, answer_text=answer)
+                for question_id, answer in normalized_answers.items()
+            ],
+        )
+        self.run_writer.write_outline_research_answer_submission(run_id, submission)
         result = self.planner.continue_outline_research_with_user_input(
             conn,
             run_id=run_id,
             book_id=book_id,
-            user_answers=user_answers,
+            user_answers=self._outline_research_answers_for_notebook(
+                question_set=question_set,
+                answers=normalized_answers,
+                raw_answer_text=raw_answer_text,
+            ),
             user_world_notes=user_world_notes,
             character_seed_payloads=character_seed_payloads,
             roster_hint_payloads=roster_hint_payloads,
@@ -173,7 +272,7 @@ class WriterInteractiveWorkflow:
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
         if result.get("stage") in {"outline_research_user_input", "outline_research_blocked"}:
             state["pending_checkpoint"] = dict(result.get("checkpoint") or {})
-            state["current_stage"] = str(result.get("stage") or "")
+            self._set_workflow_position(state, technical_stage=str(result.get("stage") or ""))
             state["terminal_stage"] = "outline_research_blocked" if result.get("stage") == "outline_research_blocked" else None
         elif mode == ASSIST_MODE:
             checkpoint = self._write_checkpoint(
@@ -183,18 +282,135 @@ class WriterInteractiveWorkflow:
                 source="continue_after_outline_research_input",
             )
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "freeze_a_review"
+            self._set_workflow_position(state, technical_stage="freeze_a_review")
             state["terminal_stage"] = None
         else:
             state["pending_checkpoint"] = None
-            state["current_stage"] = "freeze_a"
+            self._set_workflow_position(state, technical_stage="freeze_a")
             state["terminal_stage"] = None
         self._save_workflow_state(run_id, state)
         return result
 
+    def _load_outline_research_question_set(self, run_id: str) -> OutlineResearchQuestionSet | None:
+        payload = self._load_optional_run_data(run_id, "outline_research_question_set.json")
+        if not payload:
+            return None
+        return OutlineResearchQuestionSet.from_dict(payload)
+
+    def _normalize_outline_research_answers(
+        self,
+        *,
+        question_set: OutlineResearchQuestionSet | None,
+        user_answers: Mapping[str, str] | list[Mapping[str, Any]],
+        answer_text: str,
+    ) -> dict[str, str]:
+        prompt_to_id: dict[str, str] = {}
+        valid_ids: set[str] = set()
+        if question_set is not None:
+            for question in question_set.questions:
+                valid_ids.add(question.question_id)
+                prompt_to_id[question.prompt] = question.question_id
+
+        normalized: dict[str, str] = {}
+        if isinstance(user_answers, Mapping):
+            for raw_key, raw_value in user_answers.items():
+                key = str(raw_key).strip()
+                value = str(raw_value).strip()
+                if not key or not value:
+                    continue
+                question_id = key if key in valid_ids else prompt_to_id.get(key, key)
+                normalized[question_id] = value
+        else:
+            for item in user_answers:
+                if not isinstance(item, Mapping):
+                    continue
+                key = str(item.get("question_id") or item.get("question") or "").strip()
+                value = str(item.get("answer_text") or item.get("answer") or "").strip()
+                if not key or not value:
+                    continue
+                question_id = key if key in valid_ids else prompt_to_id.get(key, key)
+                normalized[question_id] = value
+
+        raw_answer_text = str(answer_text or "").strip()
+        if not normalized and raw_answer_text:
+            if question_set is not None and len(question_set.questions) == 1:
+                normalized[question_set.questions[0].question_id] = raw_answer_text
+            elif question_set is None:
+                normalized["user_answer"] = raw_answer_text
+        return normalized
+
+    @staticmethod
+    def _outline_research_raw_answer_text(*, answer_text: str, answers: Mapping[str, str]) -> str:
+        raw_answer_text = str(answer_text or "").strip()
+        if raw_answer_text:
+            return raw_answer_text
+        return "\n".join(value for value in answers.values() if str(value).strip()).strip()
+
+    @staticmethod
+    def _missing_required_outline_answers(
+        *,
+        question_set: OutlineResearchQuestionSet,
+        answers: Mapping[str, str],
+    ) -> list[str]:
+        return [
+            question.question_id
+            for question in question_set.questions
+            if question.required and not str(answers.get(question.question_id) or "").strip()
+        ]
+
+    @staticmethod
+    def _outline_research_answers_for_notebook(
+        *,
+        question_set: OutlineResearchQuestionSet | None,
+        answers: Mapping[str, str],
+        raw_answer_text: str,
+    ) -> dict[str, str]:
+        if question_set is None:
+            return dict(answers or {"用户补充": raw_answer_text})
+        if not answers and raw_answer_text:
+            return {"用户补充": raw_answer_text}
+        prompt_by_id = {question.question_id: question.prompt for question in question_set.questions}
+        return {
+            prompt_by_id.get(question_id, question_id): answer
+            for question_id, answer in answers.items()
+            if str(answer).strip()
+        }
+
+    def _outline_research_missing_answer_payload(
+        self,
+        *,
+        run_id: str,
+        book_id: str,
+        product_mode: str,
+        question_set: OutlineResearchQuestionSet,
+        missing_question_ids: list[str],
+    ) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id) or self._base_state(
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+        )
+        checkpoint = self._load_optional_run_data(run_id, "outline_research_checkpoint.json") or {}
+        state["pending_checkpoint"] = checkpoint
+        self._set_workflow_position(state, technical_stage="outline_research_user_input")
+        state["terminal_stage"] = None
+        self._save_workflow_state(run_id, state)
+        return {
+            "status": "needs_user_input",
+            "stage": "outline_research_user_input",
+            "message": "还有必答问题没有回答，请补充后再继续大纲研究。",
+            "checkpoint": checkpoint,
+            "question_set": question_set.to_dict(),
+            "missing_required_questions": list(missing_question_ids),
+        }
+
     def continue_after_planning_review(self, *, run_id: str) -> dict[str, str]:
         paths = self.planner.confirm_freeze_a(run_id=run_id)
         self._confirm_checkpoint(run_id=run_id, stage="freeze_a_review", source="continue_after_planning_review")
+        state = self.load_workflow_state(run_id=run_id) or {}
+        state["pending_checkpoint"] = None
+        self._set_workflow_position(state, technical_stage="freeze_a", agent_state="agent_running")
+        self._save_workflow_state(run_id, state)
         return paths
 
     def prepare_batch_plan(
@@ -223,10 +439,10 @@ class WriterInteractiveWorkflow:
                 source="prepare_batch_plan",
             )
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "batch_review"
+            self._set_workflow_position(state, technical_stage="batch_review")
         else:
             state["pending_checkpoint"] = None
-            state["current_stage"] = "freeze_b"
+            self._set_workflow_position(state, technical_stage="freeze_b")
         self._save_workflow_state(run_id, state)
         return result
 
@@ -234,7 +450,7 @@ class WriterInteractiveWorkflow:
         paths = self.planner.confirm_batch_plan(run_id=run_id, artifact_path=artifact_path)
         self._confirm_checkpoint(run_id=run_id, stage="batch_review", source="continue_after_batch_review")
         state = self.load_workflow_state(run_id=run_id) or {}
-        state["current_stage"] = "freeze_b"
+        self._set_workflow_position(state, technical_stage="freeze_b")
         state["pending_checkpoint"] = None
         state["terminal_stage"] = None
         self._save_workflow_state(run_id, state)
@@ -264,15 +480,10 @@ class WriterInteractiveWorkflow:
                 source="prepare_chapter_package",
             )
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "chapter_review"
+            self._set_workflow_position(state, technical_stage="chapter_review")
         else:
             state["pending_checkpoint"] = None
-            state["current_stage"] = "freeze_c"
-            result["chapter_length_plan"] = self.planner.prepare_chapter_length_plan(
-                run_id=run_id,
-                auto_confirm=True,
-            )
-            state["current_stage"] = "length_confirmed"
+            self._set_workflow_position(state, technical_stage="freeze_c")
         self._save_workflow_state(run_id, state)
         return result
 
@@ -283,12 +494,10 @@ class WriterInteractiveWorkflow:
         checkpoint_stage = "wait_chapter_review" if pending_stage == "wait_chapter_review" else "chapter_review"
         self._confirm_checkpoint(run_id=run_id, stage=checkpoint_stage, source="continue_after_chapter_review")
         state = self.load_workflow_state(run_id=run_id) or state
-        mode = self._normalize_mode(str(state.get("product_mode") or BATCH_MODE))
-        length_result = self.prepare_chapter_length_plan(
-            run_id=run_id,
-            product_mode=mode,
-        )
-        return {**paths, "chapter_length_plan": length_result}
+        state["pending_checkpoint"] = None
+        self._set_workflow_position(state, technical_stage="freeze_c", agent_state="agent_running")
+        self._save_workflow_state(run_id, state)
+        return {**paths, "next_agent_state": "generating_draft"}
 
     def prepare_chapter_length_plan(
         self,
@@ -310,10 +519,10 @@ class WriterInteractiveWorkflow:
                 source="prepare_chapter_length_plan",
             )
             state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "wait_length_review"
+            self._set_workflow_position(state, technical_stage="wait_length_review")
         else:
             state["pending_checkpoint"] = None
-            state["current_stage"] = "length_confirmed"
+            self._set_workflow_position(state, technical_stage="length_confirmed")
         self._save_workflow_state(run_id, state)
         return result
 
@@ -335,7 +544,7 @@ class WriterInteractiveWorkflow:
         paths = self.planner.confirm_chapter_length_plan(run_id=run_id, artifact_path=artifact_path)
         self._confirm_checkpoint(run_id=run_id, stage="wait_length_review", source="continue_after_length_review")
         state = self.load_workflow_state(run_id=run_id) or {}
-        state["current_stage"] = "length_confirmed"
+        self._set_workflow_position(state, technical_stage="length_confirmed")
         self._save_workflow_state(run_id, state)
         return paths
 
@@ -358,24 +567,18 @@ class WriterInteractiveWorkflow:
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
         state["current_chapter_id"] = chapter_id
-        if mode == ASSIST_MODE:
-            checkpoint = self._write_checkpoint(
-                run_id=run_id,
-                stage="freeze_d_review",
-                artifact_path=str(self.run_writer.layout.run_dir(run_id) / "chapter_execution_input.json"),
-                source="prepare_execution",
-            )
-            state["pending_checkpoint"] = checkpoint
-            state["current_stage"] = "freeze_d_review"
-        else:
-            state["pending_checkpoint"] = None
-            state["current_stage"] = "freeze_d"
+        state["pending_checkpoint"] = None
+        self.executor.confirm_freeze_d(run_id=run_id)
+        self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
         self._save_workflow_state(run_id, state)
-        return result
+        return {**result, "freeze_d": self.run_writer.get_freeze_record(run_id, "freeze_d").to_dict() if self.run_writer.get_freeze_record(run_id, "freeze_d") else {}}
 
     def continue_after_execution_review(self, *, run_id: str) -> dict[str, str]:
         paths = self.executor.confirm_freeze_d(run_id=run_id)
         self._confirm_checkpoint(run_id=run_id, stage="freeze_d_review", source="continue_after_execution_review")
+        state = self.load_workflow_state(run_id=run_id) or {}
+        self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
+        self._save_workflow_state(run_id, state)
         return paths
 
     def register_wait_chapter_acceptance(
@@ -479,7 +682,14 @@ class WriterInteractiveWorkflow:
                 reason="正文执行未通过 continuity 校验。",
             )
             state["last_rollback"] = rollback_event.to_dict()
-            state["current_stage"] = rollback_event.target_freeze_stage
+            self._set_workflow_position(state, technical_stage=rollback_event.target_freeze_stage, agent_state="agent_running")
+            self._route_chapter_acceptance_decision(
+                run_id=run_id,
+                state=state,
+                mode=mode,
+                source="execute_current_chapter_continuity_review",
+                review_status="",
+            )
         self._save_workflow_state(run_id, state)
         return result
 
@@ -524,6 +734,109 @@ class WriterInteractiveWorkflow:
         )
         self._save_workflow_state(run_id, state)
         return outcome
+
+    def rewrite_current_chapter(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        product_mode: str,
+    ) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id)
+        if state is None:
+            raise FileNotFoundError(f"workflow state not found for run_id={run_id}")
+        decision_payload = self._normalize_generation_review_decision_artifact(run_id=run_id, state=state) or {}
+        if self._extract_generation_review_status(decision_payload) != "rewrite_requested":
+            raise ValueError("rewrite_current_chapter requires generation_review_decision.status=rewrite_requested")
+        feedback_text = str(decision_payload.get("feedback_text") or "").strip()
+        if not feedback_text:
+            raise ValueError("rewrite_requested requires feedback_text")
+        decision_id = str(decision_payload.get("decision_id") or uuid.uuid4().hex).strip()
+        self.run_writer.write_json(run_id, f"generation_review_decisions/{decision_id}.json", dict(decision_payload))
+        execution_input = self._load_optional_run_data(run_id, "chapter_execution_input.json")
+        if not isinstance(execution_input, Mapping):
+            raise FileNotFoundError("chapter_execution_input.json not found")
+        updated_input = dict(execution_input)
+        rewrite_requests = [
+            dict(item) for item in (updated_input.get("draft_rewrite_requests") or []) if isinstance(item, Mapping)
+        ]
+        rewrite_request = {
+            "decision_id": decision_id,
+            "draft_id": str(decision_payload.get("draft_id") or state.get("current_draft_id") or ""),
+            "feedback_text": feedback_text,
+            "reason_code": str(decision_payload.get("reason_code") or "other"),
+            "created_at": str(decision_payload.get("created_at") or _utc_now()),
+        }
+        rewrite_requests.append(rewrite_request)
+        updated_input["draft_feedback"] = rewrite_request
+        updated_input["draft_rewrite_requests"] = rewrite_requests
+        writer_rules = [str(item) for item in (updated_input.get("writer_rules") or []) if str(item).strip()]
+        writer_rules.append("重写正文时必须消费 draft_feedback.feedback_text，但不得改写已通过的 ChapterBrief 或正式写回 Memory。")
+        updated_input["writer_rules"] = [item for item in dict.fromkeys(writer_rules) if item]
+        self.run_writer.write_json(run_id, "chapter_execution_input.json", updated_input)
+        self.run_writer.write_json(run_id, "draft_rewrite_request.json", rewrite_request)
+        self.run_writer.write_freeze_record(
+            run_id,
+            FreezeRecord(
+                freeze_stage="freeze_d",
+                summary="基于用户草稿反馈重写正文；上游章节梗概未改变。",
+                depends_on=["freeze_c"],
+            ),
+            artifact_payloads={
+                "chapter_brief.json": self._load_optional_run_data(run_id, "chapter_brief.json") or {},
+                "chapter_length_budget.json": self._load_optional_run_data(run_id, "chapter_length_budget.json") or {},
+                "style_reference_bundle.json": self._load_optional_run_data(run_id, "style_reference_bundle.json") or {},
+                "chapter_execution_input.json": updated_input,
+            },
+        )
+        self._remove_run_artifact(run_id=run_id, name="generation_review_decision.json")
+        self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
+        state["pending_checkpoint"] = None
+        self._save_workflow_state(run_id, state)
+        return self.execute_current_chapter(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+        )
+
+    def replan_current_chapter_from_feedback(
+        self,
+        *,
+        run_id: str,
+        source_message_id: str = "",
+    ) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id)
+        if state is None:
+            raise FileNotFoundError(f"workflow state not found for run_id={run_id}")
+        decision_payload = self._normalize_generation_review_decision_artifact(run_id=run_id, state=state) or {}
+        if self._extract_generation_review_status(decision_payload) != "replan_requested":
+            raise ValueError("replan_current_chapter_from_feedback requires generation_review_decision.status=replan_requested")
+        feedback_text = str(decision_payload.get("feedback_text") or "").strip()
+        if not feedback_text:
+            raise ValueError("replan_requested requires feedback_text")
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        chapter_package_path = run_dir / "chapter_package.json"
+        checkpoint = self._write_checkpoint(
+            run_id=run_id,
+            stage="chapter_review",
+            artifact_path=str(chapter_package_path),
+            source="replan_current_chapter_from_feedback",
+        )
+        state["pending_checkpoint"] = checkpoint
+        state["terminal_stage"] = None
+        self._set_workflow_position(state, technical_stage="chapter_review", agent_state="reviewing_artifact")
+        self._save_workflow_state(run_id, state)
+        return self.review_writer_artifact(
+            run_id=run_id,
+            decision="revision_requested",
+            artifact_kind="chapter_package",
+            artifact_path=str(chapter_package_path),
+            review_id=f"artifact-review-{run_id}-draft-replan-{uuid.uuid4().hex[:8]}",
+            revision_feedback=feedback_text,
+            source_message_id=source_message_id,
+        )
 
     def approve_writeback(self, conn: sqlite3.Connection, *, run_id: str, book_id: str) -> dict[str, Any]:
         execution_input = self._load_run_data(run_id, "chapter_execution_input.json")
@@ -599,15 +912,31 @@ class WriterInteractiveWorkflow:
         pending_checkpoint = dict(state.get("pending_checkpoint") or {})
         if not pending_checkpoint:
             return None
-        if not self._is_resumable_stage(str(pending_checkpoint.get("stage") or "")):
+        stage = str(pending_checkpoint.get("stage") or "")
+        if not self._is_resumable_stage(stage):
             return None
+        if stage == "wait_length_review":
+            migrated = dict(pending_checkpoint)
+            migrated["legacy_stage"] = stage
+            migrated["stage"] = "chapter_review"
+            chapter_package_path = self.run_writer.layout.run_dir(run_id) / "chapter_package.json"
+            if chapter_package_path.exists():
+                migrated["artifact_path"] = str(chapter_package_path)
+            migrated["migration_note"] = "wait_length_review is legacy/migration-only; resume at chapter synopsis review."
+            return migrated
+        if stage == "freeze_d_review":
+            migrated = dict(pending_checkpoint)
+            migrated["legacy_stage"] = stage
+            migrated["stage"] = "freeze_d"
+            migrated["migration_note"] = "freeze_d_review is legacy/migration-only; resume at draft generation prep."
+            return migrated
         return pending_checkpoint
 
     def register_character_cast_change(self, *, run_id: str, reason: str) -> dict[str, Any]:
         event = self.rollback_manager.cascade_for_character_cast_change(run_id=run_id, reason=reason)
         state = self.load_workflow_state(run_id=run_id) or {}
         state["last_rollback"] = event.to_dict()
-        state["current_stage"] = "freeze_a"
+        self._set_workflow_position(state, technical_stage="freeze_a", agent_state="agent_running")
         state["pending_checkpoint"] = None
         self._save_workflow_state(run_id, state)
         return event.to_dict()
@@ -755,7 +1084,7 @@ class WriterInteractiveWorkflow:
             status="applied",
             validation={**result.validation, "ok": True, "applied": True},
         )
-        state["current_stage"] = request.target_stage
+        self._set_workflow_position(state, technical_stage=request.target_stage, agent_state="reviewing_artifact")
         pending_checkpoint = dict(state.get("pending_checkpoint") or {})
         if pending_checkpoint:
             pending_checkpoint["stage"] = request.target_stage
@@ -779,20 +1108,533 @@ class WriterInteractiveWorkflow:
             "diff": self._read_diff_text(applied.diff_path),
         }
 
+    def review_writer_artifact(
+        self,
+        conn: sqlite3.Connection | None = None,
+        *,
+        run_id: str,
+        book_id: str = "",
+        product_mode: str = ASSIST_MODE,
+        decision: str,
+        artifact_kind: str = "",
+        artifact_id: str = "",
+        artifact_path: str = "",
+        review_id: str = "",
+        supplement_text: str = "",
+        revision_feedback: str = "",
+        source_message_id: str = "",
+        chapter_id: str = "",
+    ) -> dict[str, Any]:
+        state = self.load_workflow_state(run_id=run_id)
+        if state is None:
+            raise FileNotFoundError(f"workflow state not found for run_id={run_id}")
+        checkpoint = dict(state.get("pending_checkpoint") or {})
+        stage = str(checkpoint.get("stage") or state.get("technical_stage") or state.get("current_stage") or "").strip()
+        resolved_path = str(artifact_path or checkpoint.get("artifact_path") or "").strip()
+        resolved_kind = artifact_kind or self._artifact_kind_for_review_stage(stage, resolved_path)
+        resolved_review_id = review_id or self._review_id_for_artifact(
+            run_id=run_id,
+            stage=stage,
+            artifact_kind=resolved_kind,
+        )
+        next_action = {
+            "approved": "continue_agent_loop",
+            "revision_requested": "revise_artifact",
+            "deferred": "defer_review",
+        }.get(str(decision).strip().lower(), "")
+        review_decision = ArtifactReviewDecision(
+            review_id=resolved_review_id,
+            run_id=run_id,
+            artifact_kind=resolved_kind,
+            artifact_id=artifact_id,
+            artifact_path=resolved_path,
+            artifact_version=self._artifact_version(resolved_path),
+            decision=decision,  # type: ignore[arg-type]
+            supplement_text=supplement_text,
+            revision_feedback=revision_feedback,
+            source_message_id=source_message_id,
+            reviewer_type="user",
+            next_action=next_action,  # type: ignore[arg-type]
+            created_at=_utc_now(),
+        )
+        self.run_writer.write_artifact_review_decision(run_id, review_decision)
+        event = self._append_loop_event(
+            run_id=run_id,
+            event_kind="artifact_review",
+            agent_state="reviewing_artifact",
+            technical_stage=stage,
+            summary=f"Artifact review decision: {review_decision.decision}",
+            payload=review_decision.to_dict(),
+        )
+        if review_decision.decision == "approved":
+            prompt_input = self._build_review_prompt_input(
+                run_id=run_id,
+                state=state,
+                stage=stage,
+                decision=review_decision,
+                prompt_kind="next_stage",
+            )
+            prompt_path = self.run_writer.write_json(
+                run_id,
+                f"writer_prompt_inputs/{review_decision.review_id}_next_stage_prompt.json",
+                prompt_input,
+            )
+            if review_decision.supplement_text:
+                self.run_writer.write_user_supplement(
+                    run_id,
+                    {
+                        "review_id": review_decision.review_id,
+                        "artifact_kind": review_decision.artifact_kind,
+                        "artifact_id": review_decision.artifact_id,
+                        "artifact_path": review_decision.artifact_path,
+                        "supplement_text": review_decision.supplement_text,
+                        "source_message_id": review_decision.source_message_id,
+                        "prompt_input_path": str(prompt_path),
+                    },
+                    review_id=review_decision.review_id,
+                )
+            result = self._continue_after_artifact_approval(
+                conn,
+                run_id=run_id,
+                book_id=book_id or str(state.get("book_id") or ""),
+                product_mode=product_mode or str(state.get("product_mode") or ASSIST_MODE),
+                stage=stage,
+                artifact_path=resolved_path or None,
+                chapter_id=chapter_id,
+                review_decision=review_decision,
+            )
+            self._write_loop_step(
+                run_id=run_id,
+                status="completed",
+                agent_state=str((self.load_workflow_state(run_id=run_id) or {}).get("agent_state") or "agent_running"),
+                technical_stage=str((self.load_workflow_state(run_id=run_id) or {}).get("technical_stage") or stage),
+                event_ids=[event["event_id"]],
+                prompt_input_path=str(prompt_path),
+                output_artifact_path=str(result.get("artifact_path") or resolved_path),
+            )
+            return {
+                "status": "ok",
+                "decision": review_decision.to_dict(),
+                "prompt_input_path": str(prompt_path),
+                "result": result,
+                "workflow_state": self.load_workflow_state(run_id=run_id) or {},
+            }
+        if review_decision.decision == "revision_requested":
+            prompt_input = self._build_review_prompt_input(
+                run_id=run_id,
+                state=state,
+                stage=stage,
+                decision=review_decision,
+                prompt_kind="artifact_revision",
+            )
+            prompt_path = self.run_writer.write_json(
+                run_id,
+                f"writer_prompt_inputs/{review_decision.review_id}_artifact_revision_prompt.json",
+                prompt_input,
+            )
+            revision_result = self._revise_review_artifact(
+                run_id=run_id,
+                state=state,
+                stage=stage,
+                artifact_kind=resolved_kind,
+                artifact_path=resolved_path,
+                revision_feedback=review_decision.revision_feedback,
+                request_id=review_decision.review_id,
+            )
+            self._write_loop_step(
+                run_id=run_id,
+                status="waiting",
+                agent_state="reviewing_artifact",
+                technical_stage=stage,
+                event_ids=[event["event_id"]],
+                prompt_input_path=str(prompt_path),
+                output_artifact_path=str(revision_result.get("artifact_path") or resolved_path),
+            )
+            return {
+                "status": "revision_requested",
+                "decision": review_decision.to_dict(),
+                "prompt_input_path": str(prompt_path),
+                "revision": revision_result,
+                "workflow_state": self.load_workflow_state(run_id=run_id) or {},
+            }
+        state["terminal_stage"] = {
+            "stage": "halted",
+            "artifact_path": resolved_path,
+            "source": "defer_writer_artifact_review",
+        }
+        self._set_workflow_position(state, technical_stage=stage, agent_state="halted")
+        self._save_workflow_state(run_id, state)
+        return {
+            "status": "deferred",
+            "decision": review_decision.to_dict(),
+            "workflow_state": self.load_workflow_state(run_id=run_id) or {},
+        }
+
+    def _continue_after_artifact_approval(
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        run_id: str,
+        book_id: str,
+        product_mode: str,
+        stage: str,
+        artifact_path: str | None,
+        chapter_id: str,
+        review_decision: ArtifactReviewDecision,
+    ) -> dict[str, Any]:
+        if stage == "freeze_a_review":
+            return self.continue_after_planning_review(run_id=run_id)
+        if stage == "batch_review":
+            return self.continue_after_batch_review(run_id=run_id, artifact_path=artifact_path)
+        if stage in {"chapter_review", "wait_chapter_review"}:
+            result: dict[str, Any] = {
+                "freeze_c": self.continue_after_chapter_review(run_id=run_id, artifact_path=artifact_path)
+            }
+            if conn is None:
+                return result
+            selected_chapter_id = chapter_id or self._first_chapter_id_from_chapter_package(run_id)
+            if not selected_chapter_id:
+                raise ValueError("chapter_package.json does not contain a chapter_id")
+            result["chapter_id"] = selected_chapter_id
+            result["execution_input"] = self.prepare_execution(
+                conn,
+                run_id=run_id,
+                book_id=book_id,
+                chapter_id=selected_chapter_id,
+                product_mode=product_mode,
+            )
+            self._merge_user_supplement_into_execution_input(
+                run_id=run_id,
+                decision=review_decision,
+            )
+            result["chapter_writing_guidance"] = self._write_chapter_writing_guidance(
+                run_id=run_id,
+                decision=review_decision,
+                chapter_id=selected_chapter_id,
+            )
+            result["execution_result"] = self.execute_current_chapter(
+                conn,
+                run_id=run_id,
+                book_id=book_id,
+                product_mode=product_mode,
+            )
+            return result
+        if stage == "writeback_review" and conn is not None:
+            return self.approve_writeback(conn, run_id=run_id, book_id=book_id)
+        return {"stage": stage, "artifact_path": artifact_path or ""}
+
+    def _revise_review_artifact(
+        self,
+        *,
+        run_id: str,
+        state: Mapping[str, Any],
+        stage: str,
+        artifact_kind: str,
+        artifact_path: str,
+        revision_feedback: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if not artifact_path:
+            raise ValueError("artifact_path is required for artifact revision")
+        result = self.request_scoped_artifact_revision(
+            run_id=run_id,
+            user_feedback=revision_feedback,
+            request_id=request_id,
+            target_stage=stage,
+            target_artifact_type=self._revision_artifact_type_for_kind(artifact_kind, artifact_path),
+            target_artifact_path=artifact_path,
+        )
+        if result.get("status") == "candidate":
+            applied = self.apply_scoped_artifact_revision(run_id=run_id, request_id=request_id)
+            state_after = self.load_workflow_state(run_id=run_id) or dict(state)
+            pending = dict(state_after.get("pending_checkpoint") or {})
+            pending["stage"] = stage
+            pending["artifact_path"] = str(applied.get("artifact_path") or artifact_path)
+            state_after["pending_checkpoint"] = pending
+            state_after["terminal_stage"] = None
+            self._set_workflow_position(state_after, technical_stage=stage, agent_state="reviewing_artifact")
+            self._save_workflow_state(run_id, state_after)
+            return {**applied, "status": "revised"}
+        state_after = self.load_workflow_state(run_id=run_id) or dict(state)
+        self._set_workflow_position(state_after, technical_stage=stage, agent_state="reviewing_artifact")
+        self._save_workflow_state(run_id, state_after)
+        return result
+
+    def _build_review_prompt_input(
+        self,
+        *,
+        run_id: str,
+        state: Mapping[str, Any],
+        stage: str,
+        decision: ArtifactReviewDecision,
+        prompt_kind: str,
+    ) -> dict[str, Any]:
+        artifact_payload = self._load_artifact_payload(Path(decision.artifact_path)) if decision.artifact_path else {}
+        return {
+            "schema_version": "1.0",
+            "prompt_kind": prompt_kind,
+            "run_id": run_id,
+            "agent_state": state.get("agent_state") or self._agent_state_for_stage(stage),
+            "technical_stage": stage,
+            "review_decision": decision.to_dict(),
+            "current_artifact": self._summarize_prompt_artifact(artifact_payload),
+            "upstream_constraints": self._review_upstream_constraints(run_id=run_id, stage=stage, artifact_payload=artifact_payload),
+            "planning_notebook": self._load_optional_run_data(run_id, "planning_notebook.json") or {},
+            "evidence": self._review_evidence_index(run_id),
+            "rules": [
+                "User text must be preserved verbatim and consumed only by the Writer layer.",
+                "Web, CLI, and TUI callers submit decisions; they must not assemble model prompts directly.",
+                "Revision prompts must output the same artifact kind and return to the same review gate.",
+            ],
+        }
+
+    def _summarize_prompt_artifact(self, artifact_payload: Mapping[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        for key in (
+            "plan_id",
+            "pack_id",
+            "cast_plan_id",
+            "batch_id",
+            "package_id",
+            "chapter_id",
+            "title",
+            "continuation_goal",
+            "batch_goal",
+            "package_goal",
+            "goal",
+            "chapters",
+            "review_notes",
+        ):
+            if key in artifact_payload:
+                summary[key] = artifact_payload[key]
+        if not summary:
+            summary["keys"] = sorted(str(key) for key in artifact_payload.keys())[:40]
+        return summary
+
+    def _review_upstream_constraints(
+        self,
+        *,
+        run_id: str,
+        stage: str,
+        artifact_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            artifact_type = self._revision_artifact_type_for_kind(
+                self._artifact_kind_for_review_stage(stage, ""),
+                "",
+            )
+            return self._build_scoped_revision_allowed_context(
+                run_id=run_id,
+                target_stage=stage,
+                target_artifact_type=artifact_type,
+                target_artifact=artifact_payload,
+            )
+        except Exception:
+            return {
+                "stage": stage,
+                "freeze_a": self._safe_summarize_frozen_artifact(run_id, "freeze_a", "book_continuation_plan.json"),
+                "freeze_b": self._safe_summarize_frozen_artifact(run_id, "freeze_b", "batch_plan.json"),
+                "freeze_c": self._safe_summarize_frozen_artifact(run_id, "freeze_c", "chapter_package.json"),
+            }
+
+    def _safe_summarize_frozen_artifact(self, run_id: str, freeze_stage: str, artifact_name: str) -> dict[str, Any]:
+        try:
+            return self._summarize_frozen_artifact(
+                run_id,
+                freeze_stage,
+                artifact_name,
+                fields=("plan_id", "book_id", "batch_id", "package_id", "continuation_goal", "batch_goal", "chapters"),
+                optional=True,
+            )
+        except Exception:
+            return {}
+
+    def _review_evidence_index(self, run_id: str) -> dict[str, Any]:
+        run_dir = self.run_writer.layout.run_dir(run_id)
+        names = [
+            "outline_research_trace.json",
+            "memory_query_trace.json",
+            "memory_query_decision_log.json",
+            "sufficiency_decision.json",
+            "source_arc_map.json",
+            "narrative_structure_patterns.json",
+            "arc_pattern_cards.json",
+        ]
+        return {
+            name: {"path": str(run_dir / name), "exists": (run_dir / name).exists()}
+            for name in names
+        }
+
+    def _merge_user_supplement_into_execution_input(
+        self,
+        *,
+        run_id: str,
+        decision: ArtifactReviewDecision,
+    ) -> None:
+        if not decision.supplement_text:
+            return
+        execution_input = self._load_optional_run_data(run_id, "chapter_execution_input.json")
+        if not isinstance(execution_input, Mapping):
+            return
+        updated = dict(execution_input)
+        user_supplements = [
+            item for item in (updated.get("user_supplements") or []) if isinstance(item, Mapping)
+        ]
+        user_supplement = {
+            "review_id": decision.review_id,
+            "artifact_kind": decision.artifact_kind,
+            "artifact_id": decision.artifact_id,
+            "artifact_path": decision.artifact_path,
+            "supplement_text": decision.supplement_text,
+            "source_message_id": decision.source_message_id,
+        }
+        user_supplements.append(user_supplement)
+        updated["user_supplement"] = user_supplement
+        updated["user_supplements"] = user_supplements
+        writer_rules = [
+            str(item)
+            for item in (updated.get("writer_rules") or [])
+            if str(item).strip()
+        ]
+        writer_rules.append(
+            "必须消费 user_supplement.supplement_text 中用户通过章节梗概时补充的字数、风格、节奏、重点段落和禁止项要求。"
+        )
+        updated["writer_rules"] = [item for item in dict.fromkeys(writer_rules) if item]
+        self.run_writer.write_json(run_id, "chapter_execution_input.json", updated)
+        freeze_d = self.run_writer.get_freeze_record(run_id, "freeze_d")
+        if freeze_d is not None:
+            artifact_payloads = {
+                "chapter_brief.json": self._load_optional_run_data(run_id, "chapter_brief.json") or {},
+                "chapter_length_budget.json": self._load_optional_run_data(run_id, "chapter_length_budget.json") or {},
+                "style_reference_bundle.json": self._load_optional_run_data(run_id, "style_reference_bundle.json") or {},
+                "chapter_execution_input.json": updated,
+            }
+            self.run_writer.write_freeze_record(
+                run_id,
+                FreezeRecord(
+                    freeze_stage="freeze_d",
+                    summary="受限执行输入已冻结，包含用户通过审阅时的补充要求。",
+                    depends_on=["freeze_c"],
+                ),
+                artifact_payloads=artifact_payloads,
+            )
+
+    def _write_chapter_writing_guidance(
+        self,
+        *,
+        run_id: str,
+        decision: ArtifactReviewDecision,
+        chapter_id: str,
+    ) -> dict[str, Any]:
+        execution_input = self._load_optional_run_data(run_id, "chapter_execution_input.json") or {}
+        chapter_brief = dict(execution_input.get("chapter_brief") or {})
+        length_budget = dict(execution_input.get("length_budget") or {})
+        guidance = {
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "chapter_id": chapter_id,
+            "source_review_id": decision.review_id,
+            "chapter_title": execution_input.get("chapter_title") or chapter_brief.get("title") or chapter_id,
+            "chapter_brief_summary": self._summarize_prompt_artifact(chapter_brief),
+            "user_supplement": {
+                "supplement_text": decision.supplement_text,
+                "source_message_id": decision.source_message_id,
+            },
+            "length_budget": length_budget,
+            "prompt_input_boundary": "Writer layer assembled from approved ChapterPackage/ChapterBrief, upstream constraints, evidence, and preserved user supplement.",
+            "created_at": _utc_now(),
+        }
+        self.run_writer.write_json(run_id, "chapter_writing_guidance.json", guidance)
+        return guidance
+
+    def _artifact_kind_for_review_stage(self, stage: str, artifact_path: str) -> str:
+        if stage in REVIEW_STAGE_ARTIFACT_KINDS:
+            return REVIEW_STAGE_ARTIFACT_KINDS[stage]
+        path_name = Path(artifact_path).name
+        return {
+            "book_continuation_plan.json": "book_continuation_plan",
+            "batch_plan.json": "batch_plan",
+            "chapter_package.json": "chapter_package",
+            "chapter_brief.json": "chapter_brief",
+            "memory_writeback.json": "writeback_summary",
+            "continuity_report.json": "writeback_summary",
+        }.get(path_name, stage or "writer_artifact")
+
+    def _revision_artifact_type_for_kind(self, artifact_kind: str, artifact_path: str) -> str | None:
+        normalized = str(artifact_kind or "").strip()
+        if normalized == "book_continuation_plan":
+            return "BookContinuationPlan"
+        if normalized == "world_expansion_pack":
+            return "WorldExpansionPack"
+        if normalized == "character_cast_plan":
+            return "CharacterCastPlan"
+        if normalized == "batch_plan":
+            return "BatchPlan"
+        if normalized == "chapter_brief":
+            return "ChapterBrief"
+        if normalized == "chapter_package":
+            return "ChapterPackage"
+        if normalized == "chapter_execution_input":
+            return "ChapterExecutionInput"
+        if artifact_path:
+            return self._infer_revision_artifact_type("", artifact_path) if False else None
+        return None
+
+    def _artifact_version(self, artifact_path: str) -> str:
+        if not artifact_path:
+            return ""
+        path = Path(artifact_path)
+        try:
+            return f"mtime-{int(path.stat().st_mtime)}"
+        except OSError:
+            return ""
+
+    def _review_id_for_artifact(self, *, run_id: str, stage: str, artifact_kind: str) -> str:
+        safe_stage = stage or "artifact"
+        safe_kind = artifact_kind or "writer_artifact"
+        return f"artifact-review-{run_id}-{safe_stage}-{safe_kind}-{uuid.uuid4().hex[:8]}"
+
+    def _first_chapter_id_from_chapter_package(self, run_id: str) -> str:
+        payload = self._load_optional_run_data(run_id, "chapter_package.json")
+        if not isinstance(payload, Mapping):
+            payload = self._load_optional_frozen_payload(run_id, "freeze_c", "chapter_package.json")
+        for item in (payload or {}).get("chapters") or []:
+            if isinstance(item, Mapping) and str(item.get("chapter_id") or "").strip():
+                return str(item.get("chapter_id") or "").strip()
+        return ""
+
+    def _load_optional_frozen_payload(self, run_id: str, freeze_stage: str, artifact_name: str) -> dict[str, Any]:
+        record = self.run_writer.get_freeze_record(run_id, freeze_stage)
+        if record is None:
+            return {}
+        for artifact in record.artifacts:
+            if artifact.name == artifact_name:
+                try:
+                    return self._load_artifact_payload(Path(artifact.path))
+                except Exception:
+                    return {}
+        return {}
+
     def load_workflow_state(self, *, run_id: str) -> dict[str, Any] | None:
         path = self.run_writer.layout.run_dir(run_id) / "workflow_state.json"
         if not path.exists():
             return None
         raw = json.loads(path.read_text(encoding="utf-8"))
         payload = raw.get("data") if isinstance(raw, dict) else raw
-        return dict(payload) if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        return self._migrate_loaded_state(dict(payload))
 
     def _base_state(self, *, run_id: str, book_id: str, product_mode: str) -> dict[str, Any]:
         return {
+            "schema_version": "2.0",
             "run_id": run_id,
             "book_id": book_id,
             "product_mode": product_mode,
             "confirmation_points": MODE_CONFIRMATION_POINTS[product_mode],
+            "agent_state": "agent_running",
+            "current_state": "agent_running",
+            "technical_stage": "initialized",
             "current_stage": "initialized",
             "current_chapter_id": "",
             "current_draft_id": "",
@@ -807,8 +1649,104 @@ class WriterInteractiveWorkflow:
 
     def _save_workflow_state(self, run_id: str, state: Mapping[str, Any]) -> None:
         payload = dict(state)
+        payload.setdefault("schema_version", "2.0")
+        self._normalize_state_fields(payload)
         payload["updated_at"] = _utc_now()
         self.run_writer.write_json(run_id, "workflow_state.json", payload)
+
+    def _migrate_loaded_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        state.setdefault("schema_version", "2.0")
+        self._normalize_state_fields(state)
+        stage = str(state.get("technical_stage") or state.get("current_stage") or "").strip()
+        if stage in LEGACY_STAGE_MIGRATION_TARGETS:
+            state.setdefault("legacy_stage", stage)
+            state["migration_target_stage"] = LEGACY_STAGE_MIGRATION_TARGETS[stage]
+            state["migration_note"] = (
+                "Legacy Writer stage is recoverable for migration only; "
+                "new runs do not expose it as a main user flow state."
+            )
+        return state
+
+    def _normalize_state_fields(self, state: dict[str, Any]) -> None:
+        technical_stage = str(state.get("technical_stage") or state.get("current_stage") or "").strip()
+        if not technical_stage and str(state.get("current_stage") or "").strip() not in AGENT_STATES:
+            technical_stage = str(state.get("current_stage") or "").strip()
+        if str(state.get("current_stage") or "").strip() in AGENT_STATES and not technical_stage:
+            technical_stage = str(state.get("technical_stage") or "").strip()
+        if not technical_stage:
+            technical_stage = "initialized"
+        state["technical_stage"] = technical_stage
+        agent_state = str(state.get("agent_state") or state.get("current_state") or "").strip()
+        if agent_state not in AGENT_STATES:
+            agent_state = self._agent_state_for_stage(technical_stage)
+        state["agent_state"] = agent_state
+        state["current_state"] = agent_state
+
+    def _agent_state_for_stage(self, stage: str) -> str:
+        normalized = str(stage or "").strip()
+        return LEGACY_STAGE_TO_AGENT_STATE.get(normalized, normalized if normalized in AGENT_STATES else "agent_running")
+
+    def _set_workflow_position(
+        self,
+        state: dict[str, Any],
+        *,
+        technical_stage: str,
+        agent_state: str | None = None,
+    ) -> None:
+        state["technical_stage"] = technical_stage
+        state["current_stage"] = technical_stage
+        resolved_agent_state = agent_state or self._agent_state_for_stage(technical_stage)
+        if resolved_agent_state not in AGENT_STATES:
+            resolved_agent_state = "agent_running"
+        state["agent_state"] = resolved_agent_state
+        state["current_state"] = resolved_agent_state
+
+    def _append_loop_event(
+        self,
+        *,
+        run_id: str,
+        event_kind: str,
+        agent_state: str,
+        technical_stage: str = "",
+        summary: str = "",
+        payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event = WriterLoopEvent(
+            event_id=f"writer-event-{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            event_kind=event_kind,  # type: ignore[arg-type]
+            agent_state=agent_state,  # type: ignore[arg-type]
+            technical_stage=technical_stage,
+            summary=summary,
+            payload=dict(payload or {}),
+        )
+        self.run_writer.append_writer_loop_event(run_id, event)
+        return event.to_dict()
+
+    def _write_loop_step(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        agent_state: str,
+        technical_stage: str = "",
+        event_ids: list[str] | None = None,
+        prompt_input_path: str = "",
+        output_artifact_path: str = "",
+    ) -> dict[str, Any]:
+        step = WriterLoopStep(
+            step_id=f"writer-step-{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            status=status,  # type: ignore[arg-type]
+            agent_state=agent_state,  # type: ignore[arg-type]
+            technical_stage=technical_stage,
+            event_ids=list(event_ids or []),
+            prompt_input_path=prompt_input_path,
+            output_artifact_path=output_artifact_path,
+            completed_at=_utc_now() if status == "completed" else "",
+        )
+        self.run_writer.write_writer_loop_step(run_id, step)
+        return step.to_dict()
 
     def _build_scoped_revision_request(
         self,
@@ -1055,7 +1993,11 @@ class WriterInteractiveWorkflow:
         state: dict[str, Any],
         result: ScopedArtifactRevisionResult,
     ) -> None:
-        state["current_stage"] = result.validation.get("target_stage") or state.get("current_stage")
+        self._set_workflow_position(
+            state,
+            technical_stage=str(result.validation.get("target_stage") or state.get("technical_stage") or state.get("current_stage") or ""),
+            agent_state="reviewing_artifact",
+        )
         state["pending_scoped_revision"] = {
             "request_id": result.request_id,
             "revision_id": result.revision_id,
@@ -1230,7 +2172,7 @@ class WriterInteractiveWorkflow:
         )
         state["pending_checkpoint"] = checkpoint
         state["terminal_stage"] = None
-        state["current_stage"] = stage
+        self._set_workflow_position(state, technical_stage=stage)
         self._save_workflow_state(run_id, state)
         return checkpoint
 
@@ -1252,7 +2194,7 @@ class WriterInteractiveWorkflow:
         }
         state["pending_checkpoint"] = None
         state["terminal_stage"] = terminal_stage
-        state["current_stage"] = stage
+        self._set_workflow_position(state, technical_stage=stage)
         self._save_workflow_state(run_id, state)
         return terminal_stage
 
@@ -1285,12 +2227,12 @@ class WriterInteractiveWorkflow:
             )
             state["pending_checkpoint"] = checkpoint
             state["terminal_stage"] = None
-            state["current_stage"] = "wait_chapter_acceptance"
+            self._set_workflow_position(state, technical_stage="wait_chapter_acceptance", agent_state="reviewing_draft")
             return checkpoint
         if status == "accepted":
             state["pending_checkpoint"] = None
             state["terminal_stage"] = None
-            state["current_stage"] = "freeze_e"
+            self._set_workflow_position(state, technical_stage="freeze_e", agent_state="completed")
             if mode == ASSIST_MODE:
                 checkpoint = self._write_checkpoint(
                     run_id=run_id,
@@ -1300,31 +2242,24 @@ class WriterInteractiveWorkflow:
                 )
                 state["pending_checkpoint"] = checkpoint
                 state["terminal_stage"] = None
-                state["current_stage"] = "writeback_review"
+                self._set_workflow_position(state, technical_stage="writeback_review", agent_state="writeback_review")
                 return checkpoint
             return {"stage": "freeze_e", "artifact_path": continuity_report_path, "source": source}
-        if status == "revise_length":
-            self._apply_length_plan_update(run_id=run_id)
-            checkpoint = self._write_checkpoint(
-                run_id=run_id,
-                stage="wait_length_review",
-                artifact_path=str(run_dir / "chapter_length_plan.json"),
-                source=source,
-            )
-            state["pending_checkpoint"] = checkpoint
+        if status == "rewrite_requested":
+            state["pending_checkpoint"] = None
             state["terminal_stage"] = None
-            state["current_stage"] = "wait_length_review"
-            return checkpoint
-        if status == "replan_chapter":
+            self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
+            return {"stage": "generating_draft", "artifact_path": decision_path, "source": source}
+        if status == "replan_requested":
             checkpoint = self._write_checkpoint(
                 run_id=run_id,
-                stage="wait_chapter_review",
+                stage="chapter_review",
                 artifact_path=str(run_dir / "chapter_package.json"),
                 source=source,
             )
             state["pending_checkpoint"] = checkpoint
             state["terminal_stage"] = None
-            state["current_stage"] = "wait_chapter_review"
+            self._set_workflow_position(state, technical_stage="chapter_review", agent_state="reviewing_artifact")
             return checkpoint
         if status == "discarded":
             state["pending_checkpoint"] = None
@@ -1333,7 +2268,7 @@ class WriterInteractiveWorkflow:
                 "artifact_path": decision_path,
                 "source": source,
             }
-            state["current_stage"] = "halted"
+            self._set_workflow_position(state, technical_stage="halted", agent_state="halted")
             return dict(state["terminal_stage"])
         raise ValueError(f"unsupported generation review status: {status}")
 
@@ -1413,7 +2348,11 @@ class WriterInteractiveWorkflow:
     def _extract_generation_review_status(self, payload: Mapping[str, Any] | None) -> str:
         if not isinstance(payload, Mapping):
             return ""
-        return str(payload.get("status") or "").strip().lower()
+        status = str(payload.get("status") or "").strip().lower().replace("-", "_")
+        return {
+            "revise_length": "rewrite_requested",
+            "replan_chapter": "replan_requested",
+        }.get(status, status)
 
     def _normalize_generation_review_decision_artifact(
         self,
@@ -1490,6 +2429,7 @@ class WriterInteractiveWorkflow:
             "status": "",
             "reason_code": "",
             "feedback_text": "",
+            "next_action": "",
             "next_action_checkpoint": "",
             "length_plan_update": None,
             "chapter_replan_request": None,
@@ -1553,48 +2493,8 @@ class WriterInteractiveWorkflow:
         run_id: str,
         decision_payload: Mapping[str, Any],
     ) -> None:
-        status = self._extract_generation_review_status(decision_payload)
-        decision_id = str(decision_payload.get("decision_id") or "").strip()
-        chapter_id = str(decision_payload.get("chapter_id") or "").strip()
-        reason_code = str(decision_payload.get("reason_code") or "").strip()
-        feedback_text = str(decision_payload.get("feedback_text") or "").strip()
-        created_at = str(decision_payload.get("created_at") or "").strip()
-        if status == "revise_length":
-            payload = decision_payload.get("length_plan_update")
-            if not isinstance(payload, Mapping):
-                raise ValueError("revise_length decisions require length_plan_update")
-            defaults = {
-                "schema_version": "1.0",
-                "update_id": f"length-update-{decision_id or chapter_id or run_id}",
-                "decision_id": decision_id,
-                "chapter_id": chapter_id,
-                "reason_code": reason_code,
-                "feedback_text": feedback_text,
-                "preserve_story_direction": True,
-                "created_at": created_at,
-            }
-            self.run_writer.write_length_plan_update(run_id, dict(payload), defaults=defaults)
-            self._remove_run_artifact(run_id=run_id, name="chapter_replan_request.json")
-            return
-        if status == "replan_chapter":
-            payload = decision_payload.get("chapter_replan_request")
-            if not isinstance(payload, Mapping):
-                raise ValueError("replan_chapter decisions require chapter_replan_request")
-            defaults = {
-                "schema_version": "1.0",
-                "request_id": f"replan-{decision_id or chapter_id or run_id}",
-                "decision_id": decision_id,
-                "chapter_id": chapter_id,
-                "reason_code": reason_code,
-                "feedback_text": feedback_text,
-                "replan_scope": "current_chapter",
-                "must_preserve": [],
-                "forbidden_carryover": [],
-                "created_at": created_at,
-            }
-            self.run_writer.write_chapter_replan_request(run_id, dict(payload), defaults=defaults)
-            self._remove_run_artifact(run_id=run_id, name="length_plan_update.json")
-            return
+        # Group L keeps legacy rework payloads embedded in generation_review_decision.json
+        # for migration traceability, but standalone files are no longer active flow inputs.
         self._remove_run_artifact(run_id=run_id, name="length_plan_update.json")
         self._remove_run_artifact(run_id=run_id, name="chapter_replan_request.json")
 

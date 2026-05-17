@@ -110,7 +110,7 @@ def test_job_manager_reuses_conflicting_task_job(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_job_manager_failure_event_has_recovery_suggestion_without_traceback(tmp_path: Path) -> None:
+def test_job_manager_failure_event_preserves_traceback_for_task_details(tmp_path: Path) -> None:
     async def run() -> None:
         manager = JobManager(repo_root=tmp_path)
 
@@ -122,8 +122,11 @@ def test_job_manager_failure_event_has_recovery_suggestion_without_traceback(tmp
         assert done.status == "failed"
         error_event = [event for event in manager.events(summary.job_id) if event.kind == "error"][0]
         assert error_event.payload["recovery_suggestion"]
-        assert "Traceback" not in error_event.message
-        assert "Traceback" not in str(error_event.payload)
+        assert "已保留错误栈" in error_event.message
+        assert error_event.payload["error"] == "boom"
+        assert error_event.payload["error_type"] == "RuntimeError"
+        assert "Traceback" in error_event.payload["traceback"]
+        assert manager._records[summary.job_id].result["traceback"] == error_event.payload["traceback"]  # noqa: SLF001
 
     asyncio.run(run())
 

@@ -341,12 +341,14 @@ class CloseReadRunner:
                         roster_service=roster_service,
                     ).prompt_input
                     payload = self._run_close_read_memory_agents(
+                        conn=conn,
                         model_client=model_client,
                         batch=batch,
                         prompt_input=prompt_input,
                         summary_payload=extraction.summary_payload,
                         evidence_payload=extraction.evidence_payload,
                         world_evidence_payload=extraction.world_evidence_payload,
+                        profile_service=profile_service,
                     )
                     chapter_id: int | None = None
                     for persist_batch, persist_payload in self._iter_persistable_payloads(batch=batch, payload=payload):
@@ -592,12 +594,14 @@ class CloseReadRunner:
             ],
         )[0]
         return self._run_close_read_memory_agents(
+            conn=None,
             model_client=model_client,
             batch=batch,
             prompt_input=prompt_input,
             summary_payload=extraction.summary_payload,
             evidence_payload=extraction.evidence_payload,
             world_evidence_payload=extraction.world_evidence_payload,
+            profile_service=None,
         )
 
     def _run_close_read_extraction_window(
@@ -717,14 +721,23 @@ class CloseReadRunner:
     def _run_close_read_memory_agents(
         self,
         *,
+        conn,
         model_client: JsonModelClient,
         batch: ChapterBatch,
         prompt_input: CloseReadPromptInput,
         summary_payload: dict[str, Any],
         evidence_payload: dict[str, Any],
         world_evidence_payload: dict[str, Any],
+        profile_service: CharacterProfileService | None,
     ) -> dict[str, Any]:
         prompt_dict = prompt_input.to_dict()
+        if conn is not None and profile_service is not None:
+            prompt_dict = self._with_character_profiles_for_evidence(
+                conn=conn,
+                prompt_input=prompt_dict,
+                evidence_payload=evidence_payload,
+                profile_service=profile_service,
+            )
         character_reduce_payload = self._run_character_reduce_agents(
             model_client=model_client,
             batch=batch,
@@ -828,6 +841,121 @@ class CloseReadRunner:
             "document_title_indexes": batch.title_indexes,
             "character_evidence_batches": evidence_batches,
         }
+
+    def _with_character_profiles_for_evidence(
+        self,
+        *,
+        conn,
+        prompt_input: dict[str, Any],
+        evidence_payload: dict[str, Any],
+        profile_service: CharacterProfileService,
+    ) -> dict[str, Any]:
+        profile_contexts = self._load_character_profile_contexts_for_evidence(
+            conn=conn,
+            evidence_payload=evidence_payload,
+            profile_service=profile_service,
+        )
+        if not profile_contexts:
+            return prompt_input
+        merged = dict(prompt_input)
+        existing_profiles = [
+            item for item in prompt_input.get("character_profiles", []) if isinstance(item, dict)
+        ]
+        by_key: dict[str, dict[str, Any]] = {}
+        for profile in [*existing_profiles, *profile_contexts]:
+            key = self._profile_context_identity_key(profile)
+            if not key:
+                continue
+            by_key[key] = profile
+        merged["character_profiles"] = list(by_key.values())
+        return merged
+
+    def _load_character_profile_contexts_for_evidence(
+        self,
+        *,
+        conn,
+        evidence_payload: dict[str, Any],
+        profile_service: CharacterProfileService,
+    ) -> list[dict[str, Any]]:
+        character_ids: list[int] = []
+        names: list[str] = []
+        for character in self._flatten_character_evidence_items(evidence_payload):
+            if not isinstance(character, dict):
+                continue
+            character_id = self._safe_int(character.get("character_id"))
+            if character_id is not None and character_id > 0 and character_id not in character_ids:
+                character_ids.append(character_id)
+            name = self.memory_candidate_service.clean_evidence_name(
+                character.get("canonical_name"),
+                character=character,
+            )
+            if name and name not in names:
+                names.append(name)
+            aliases = character.get("aliases", [])
+            if isinstance(aliases, list):
+                for alias in aliases:
+                    alias_name = self.memory_candidate_service.clean_evidence_name(alias, character=character)
+                    if alias_name and alias_name not in names:
+                        names.append(alias_name)
+        if not character_ids and not names:
+            return []
+        repo = profile_service.profiles_repo
+        rows = [
+            *repo.list_by_ids(conn, book_id=self.config.book_id, character_ids=character_ids),
+            *repo.list_by_names(conn, book_id=self.config.book_id, names=names),
+        ]
+        contexts: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        seen_names: set[str] = set()
+        for row in rows:
+            row_id = self._safe_int(row["character_id"])
+            row_name = str(row["canonical_name"] or "").strip()
+            if row_id is not None and row_id in seen_ids:
+                continue
+            if row_id is None and row_name in seen_names:
+                continue
+            if row_id is not None:
+                seen_ids.add(row_id)
+            seen_names.add(row_name)
+            contexts.append(self._profile_context_from_row(row))
+        return contexts
+
+    def _profile_context_from_row(self, row) -> dict[str, Any]:
+        return {
+            "character_id": str(row["character_id"]),
+            "canonical_name": str(row["canonical_name"] or "").strip(),
+            "aliases": self._load_json_list(row["aliases_json"]),
+            "profile_summary_md": clamp_text(str(row["profile_summary_md"] or ""), 1200),
+            "speaking_character_status": str(row["speaking_character_status"] or "unknown"),
+            "personhood_evidence_summary": str(row["personhood_evidence_summary"] or ""),
+            "evidence_level": str(row["evidence_level"] or "inferred"),
+            "personality": self._load_json_list(row["personality_json"])[:8],
+            "occupations": self._load_json_list(row["occupations_json"])[:8],
+            "abilities": self._load_json_list(row["abilities_json"])[:8],
+            "recent_activity": self._load_json_list(row["recent_activity_json"])[-8:],
+            "relationships": self._load_json_list(row["relationships_json"]),
+            "story_events": self._load_json_list(row["story_events_json"])[-12:],
+            "chapter_indexes": self._load_json_list(row["chapter_indexes_json"]),
+            "last_seen_doc_id": row["last_seen_doc_id"],
+            "last_seen_title_index": row["last_seen_title_index"],
+        }
+
+    def _profile_context_identity_key(self, profile: dict[str, Any]) -> str:
+        character_id = str(profile.get("character_id") or "").strip()
+        if character_id:
+            return f"id:{character_id}"
+        canonical_name = str(profile.get("canonical_name") or "").strip()
+        return f"name:{canonical_name}" if canonical_name else ""
+
+    def _character_evidence_identity_key(self, character: dict[str, Any]) -> str:
+        character_id = str(character.get("character_id") or "").strip()
+        if character_id:
+            return f"id:{character_id}"
+        name = self.memory_candidate_service.clean_evidence_name(
+            character.get("canonical_name"),
+            character=character,
+        )
+        return f"name:{name}" if name else ""
 
     def _run_character_reduce_agents(
         self,
@@ -991,6 +1119,7 @@ class CloseReadRunner:
             "document_title_indexes": self._safe_int_list(evidence_payload.get("document_title_indexes")),
             "characters": [
                 {
+                    "character_id": str(item.get("character_id") or ""),
                     "canonical_name": item.get("canonical_name", ""),
                     "aliases": item.get("aliases", []),
                     "source_doc_ids": self._safe_int_list(item.get("source_doc_ids")),
@@ -1013,27 +1142,30 @@ class CloseReadRunner:
         if not isinstance(raw_characters, list) or not raw_characters:
             return evidence_payload
         merged = dict(evidence_payload)
-        existing_names = {
-            self.memory_candidate_service.clean_evidence_name(item.get("canonical_name"), character=item)
+        existing_keys = {
+            self._character_evidence_identity_key(item)
             for item in self._flatten_character_evidence_items(merged)
             if isinstance(item, dict)
         }
-        existing_names.discard("")
+        existing_keys.discard("")
         additions: list[dict[str, Any]] = []
         for raw_character in raw_characters:
             if not isinstance(raw_character, dict):
                 continue
             character = dict(raw_character)
             name = self.memory_candidate_service.clean_evidence_name(character.get("canonical_name"), character=character)
-            if not name or name in existing_names:
+            if not name:
                 continue
             character["canonical_name"] = name
+            identity_key = self._character_evidence_identity_key(character)
+            if identity_key in existing_keys:
+                continue
             character.setdefault("candidate_type", "character")
             character.setdefault("confidence", 0.75)
             character.setdefault("source_doc_ids", self._safe_int_list(merged.get("doc_ids")))
             character.setdefault("source_title_indexes", self._safe_int_list(merged.get("document_title_indexes")))
             additions.append(character)
-            existing_names.add(name)
+            existing_keys.add(identity_key)
         if not additions:
             return evidence_payload
 

@@ -29,6 +29,7 @@ class CharacterRosterService:
 
     def _compact_profile(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
+            "character_id": str(row["character_id"]),
             "canonical_name": str(row["canonical_name"] or "").strip(),
             "aliases": self._load_json_list(row, "aliases_json")[:8],
             "age_labels": self._age_labels(row)[:3],

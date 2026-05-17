@@ -101,23 +101,24 @@ def test_build_card_result_success() -> None:
     assert result.fragment_card.preferred_tags == ["雨天", "告别"]
 
 
-def test_build_card_result_falls_back_after_retries() -> None:
+def test_build_card_result_marks_failed_after_schema_retries() -> None:
     invalid_payload = _valid_payload()
     invalid_payload.pop("content_summary")
     service = _service_with_responses([(invalid_payload, "{}"), (invalid_payload, "{}"), (invalid_payload, "{}")])
 
     result = service.build_card_result(_document())
 
-    assert result.status == "fallback_success"
-    assert result.fragment_card is not None
-    assert result.used_fallback is True
+    assert result.status == "failed"
+    assert result.fragment_card is None
+    assert result.used_fallback is False
     assert result.retry_count == 2
     assert result.failure_stage == "schema_validate"
-    assert result.warnings == ["fallback fragment_card used for doc_id=1"]
+    assert "content_summary" in result.failure_reason
+    assert result.warnings == ["fragment_card build failed for doc_id=1"]
 
 
-def test_build_card_result_marks_failed_when_fallback_is_invalid() -> None:
-    service = _service_with_responses([ValueError("json parse failed")] * 3)
+def test_build_card_result_marks_failed_when_validation_never_succeeds() -> None:
+    service = _service_with_responses([(_valid_payload(), "{}")] * 3)
     document = _document(content_tags=["不在词典里的标签"])
 
     result = service.build_card_result(document)
@@ -141,9 +142,11 @@ def test_build_and_persist_only_upserts_successful_cards(tmp_path: Path) -> None
         [
             (_valid_payload(), "{}"),
             (dict(_valid_payload(), content_summary=None), "{}"),
-            ValueError("json parse failed"),
-            ValueError("json parse failed"),
-            ValueError("json parse failed"),
+            (dict(_valid_payload(), content_summary=None), "{}"),
+            (dict(_valid_payload(), content_summary=None), "{}"),
+            (_valid_payload(), "{}"),
+            (_valid_payload(), "{}"),
+            (_valid_payload(), "{}"),
         ]
     )
     documents = [
@@ -165,8 +168,8 @@ def test_build_and_persist_only_upserts_successful_cards(tmp_path: Path) -> None
         failed_cards = FragmentCardsRepo().list_by_doc_id(conn, doc_id="3")
 
     assert len(results) == 3
-    assert [result.status for result in results] == ["success", "fallback_success", "failed"]
+    assert [result.status for result in results] == ["success", "failed", "failed"]
     assert stats.attempted_documents == 3
-    assert stats.built_cards == 2
-    assert len(stored_cards) == 2
+    assert stats.built_cards == 1
+    assert len(stored_cards) == 1
     assert failed_cards == []

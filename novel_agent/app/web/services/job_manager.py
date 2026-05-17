@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -270,15 +271,24 @@ class JobManager:
             record.updated_at = _utc_now()
             return
         except Exception as exc:  # noqa: BLE001 - errors are converted to safe user events.
+            error_traceback = traceback.format_exc()
             record.status = "failed"
             record.message = "后台任务遇到问题"
             record.updated_at = _utc_now()
+            record.result = {
+                "status": "failed",
+                "error": str(exc) or exc.__class__.__name__,
+                "error_type": exc.__class__.__name__,
+                "traceback": error_traceback,
+            }
             self.emit_event(
                 record.job_id,
                 "error",
-                "后台任务遇到问题，已保留事件日志。",
+                "后台任务遇到问题，已保留错误栈。",
                 payload={
                     "error": str(exc) or exc.__class__.__name__,
+                    "error_type": exc.__class__.__name__,
+                    "traceback": error_traceback,
                     "recovery_suggestion": "请检查输入参数后重试；如果问题持续，打开技术详情查看 job id。",
                 },
             )

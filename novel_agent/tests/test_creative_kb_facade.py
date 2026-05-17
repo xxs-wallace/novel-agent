@@ -164,21 +164,23 @@ def test_creative_kb_facade_builds_clusters_and_reports_failed_and_skipped_docs(
         doc3_cards = cards_repo.list_by_doc_id(conn, doc_id="3")
         doc4_cards = cards_repo.list_by_doc_id(conn, doc_id="4")
 
-    assert result.built_fragment_count == 2
+    assert result.built_fragment_count == 1
     assert result.built_cluster_count == 2
     assert result.representative_count == 2
-    assert result.failed_doc_ids == ["3"]
+    assert result.failed_doc_ids == ["2", "3"]
     assert result.skipped_doc_ids == ["4", "5"]
-    assert len(result.fragment_ids) == 2
+    assert len(result.fragment_ids) == 1
     assert len(result.cluster_ids) == 2
-    assert any("fallback fragment_card used for doc_id=2" == warning for warning in result.warnings)
+    assert any("fragment_card build failed for doc_id=2" == warning for warning in result.warnings)
+    assert any("fragment_card build failed for doc_id=3" == warning for warning in result.warnings)
     assert any("skipped existing or empty documents: 4, 5" == warning for warning in result.warnings)
     assert len(doc1_cards) == 1
-    assert len(doc2_cards) == 1
+    assert doc2_cards == []
     assert doc3_cards == []
     assert len(doc4_cards) == 1
     assert doc1_cards[0].is_cluster_representative is True
-    assert doc2_cards[0].is_cluster_representative is True
+    assert doc4_cards[0].cluster_id
+    assert doc4_cards[0].is_cluster_representative is True
 
 
 def test_creative_kb_facade_returns_warning_when_no_documents_are_buildable(tmp_path: Path) -> None:

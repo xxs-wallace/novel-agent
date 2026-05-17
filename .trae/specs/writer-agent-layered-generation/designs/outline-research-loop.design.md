@@ -503,7 +503,7 @@ story_detail request
 }
 ```
 
-Notebook 是生成大纲的工作台，不是正式 Memory。进入 Freeze A 的内容必须被整理进正式 `BookContinuationPlan` 或相关 artifact。
+Notebook 是生成大纲的工作台，不是正式 Memory。进入全书规划 review artifact 的内容必须被整理进正式 `BookContinuationPlan` 或相关 artifact。
 
 ## 11. Sufficiency Gate
 

@@ -12,6 +12,30 @@ class CharacterProfilesRepo:
             (book_id, canonical_name),
         ).fetchone()
 
+    def get_by_id(self, conn: sqlite3.Connection, *, book_id: str, character_id: int) -> sqlite3.Row | None:
+        return conn.execute(
+            'SELECT * FROM character_profiles WHERE book_id = ? AND character_id = ?',
+            (book_id, character_id),
+        ).fetchone()
+
+    def list_by_ids(self, conn: sqlite3.Connection, *, book_id: str, character_ids: list[int]) -> list[sqlite3.Row]:
+        ids = []
+        for raw_id in character_ids:
+            try:
+                character_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if character_id > 0 and character_id not in ids:
+                ids.append(character_id)
+        if not ids:
+            return []
+        placeholders = ','.join('?' for _ in ids)
+        rows = conn.execute(
+            f'SELECT * FROM character_profiles WHERE book_id = ? AND character_id IN ({placeholders}) ORDER BY canonical_name',
+            [book_id, *ids],
+        ).fetchall()
+        return list(rows)
+
     def list_by_names(self, conn: sqlite3.Connection, *, book_id: str, names: list[str]) -> list[sqlite3.Row]:
         if not names:
             return []

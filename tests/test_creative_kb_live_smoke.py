@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,15 @@ from novel_agent.app.services.rerank_service import RerankService
 
 COUPLE_TXT_PATH = Path("couple.txt")
 DEEPSEEK_API_FILE = Path("~/deepseek.api")
+
+
+class _FakeRerankModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = system_prompt, user_prompt, use_fallback_on_error
+        payload = fallback_factory()
+        return payload, ""
 
 
 def _require_live_smoke_enabled() -> None:
@@ -189,7 +199,7 @@ def test_creative_kb_live_smoke_with_real_segmentation(tmp_path: Path) -> None:
         assert primary_card.fragment_id in coarse.candidate_fragment_ids
 
         candidates = cards_repo.list_by_fragment_ids(conn, fragment_ids=coarse.candidate_fragment_ids)
-        rerank = RerankService(top_n=2).rerank(
+        rerank = RerankService(top_n=2, model_client=_FakeRerankModel()).rerank(  # type: ignore[arg-type]
             scene_brief=scene_brief,
             candidates=candidates,
             anchor_context=primary_doc.content[:300],
@@ -198,4 +208,4 @@ def test_creative_kb_live_smoke_with_real_segmentation(tmp_path: Path) -> None:
 
     assert rerank.selected_fragment_ids
     assert primary_card.fragment_id in rerank.selected_fragment_ids
-    assert rerank.selection_notes == "rule_based_placeholder_rerank"
+    assert rerank.selection_notes == "prompt_based_fixed_rubric"

@@ -77,11 +77,12 @@ def main() -> int:
                     allow_incomplete_modeling=bool(payload.get("allow_incomplete_modeling", True)),
                     execute_chapter=bool(payload.get("execute_chapter", False)),
                 )
-            elif action in {"accept_chapter", "revise_chapter_length", "replan_chapter", "discard_chapter"}:
+            elif action in {"accept_chapter", "rewrite_chapter", "revise_chapter_length", "replan_chapter", "discard_chapter"}:
                 status_by_action = {
                     "accept_chapter": "accepted",
-                    "revise_chapter_length": "revise_length",
-                    "replan_chapter": "replan_chapter",
+                    "rewrite_chapter": "rewrite_requested",
+                    "revise_chapter_length": "rewrite_requested",
+                    "replan_chapter": "replan_requested",
                     "discard_chapter": "discarded",
                 }
                 _write_review_decision(
@@ -89,7 +90,17 @@ def main() -> int:
                     run_id=run_id,
                     status=status_by_action[action],
                 )
-                result = workflow.continue_after_chapter_acceptance(run_id=run_id)
+                if status_by_action[action] == "rewrite_requested":
+                    result = workflow.rewrite_current_chapter(
+                        conn,
+                        run_id=run_id,
+                        book_id=book_id,
+                        product_mode=product_mode,
+                    )
+                elif status_by_action[action] == "replan_requested":
+                    result = workflow.replan_current_chapter_from_feedback(run_id=run_id)
+                else:
+                    result = workflow.continue_after_chapter_acceptance(run_id=run_id)
             else:
                 result = run_writer_workflow_action(
                     workflow=workflow,
@@ -151,15 +162,15 @@ def _write_review_decision(*, workflow: object, run_id: str, status: str) -> Non
     draft_id = str(existing.get("draft_id") or state.get("current_draft_id") or "draft-001").strip()
     decision_id = str(existing.get("decision_id") or f"review-{chapter_id or 'chapter'}-{draft_id}").strip()
     next_action_by_status = {
-        "accepted": "freeze_e",
-        "revise_length": "wait_length_review",
-        "replan_chapter": "wait_chapter_review",
+        "accepted": "writeback_review",
+        "rewrite_requested": "agent_loop_rewrite_draft",
+        "replan_requested": "agent_loop_replan_chapter",
         "discarded": "halted",
     }
     reason_by_status = {
         "accepted": "approved",
-        "revise_length": "length_or_pacing_revision_requested",
-        "replan_chapter": "chapter_plan_revision_requested",
+        "rewrite_requested": "rewrite_requested",
+        "replan_requested": "chapter_plan_revision_requested",
         "discarded": "discarded_by_user",
     }
     length_plan_update = existing.get("length_plan_update")
@@ -198,9 +209,10 @@ def _write_review_decision(*, workflow: object, run_id: str, status: str) -> Non
         "status": status,
         "reason_code": reason_by_status[status],
         "feedback_text": str(existing.get("feedback_text") or ""),
-        "next_action_checkpoint": next_action_by_status[status],
-        "length_plan_update": length_plan_update if status == "revise_length" else None,
-        "chapter_replan_request": chapter_replan_request if status == "replan_chapter" else None,
+        "next_action": next_action_by_status[status],
+        "next_action_checkpoint": "freeze_e" if status == "accepted" else "halted" if status == "discarded" else "",
+        "length_plan_update": None,
+        "chapter_replan_request": None,
         "reviewer_type": "user",
         "created_at": str(existing.get("created_at") or datetime.now(timezone.utc).isoformat()),
     }

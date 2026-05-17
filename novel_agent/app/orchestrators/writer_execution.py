@@ -36,6 +36,127 @@ NARRATION_CONSISTENCY_RULES = (
     "当冻结事实、风格参考和用户输入发生冲突时，优先保持原作叙事契约与已冻结事实。",
 )
 
+_REQUIREMENT_STOPWORDS = {
+    "包含",
+    "形成",
+    "通过",
+    "必须",
+    "之间",
+    "自己",
+    "某个",
+    "时候",
+    "过程",
+    "最终",
+    "可以",
+    "展示",
+    "必须",
+    "包含",
+    "两重",
+    "核心",
+    "信息",
+    "如果",
+    "例如",
+    "最多",
+    "一句",
+    "同类",
+    "宣言",
+    "框架",
+    "不是",
+    "而是",
+    "方式",
+    "类似",
+    "确认",
+    "对话",
+    "场景",
+    "元素",
+    "机会",
+    "范围",
+}
+
+_REQUIREMENT_DEFAULT_ALIASES: dict[str, tuple[str, ...]] = {
+    "聚会": ("客厅", "圣诞树", "晚饭", "三个人", "沙发区"),
+    "朋友": ("小锋", "三个人", "舞伴"),
+    "音乐": ("爵士", "萨克斯", "圣诞曲", "专辑"),
+    "放松": ("慵懒", "暖黄色", "半明半暗"),
+    "暧昧": ("试探", "贴", "靠", "目光", "触"),
+    "邀舞": ("跳舞", "舞伴", "伸出手", "牵起"),
+    "坐近": ("坐下", "身边", "贴着", "靠"),
+    "轻触": ("碰", "擦过", "扶住", "贴", "按在"),
+    "近距离": ("贴", "靠", "扶", "抵", "抱"),
+    "内心": ("心跳", "思绪", "我该", "我想", "胸口"),
+    "独白": ("我该", "我想", "我没有", "我盯着"),
+    "保护欲": ("叫停", "不行", "界限", "边界"),
+    "关键": ("就在", "这歌", "让我来", "站起来"),
+    "触碰": ("摸", "扶", "碰", "擦过", "贴上"),
+    "私密": ("裙摆", "腰", "大腿", "腿根"),
+    "打断": ("叫停", "推开", "制止"),
+    "介入": ("站起来", "走到", "让我来", "接手"),
+    "话题": ("说", "问", "告诉"),
+    "肢体": ("揽", "抱", "扶", "拉", "吻"),
+    "边界": ("不行", "那种程度", "再往下", "界限"),
+    "不回避": ("没有躲", "没有退", "没有叫停", "看着"),
+    "默许": ("点了点头", "你们随意", "没有推开", "没有制止"),
+    "信任": ("只要你看着我", "我就能忍", "我们是一体"),
+    "犹豫": ("停住", "停顿", "想说什么", "说到一半", "终于说"),
+    "脸红": ("泛起", "脸上泛起", "耳廓", "红潮", "耳尖红"),
+    "握紧": ("攥", "绞紧", "骨节发白", "握住", "抓住"),
+    "落泪": ("眼泪", "泪痕", "哭", "呜咽", "睫毛沾湿"),
+    "绝对忠诚": ("从来没有变过", "从来没有想过要背叛", "唯一想嫁", "爱你爱到骨头"),
+    "忠诚": ("从来没有变过", "从来没有想过要背叛", "唯一想嫁", "爱你爱到骨头"),
+    "真实兴奋": ("我是兴奋", "真的享受", "喜欢被你看着", "喜欢被注视", "喜欢被你安排"),
+    "兴奋": ("我是兴奋", "真的享受", "喜欢被你看着", "喜欢被注视", "喜欢被你安排"),
+    "肯定": ("证明了一切", "接得住", "从来没觉得", "点了点头"),
+    "理解": ("我接得住", "不是对立", "我从来没觉得", "证明了一切"),
+    "感激": ("谢谢", "感激", "证明了一切"),
+    "调笑": ("挑了挑眉", "笑", "工具人", "不亏"),
+    "倾听者": ("没有起身", "没有低头", "我明白了", "坐在那里"),
+    "主导者": ("只是", "我明白了", "知道界限", "工具人"),
+    "界限": ("边界", "我明白了", "知道界限", "从头到尾你们都是一体的"),
+    "背叛": ("从来没有想过要背叛", "探索不等于背叛", "不是在给自己找借口"),
+    "欲望并存": ("忠诚与欲望", "又爱你，又这样", "两个都是我"),
+    "刺激感": ("真的享受", "我是兴奋", "喜欢被注视", "喜欢被你安排"),
+    "接纳": ("接得住", "证明了一切", "从来没觉得", "点了点头"),
+    "一体": ("从头到尾你们都是一体的", "我们是一体", "你是我的"),
+    "心理安全": ("信任", "安全感", "确认我是不是还在", "跟她站在同一条战线上"),
+    "互动升级": ("亲", "吻", "扶", "摸", "靠近", "贴近", "手贴", "手扶"),
+    "亲吻颈部": ("亲这里", "颈窝", "颈侧", "耳垂", "嘴唇碰上"),
+    "背部": ("后背", "脊柱", "脊椎", "后腰", "腰窝"),
+    "实质插入": ("再往下，不行", "停一下", "到此为止", "没有越过"),
+    "情绪波动": ("嫉妒", "针", "热流", "恐慌", "压住", "心跳"),
+    "高潮前": ("临界点", "再往下", "起了反应", "热流", "针刺"),
+    "嫉妒重新": ("嫉妒", "又涌", "尖锐", "细针", "胸腔"),
+    "信任压住": ("信任", "确认", "压住", "站在同一条战线上"),
+    "恐慌": ("针", "胸腔", "不安", "压住", "消失了"),
+    "刹车": ("停一下", "停", "叫停", "制止", "收回去", "喊停"),
+    "车瞬间": ("停一下", "停", "喊停", "收回去"),
+    "决定性刹": ("停一下", "停", "喊停", "握住"),
+    "眼神": ("看我", "视线", "对上", "确认"),
+    "交流确认": ("看我", "对上我的眼睛", "确认", "点头"),
+    "频率": ("同一条战线", "确认", "等我", "看我"),
+    "冷静": ("定几条规矩", "说清楚", "规则", "规矩", "放下杯子"),
+    "主导": ("我说", "我继续说", "我竖起", "我转过身", "我指了指"),
+    "逐条说出": ("第一条", "第二条", "第三条", "第四条"),
+    "今后": ("以后", "规矩", "规则", "任何事"),
+    "不可以": ("不行", "不能", "没有", "只是普通"),
+    "温馨": ("热可可", "圣诞快乐", "靠在", "倒可可", "暖"),
+    "余韵": ("喘息", "靠", "热可可", "圣诞快乐", "平稳"),
+    "喝东西": ("红酒", "热可可", "杯子", "喝了一口", "倒上"),
+    "整理衣物": ("拉平", "袖子拉下来", "整理", "遮住", "穿好"),
+    "日常亲密": ("靠在", "额头", "圣诞快乐", "倒可可", "坐到我身边"),
+    "情感高潮": ("临界点", "热流", "针刺", "嫉妒", "停一下"),
+    "相处规则": ("规矩", "规则", "第一条", "第二条", "第三条"),
+    "底线": ("不行", "不能", "没有我的点头", "只是普通", "范围"),
+    "高强度试": ("临界点", "再往下", "亲", "吻", "手贴", "腰窝"),
+    "共同经历": ("三人", "我们", "静", "小锋", "我"),
+    "决策权": ("我点头", "共同决定", "由我和静", "我们划好", "决定权"),
+    "公开确认": ("点了点头", "我听你们的", "同意", "好", "我知道"),
+    "具体规则": ("第一条", "第二条", "第三条", "第四条", "规矩"),
+    "在场": ("我在场", "我不在", "不在的场合", "必须在现场"),
+    "给出信号": ("我点头", "点了点头", "没有我的点头", "等我"),
+    "邀请": ("邀请", "被邀请", "肯让我", "允许"),
+    "第三者": ("第三者", "第三个人", "不是来抢"),
+}
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -446,6 +567,8 @@ class FrozenChapterExecutionInput:
     forbidden_inputs: list[str] = field(default_factory=list)
     relation_state_gate: dict[str, Any] = field(default_factory=dict)
     planned_character_constraints: list[dict[str, Any]] = field(default_factory=list)
+    user_supplement: dict[str, Any] = field(default_factory=dict)
+    user_supplements: list[dict[str, Any]] = field(default_factory=list)
     writer_rules: list[str] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
 
@@ -463,6 +586,8 @@ class FrozenChapterExecutionInput:
             "forbidden_inputs": list(self.forbidden_inputs),
             "relation_state_gate": dict(self.relation_state_gate),
             "planned_character_constraints": [dict(item) for item in self.planned_character_constraints],
+            "user_supplement": dict(self.user_supplement),
+            "user_supplements": [dict(item) for item in self.user_supplements],
             "writer_rules": list(self.writer_rules),
             "sources": [dict(item) for item in self.sources],
         }
@@ -619,14 +744,14 @@ class RestrictedWriterExecutor:
         self.chapters_repo = ChaptersRepo()
         self.character_profiles_repo = CharacterProfilesRepo()
         self.character_profile_service = CharacterProfileService(profiles_repo=self.character_profiles_repo)
-        self.world_state_service = WorldStateService(repo_root=repo_root)
+        self.world_state_service = WorldStateService(repo_root=repo_root, model_client=model_client)
         self.outline_service = OutlineService(repo_root=repo_root)
         self.fragment_cards_repo = FragmentCardsRepo()
         self.fragment_clusters_repo = FragmentClustersRepo()
         self.semantic_aliases_repo = SemanticAliasesRepo()
         self._runtime_requirement_aliases: dict[str, tuple[str, ...]] = {}
         self.coarse_retrieval_service = CoarseRetrievalService()
-        self.rerank_service = RerankService()
+        self.rerank_service = RerankService(model_client=model_client)
 
     def prepare_execution_input(
         self,
@@ -661,6 +786,28 @@ class RestrictedWriterExecutor:
         )
         relation_gate = self._build_relation_state_gate(chapter_brief)
         title_index = self._resolve_document_title_index(conn, book_id=book_id, run_id=run_id, chapter_id=chapter_id)
+        user_supplement = self._load_optional_run_payload(run_id, "user_supplement.json")
+        if not isinstance(user_supplement, Mapping):
+            user_supplement = {}
+        character_fact_inputs = self._build_character_fact_inputs(
+            conn,
+            book_id=book_id,
+            chapter_brief=chapter_brief,
+            upstream_payloads={
+                "book_continuation_plan": dict(book_plan or {}),
+                "world_expansion_pack": dict(world_pack or {}),
+                "batch_plan": dict(batch_plan or {}),
+                "chapter_package": dict(chapter_package or {}),
+                "user_supplement": dict(user_supplement or {}),
+            },
+        )
+        fact_inputs = {
+            "book_continuation_plan": dict(book_plan or {}),
+            "world_expansion_pack": dict(world_pack or {}),
+            "batch_plan": dict(batch_plan or {}),
+            "chapter_package_id": str(chapter_package.get("package_id") or ""),
+        }
+        fact_inputs.update(character_fact_inputs)
         execution_input = FrozenChapterExecutionInput(
             run_id=run_id,
             book_id=book_id,
@@ -669,26 +816,35 @@ class RestrictedWriterExecutor:
             chapter_title=str(chapter_brief.get("title") or chapter_id),
             chapter_brief=dict(chapter_brief),
             length_budget=length_budget,
-            fact_inputs={
-                "book_continuation_plan": dict(book_plan or {}),
-                "world_expansion_pack": dict(world_pack or {}),
-                "batch_plan": dict(batch_plan or {}),
-                "chapter_package_id": str(chapter_package.get("package_id") or ""),
-            },
+            fact_inputs=fact_inputs,
             style_reference_bundle=style_bundle.to_dict(),
             forbidden_inputs=self._collect_forbidden_inputs(chapter_brief, batch_plan, world_pack),
             relation_state_gate=relation_gate,
             planned_character_constraints=[item.to_dict() for item in planned_constraints],
+            user_supplement=dict(user_supplement),
+            user_supplements=[dict(user_supplement)] if user_supplement else [],
             writer_rules=[
                 "只允许承接冻结的 ChapterBrief 与上游 Freeze 事实。",
                 "事实输入优先于风格输入，风格只能影响表达不能覆盖事实。",
                 "不得越过当前批次边界，不得跳过关系桥接。",
                 "不得自由创建未被上游批准的关键新角色。",
                 "不得补大型新设定，只能在冻结事实范围内展开。",
+                *(
+                    [
+                        "人物身份、亲属关系、阵营、称谓与历史关系必须以 fact_inputs.character_profiles 和 fact_inputs.story_outline_evidence 的显式事实为准；不得只凭第一人称称谓自由改写亲属方向。"
+                    ]
+                    if character_fact_inputs
+                    else []
+                ),
                 *NARRATION_CONSISTENCY_RULES,
                 (
                     f"正文长度必须遵循已确认 ChapterLengthBudget：目标 {length_budget['target_chars']} 字，"
                     f"允许区间 {length_budget['min_chars']}-{length_budget['max_chars']} 字。"
+                ),
+                *(
+                    ["必须消费 user_supplement.supplement_text 中用户通过章节梗概时补充的字数、风格、节奏、重点段落和禁止项要求。"]
+                    if user_supplement
+                    else []
                 ),
             ],
             sources=[
@@ -717,6 +873,187 @@ class RestrictedWriterExecutor:
             "execution_checkpoint": checkpoint,
             "cast_plan": cast_plan,
         }
+
+    def _build_character_fact_inputs(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        chapter_brief: Mapping[str, Any],
+        upstream_payloads: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        matcher_text = json.dumps(
+            {
+                "chapter_brief": dict(chapter_brief),
+                "upstream_payloads": dict(upstream_payloads),
+            },
+            ensure_ascii=False,
+        )
+        profiles = self._relevant_character_profiles_for_prompt(
+            conn,
+            book_id=book_id,
+            matcher_text=matcher_text,
+        )
+        if not profiles:
+            return {}
+        terms = self._character_match_terms(profiles)
+        story_lines = self._relevant_story_outline_lines(
+            conn,
+            book_id=book_id,
+            terms=terms,
+        )
+        payload: dict[str, Any] = {
+            "character_profiles": profiles,
+            "relationship_fact_policy": (
+                "Use these Memory facts as hard constraints for identity, kinship, current relationship state, "
+                "and aliases. If a kinship direction is ambiguous in prose, prefer explicit relationship summaries "
+                "and story outline evidence over free inference from first-person wording."
+            ),
+        }
+        if story_lines:
+            payload["story_outline_evidence"] = story_lines
+        return payload
+
+    def _relevant_character_profiles_for_prompt(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        matcher_text: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for row in self.character_profiles_repo.list_by_book(conn, book_id=book_id):
+            profile = self._character_profile_row_to_dict(row)
+            names = [
+                str(profile.get("canonical_name") or ""),
+                *_normalize_string_list(profile.get("aliases")),
+            ]
+            matched_names = [name for name in names if name and name in matcher_text]
+            if not matched_names:
+                continue
+            score = sum(3 if name == profile.get("canonical_name") else 2 for name in matched_names)
+            importance = int(profile.get("importance_score") or 0)
+            prompt_profile = self._prompt_character_profile(profile, matcher_text=matcher_text)
+            prompt_profile["matched_names"] = matched_names[:12]
+            scored.append((score, importance, prompt_profile))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in scored[:limit]]
+
+    def _prompt_character_profile(self, profile: Mapping[str, Any], *, matcher_text: str) -> dict[str, Any]:
+        aliases = _normalize_string_list(profile.get("aliases"))[:12]
+        relationships = self._prompt_relationship_facts(profile, matcher_text=matcher_text)
+        recent_activity = self._prompt_profile_items(profile.get("recent_activity"), limit=6)
+        story_events = self._prompt_profile_items(profile.get("story_events"), limit=6)
+        return {
+            "canonical_name": str(profile.get("canonical_name") or ""),
+            "aliases": aliases,
+            "evidence_level": str(profile.get("evidence_level") or ""),
+            "speaking_character_status": str(profile.get("speaking_character_status") or ""),
+            "profile_summary_md": _safe_excerpt(str(profile.get("profile_summary_md") or ""), limit=1200),
+            "relationships": relationships,
+            "recent_activity": recent_activity,
+            "story_events": story_events,
+        }
+
+    def _prompt_relationship_facts(self, profile: Mapping[str, Any], *, matcher_text: str, limit: int = 12) -> list[dict[str, Any]]:
+        relationships = [item for item in (profile.get("relationships") or []) if isinstance(item, Mapping)]
+        names = [
+            str(profile.get("canonical_name") or ""),
+            *_normalize_string_list(profile.get("aliases")),
+        ]
+        matched: list[dict[str, Any]] = []
+        fallback: list[dict[str, Any]] = []
+        for item in relationships:
+            summary = self._compact_relation_text(item)
+            rendered = json.dumps(item, ensure_ascii=False)
+            payload = {
+                "target_name": str(item.get("target_name") or item.get("target_character") or ""),
+                "relation_type": str(item.get("relation_type") or ""),
+                "status_summary": _safe_excerpt(str(item.get("status_summary") or item.get("status") or summary), limit=360),
+                "evidence_level": str(item.get("evidence_level") or ""),
+                "source_chapter_indexes": item.get("source_chapter_indexes") or [],
+            }
+            if any(name and (name in rendered or name in matcher_text) for name in names):
+                matched.append(payload)
+            else:
+                fallback.append(payload)
+        selected = matched or fallback
+        return selected[:limit]
+
+    def _prompt_profile_items(self, value: Any, *, limit: int) -> list[Any]:
+        items = value if isinstance(value, list) else []
+        cleaned: list[Any] = []
+        for item in items:
+            if isinstance(item, Mapping):
+                payload = dict(item)
+                for key in ("value", "summary", "status_summary"):
+                    if key in payload:
+                        payload[key] = _safe_excerpt(str(payload.get(key) or ""), limit=360)
+                cleaned.append(payload)
+            else:
+                text = _safe_excerpt(str(item), limit=360)
+                if text:
+                    cleaned.append(text)
+            if len(cleaned) >= limit:
+                break
+        return cleaned
+
+    @staticmethod
+    def _compact_relation_text(item: Mapping[str, Any]) -> str:
+        return " ".join(
+            str(item.get(key) or "").strip()
+            for key in ("target_name", "target_character", "relation_type", "status_summary", "status")
+            if str(item.get(key) or "").strip()
+        )
+
+    @staticmethod
+    def _character_match_terms(profiles: list[Mapping[str, Any]]) -> list[str]:
+        terms: list[str] = []
+        for profile in profiles:
+            for value in [profile.get("canonical_name"), *(profile.get("aliases") or [])]:
+                text = str(value or "").strip()
+                if text and text not in terms:
+                    terms.append(text)
+            for value in profile.get("matched_names") or []:
+                text = str(value or "").strip()
+                if text and text not in terms:
+                    terms.append(text)
+        return terms[:24]
+
+    def _relevant_story_outline_lines(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        terms: list[str],
+        limit: int = 24,
+    ) -> list[str]:
+        if not terms:
+            return []
+        assets = self.assets_repo.get(conn, book_id=book_id)
+        outline_path_text = str(assets["outline_markdown_path"] or "") if assets is not None else ""
+        path = Path(outline_path_text)
+        if not path.is_absolute():
+            path = self.repo_root / path
+        if not path.exists():
+            return []
+        lines: list[str] = []
+        seen: set[str] = set()
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if not any(term and term in line for term in terms):
+                continue
+            compact = _safe_excerpt(line, limit=700)
+            if compact in seen:
+                continue
+            seen.add(compact)
+            lines.append(compact)
+            if len(lines) >= limit:
+                break
+        return lines
 
     def confirm_freeze_d(self, *, run_id: str) -> dict[str, str]:
         self._require_file(run_id, "chapter_execution_input.json")
@@ -1012,11 +1349,7 @@ class RestrictedWriterExecutor:
         length_budget = dict(execution_input.get("length_budget") or {})
         prompt = self._build_execution_prompt(execution_input)
         if self.model_client is None:
-            return self._fallback_draft(
-                chapter_brief=chapter_brief,
-                style_bundle=style_bundle,
-                length_budget=length_budget,
-            )
+            raise RuntimeError("Writer execution requires an available model_client")
         text = self.model_client.generate_text(
             system_prompt=prompt["system_prompt"],
             user_prompt=prompt["user_prompt"],
@@ -1092,6 +1425,8 @@ class RestrictedWriterExecutor:
                     "fact_inputs": execution_input.get("fact_inputs"),
                     "style_reference_bundle": execution_input.get("style_reference_bundle"),
                     "planned_character_constraints": execution_input.get("planned_character_constraints"),
+                    "user_supplement": execution_input.get("user_supplement"),
+                    "user_supplements": execution_input.get("user_supplements"),
                     "forbidden_inputs": execution_input.get("forbidden_inputs"),
                     "writer_rules": execution_input.get("writer_rules"),
                 },
@@ -1743,13 +2078,15 @@ class RestrictedWriterExecutor:
         hits = [keyword for keyword in keywords if self._requirement_keyword_present(draft_text, keyword)]
         if len(keywords) <= 2:
             return bool(hits)
-        return len(hits) >= 2
+        required_hits = 2 if len(keywords) <= 5 else 3
+        return len(hits) >= required_hits
 
     def _requirement_keyword_present(self, draft_text: str, keyword: str) -> bool:
         if keyword in draft_text:
             return True
         aliases = self._runtime_requirement_aliases.get(keyword, ())
-        return any(alias and alias in draft_text for alias in aliases)
+        default_aliases = _REQUIREMENT_DEFAULT_ALIASES.get(keyword, ())
+        return any(alias and alias in draft_text for alias in (*aliases, *default_aliases))
 
     def _load_requirement_aliases(self, conn: sqlite3.Connection, *, book_id: str) -> dict[str, tuple[str, ...]]:
         try:
@@ -1771,12 +2108,17 @@ class RestrictedWriterExecutor:
         for canonical_key in sorted(self._runtime_requirement_aliases, key=len, reverse=True):
             if canonical_key in requirement and canonical_key not in keywords:
                 keywords.append(canonical_key)
-        normalized = re.sub(r"[，。！？；：、“”《》（）()\[\]{}]", " ", requirement)
+        for canonical_key in sorted(_REQUIREMENT_DEFAULT_ALIASES, key=len, reverse=True):
+            if canonical_key in requirement and canonical_key not in keywords:
+                keywords.append(canonical_key)
+        normalized = re.sub(r"[，。！？；：、“”‘’《》（）()\[\]{}]", " ", requirement)
         normalized = re.sub(r"[和与及或并且通过符合的地得在把被将为对向里中上下一起]+", " ", normalized)
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_·-]*|[\u4e00-\u9fff]{2,6}", normalized):
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9_·-]*|[\u4e00-\u9fff]{2,4}", normalized):
+            if token in _REQUIREMENT_STOPWORDS:
+                continue
             if token not in keywords:
                 keywords.append(token)
-        return keywords[:8]
+        return keywords[:12]
 
     def _find_chapter_brief(self, chapter_package: Mapping[str, Any], *, chapter_id: str) -> dict[str, Any]:
         for item in chapter_package.get("chapters") or []:

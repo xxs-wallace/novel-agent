@@ -135,21 +135,37 @@ class PlotSummaryUnitCompressionService:
         fallback_unit: PlotSummaryUnit,
     ) -> PlotSummaryUnit:
         if not self._should_use_model():
-            return fallback_unit
+            raise RuntimeError("PlotSummaryUnitCompressionService requires an available model_client")
+        output_schema = self._unit_output_schema(fallback_unit)
         system_prompt, user_prompt = build_plot_summary_unit_prompt(
             window=window,
             overlap_title_indexes=fallback_unit.overlap_title_indexes,
-            fallback_payload=fallback_unit.to_dict(),
+            output_schema=output_schema,
         )
         payload, _ = self.model_client.generate_json(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            fallback_factory=fallback_unit.to_dict,
-            use_fallback_on_error=True,
+            fallback_factory=lambda: output_schema,
+            use_fallback_on_error=False,
         )
         if not isinstance(payload, dict):
-            return fallback_unit
+            raise RuntimeError("Plot summary compression model returned a non-object JSON payload")
         return self._unit_from_payload(payload=payload, fallback_unit=fallback_unit)
+
+    def _unit_output_schema(self, fallback_unit: PlotSummaryUnit) -> dict[str, Any]:
+        payload = fallback_unit.to_dict()
+        payload.update(
+            {
+                "unit_summary": "",
+                "continuity_hooks": [],
+                "boundary_events": [],
+                "major_character_state_changes": [],
+                "relationship_movements": [],
+                "world_or_rule_reveals": [],
+                "uncertainty_notes": [],
+            }
+        )
+        return payload
 
     def _unit_from_payload(self, *, payload: dict[str, Any], fallback_unit: PlotSummaryUnit) -> PlotSummaryUnit:
         return PlotSummaryUnit(
@@ -160,38 +176,27 @@ class PlotSummaryUnitCompressionService:
             overlap_title_indexes=fallback_unit.overlap_title_indexes,
             start_document_title_index=fallback_unit.start_document_title_index,
             end_document_title_index=fallback_unit.end_document_title_index,
-            unit_summary=self._payload_text(payload, "unit_summary", fallback_unit.unit_summary),
-            continuity_hooks=self._payload_str_list(payload, "continuity_hooks", fallback_unit.continuity_hooks),
-            boundary_events=self._payload_str_list(payload, "boundary_events", fallback_unit.boundary_events),
-            major_character_state_changes=self._payload_str_list(
-                payload,
-                "major_character_state_changes",
-                fallback_unit.major_character_state_changes,
-            ),
-            relationship_movements=self._payload_str_list(
-                payload,
-                "relationship_movements",
-                fallback_unit.relationship_movements,
-            ),
-            world_or_rule_reveals=self._payload_str_list(
-                payload,
-                "world_or_rule_reveals",
-                fallback_unit.world_or_rule_reveals,
-            ),
-            uncertainty_notes=self._payload_str_list(payload, "uncertainty_notes", fallback_unit.uncertainty_notes),
+            unit_summary=self._required_payload_text(payload, "unit_summary"),
+            continuity_hooks=self._payload_str_list(payload, "continuity_hooks"),
+            boundary_events=self._payload_str_list(payload, "boundary_events"),
+            major_character_state_changes=self._payload_str_list(payload, "major_character_state_changes"),
+            relationship_movements=self._payload_str_list(payload, "relationship_movements"),
+            world_or_rule_reveals=self._payload_str_list(payload, "world_or_rule_reveals"),
+            uncertainty_notes=self._payload_str_list(payload, "uncertainty_notes"),
         )
 
-    def _payload_text(self, payload: dict[str, Any], key: str, fallback: str) -> str:
+    def _required_payload_text(self, payload: dict[str, Any], key: str) -> str:
         value = payload.get(key)
         text = normalize_whitespace(str(value or ""))
-        return text or fallback
+        if not text:
+            raise RuntimeError(f"Plot summary compression model returned empty {key}")
+        return text
 
-    def _payload_str_list(self, payload: dict[str, Any], key: str, fallback: list[str]) -> list[str]:
+    def _payload_str_list(self, payload: dict[str, Any], key: str) -> list[str]:
         value = payload.get(key)
         if not isinstance(value, list):
-            return list(fallback)
-        items = [normalize_whitespace(str(item)) for item in value if normalize_whitespace(str(item))]
-        return items or list(fallback)
+            return []
+        return [normalize_whitespace(str(item)) for item in value if normalize_whitespace(str(item))]
 
     def _should_use_model(self) -> bool:
         if self.model_client is None:

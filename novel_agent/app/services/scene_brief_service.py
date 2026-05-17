@@ -38,7 +38,7 @@ class SceneBriefService:
 
         fallback_brief = self._build_fallback_scene_brief(normalized_input)
         if self.model_client is None:
-            return normalize_scene_brief(fallback_brief)
+            raise RuntimeError("SceneBriefService requires an available model_client when scene_brief is not provided")
         return self._build_scene_brief_with_prompt(
             retrieval_input=normalized_input,
             fallback_brief=fallback_brief,
@@ -74,7 +74,7 @@ class SceneBriefService:
                         "Failed to build SceneBrief from model output after "
                         f"{SCENE_BRIEF_SCHEMA_RETRY_ATTEMPTS} attempts. Raw output preview:\n{preview[:800]}"
                     )
-        return self._normalize_scene_brief(fallback_brief)
+        raise RuntimeError("SceneBrief generation exhausted retry attempts")
 
     def _scene_brief_from_payload(self, payload: dict[str, Any] | list[Any]) -> SceneBrief:
         if not isinstance(payload, dict):
