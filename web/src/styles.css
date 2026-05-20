@@ -786,8 +786,21 @@ textarea {
 }
 
 .decision-actions {
+  display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.draft-review-card .decision-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+}
+
+.draft-review-card .decision-actions button {
+  min-height: 32px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
 }
 
 .floating-decision-stack {
@@ -814,6 +827,14 @@ textarea {
     0 1px 0 rgba(255, 255, 255, 0.7) inset;
 }
 
+.composer-draft {
+  grid-template-columns: minmax(180px, 1fr) minmax(300px, 42%);
+  align-items: stretch;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: 18px;
+}
+
 .writer-answer-context {
   grid-column: 1 / -1;
   display: flex;
@@ -838,6 +859,13 @@ textarea {
   box-shadow: none;
 }
 
+.composer-draft textarea {
+  min-height: 52px;
+  max-height: 96px;
+  overflow: auto;
+  resize: vertical;
+}
+
 .composer textarea:focus {
   outline: none;
 }
@@ -846,6 +874,29 @@ textarea {
   display: grid;
   gap: 8px;
   min-width: 138px;
+}
+
+.composer-decision-actions {
+  grid-template-columns: repeat(2, minmax(132px, 1fr));
+  min-width: min(420px, 42vw);
+}
+
+.composer-draft .composer-decision-actions {
+  grid-template-columns: repeat(auto-fit, minmax(124px, 1fr));
+  min-width: 0;
+  gap: 6px;
+}
+
+.composer-draft .composer-decision-actions button {
+  min-height: 32px;
+  padding: 6px 9px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
+}
+
+.composer-decision-actions .send-button {
+  justify-self: start;
 }
 
 .send-button {
@@ -1168,6 +1219,10 @@ th {
 
   .composer-actions {
     grid-template-columns: 1fr;
+  }
+
+  .composer-draft .composer-decision-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .message-bubble {

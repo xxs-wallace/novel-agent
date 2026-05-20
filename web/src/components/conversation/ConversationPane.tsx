@@ -588,6 +588,15 @@ export function ConversationPane({
         : activeDecisionAction
           ? `正在准备：${publicDecisionLabel(activeDecisionAction.action.label)}`
         : "";
+  const composerMode = composerDraftReview
+    ? "draft"
+    : composerArtifactReview
+      ? "artifact"
+      : composerQuestionSet
+        ? "question"
+        : composerDecisionCards.length
+          ? "decision"
+          : "plain";
 
   return (
     <div className="conversation-pane">
@@ -624,7 +633,7 @@ export function ConversationPane({
         onOpenArtifactDetail={onOpenArtifactDetail}
       />
 
-      <form className="composer" onSubmit={handleSubmit}>
+      <form className={`composer composer-${composerMode}`} onSubmit={handleSubmit}>
         {composerContextLabel ? (
           <div className="writer-answer-context">
             <span>{composerContextLabel}</span>
@@ -652,7 +661,7 @@ export function ConversationPane({
                       ? "输入本次分支需要的反馈，然后点击右侧分支按钮。"
               : "输入自然语言方向。只有明确以 / 开头时才进入高级命令兼容路径。"
           }
-          rows={4}
+          rows={composerDraftReview ? 2 : 4}
           disabled={!selectedTask}
         />
         {composerQuestionSet ? (
