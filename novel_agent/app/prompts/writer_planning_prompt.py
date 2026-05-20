@@ -132,6 +132,8 @@ def build_batch_plan_prompt(
         "不得把 WorldExpansionPack 或 CharacterCastPlan 中的背景信息升级成新的剧情主线。\n"
         "5. must_not_consume 必须继承 BookContinuationPlan.must_preserve 与 WorldExpansionPack.open_items 中不应提前消费的信息。\n"
         "6. exit_hook 只能停在当前批次边界上的悬念，不得直接写成下一批次的完整事件。\n"
+        "7. 必须继承 BookContinuationPlan 的 target_chapter_count、target_total_chars、default_chapter_target_chars "
+        "以及当前批次覆盖的 chapter_outline_slots；不得擅自缩短用户授权的章节数或字数。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
@@ -173,6 +175,8 @@ def build_chapter_package_prompt(
         "可以细化为场景动作，但不得扩写到 other_batch_must_resolve 或 exit_hook 之后。\n"
         "8. 每章 forbidden 必须包含 batch_forbidden_consumption；非最后一章不得提前消费 batch_exit_hook。\n"
         "9. 剧情结构知识库和关系弧线知识库只能用于节奏安排，若它们暗示的事件超出章节边界契约，必须忽略。\n"
+        "10. target_word_count 必须服从章节边界契约中的 target_chars；若契约给出 10000 字，"
+        "target_word_count 应为 5000，因为后续长度规划会把该字段换算为正文目标字数。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
@@ -199,16 +203,27 @@ def _chapter_boundary_contract(*, batch_plan: dict[str, Any], chapter_count: int
         goal = str(batch_plan.get("batch_goal") or "").strip()
         must_resolve = [goal] if goal else []
     count = max(1, int(chapter_count or 1))
+    default_chars = int(batch_plan.get("default_chapter_target_chars") or 0)
+    slots = [dict(item) for item in (batch_plan.get("chapter_outline_slots") or []) if isinstance(item, dict)]
     chapter_boundaries: list[dict[str, Any]] = []
     for index in range(count):
         assigned = must_resolve[min(index, len(must_resolve) - 1)] if must_resolve else ""
         other = [item for item in must_resolve if item != assigned]
+        slot = slots[index] if index < len(slots) else {}
+        target_chars = int(
+            slot.get("target_chars")
+            or slot.get("estimated_chars")
+            or default_chars
+            or (int(batch_plan.get("target_total_chars") or 0) // count if batch_plan.get("target_total_chars") else 0)
+            or 4000
+        )
         chapter_boundaries.append(
             {
                 "chapter_order": index + 1,
                 "assigned_must_resolve": assigned,
                 "other_batch_must_resolve": other,
                 "may_use_batch_exit_hook": index == count - 1,
+                "target_chars": target_chars,
             }
         )
     return {
@@ -358,6 +373,16 @@ def _batch_plan_example() -> dict[str, Any]:
         "must_not_consume": ["终局真相", "关系最终确认"],
         "planned_character_beats": ["pc-001 在本批次首次提供支援"],
         "exit_hook": "新的线索指向更大势力",
+        "target_chapter_count": 3,
+        "target_total_chars": 30000,
+        "default_chapter_target_chars": 10000,
+        "chapter_outline_slots": [
+            {
+                "chapter_index": 1,
+                "target_chars": 10000,
+                "plot_function": "解决当前困境并打开新秩序入口",
+            }
+        ],
         "evidence": [
             {
                 "claim": "当前批次应优先承接追捕线",

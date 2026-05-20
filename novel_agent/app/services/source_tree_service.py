@@ -42,10 +42,13 @@ class SourceTreeService:
             read_order=read_order,
             confidence=0.95,
         )
-        return DirectoryAnalysisOutput(strategy_type="single_book_multi_file", books=[plan], global_notes="heuristic")
+        strategy_type: Literal["single_file", "single_book_multi_file"] = "single_file" if root.is_file() else "single_book_multi_file"
+        return DirectoryAnalysisOutput(strategy_type=strategy_type, books=[plan], global_notes="heuristic")
 
     def analyze(self, root: Path, *, book_id: str) -> DirectoryAnalysisOutput:
         fallback = self.heuristic_analysis(root, book_id=book_id)
+        if root.is_file():
+            return fallback
         if self.model_client is None:
             raise RuntimeError("SourceTreeService requires an available model_client")
         if self.model_client.settings.dry_run:

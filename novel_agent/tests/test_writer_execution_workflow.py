@@ -13,6 +13,7 @@ from novel_agent.app.orchestrators import (
     WriterRollbackManager,
 )
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
+from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.run_interactive import build_writer_workflow
@@ -1137,6 +1138,66 @@ def test_prepare_execution_input_includes_relevant_character_relationship_facts(
     assert "story_outline_evidence" in fact_inputs
     assert "人物身份、亲属关系" in prompt["user_prompt"]
     assert "谨慎合作关系" in prompt["user_prompt"]
+
+
+def test_prepare_execution_input_includes_recent_memory_history(tmp_path: Path) -> None:
+    db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
+    run_dir = planner_orchestrator.run_writer.layout.run_dir("run-1")
+    chapter_package_doc = json.loads((run_dir / "chapter_package.json").read_text(encoding="utf-8"))
+    chapter_id = str(chapter_package_doc["data"]["chapters"][0]["chapter_id"])
+    planner_orchestrator.confirm_chapter_package(run_id="run-1")
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": "book-1",
+                "document_title_index": 10,
+                "chapter_title": "第十章 雨夜",
+                "source_doc_start_id": 1,
+                "source_doc_end_id": 1,
+                "source_doc_count": 1,
+                "source_total_chars": 24,
+                "summary_intermediate": ["沈青在雨夜追查旧案。"],
+                "summary_md": "沈青在雨夜继续追查旧案，仍然需要援军接应。",
+                "summary_short": "沈青雨夜追查旧案，等待援军。",
+                "summary_status": "committed",
+                "summary_evidence_window": "10-10",
+                "summary_target_range": "10-10",
+                "importance_score": 80,
+                "importance_reason": "seed",
+                "related_chapters": [],
+                "mentioned_characters": ["沈青"],
+                "world_update": {},
+                "outline_update": {},
+                "outline_status": "committed",
+                "outline_evidence_window": "10-10",
+                "outline_target_range": "10-10",
+                "close_read_run_id": "seed",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        executor = RestrictedWriterExecutor(
+            repo_root=planner_orchestrator.repo_root,
+            run_writer=planner_orchestrator.run_writer,
+            model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+        )
+        result = executor.prepare_execution_input(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            chapter_id=chapter_id,
+        )
+
+    execution_input = result["chapter_execution_input"]
+    fact_inputs = execution_input["fact_inputs"]
+    prompt = executor.build_draft_prompt(execution_input)
+
+    assert fact_inputs["recent_story_synopses"][0]["summary_status"] == "committed"
+    assert "沈青雨夜追查旧案" in prompt["user_prompt"]
+    assert "continuity context only" in fact_inputs["memory_context_policy"]
 
 
 def test_revision_requested_updates_same_artifact_and_returns_same_review_gate(tmp_path: Path) -> None:

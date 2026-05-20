@@ -215,6 +215,7 @@ def build_writer_workflow(
     runs_dir: Path,
     dry_run: bool,
     api_key: str | None = None,
+    model_name: str | None = None,
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
     include_reasoning_content: bool = True,
@@ -232,7 +233,7 @@ def build_writer_workflow(
         model_client = JsonModelClient(
             ModelSettings(
                 model_type="OpenAIModel",
-                model_name=DEFAULT_WRITER_MODEL_NAME,
+                model_name=model_name or DEFAULT_WRITER_MODEL_NAME,
                 provider="openai_compatible",
                 base_url="https://api.deepseek.com",
                 api_key=api_key,
@@ -329,12 +330,16 @@ def run_writer_workflow_action(
             roster_hint_payloads=cast(list[Mapping[str, Any]], payload.get("roster_hint_payloads") or []),
         )
     if action == "prepare_batch_plan":
+        target_chapter_count = payload.get("target_chapter_count")
+        if target_chapter_count in (None, ""):
+            book_plan_payload = _load_run_data_if_exists(workflow, run_id, "book_continuation_plan.json")
+            target_chapter_count = book_plan_payload.get("target_chapter_count") or 3
         return workflow.prepare_batch_plan(
             conn,
             run_id=run_id,
             book_id=book_id,
             product_mode=product_mode,
-            target_chapter_count=int(cast(Any, payload.get("target_chapter_count") or 3)),
+            target_chapter_count=int(cast(Any, target_chapter_count)),
         )
     if action == "continue_after_batch_review":
         return workflow.continue_after_batch_review(
@@ -342,11 +347,19 @@ def run_writer_workflow_action(
             artifact_path=str(payload.get("artifact_path") or "") or None,
         )
     if action == "prepare_chapter_package":
+        chapter_count = payload.get("chapter_count")
+        if chapter_count in (None, ""):
+            batch_plan_payload = _load_run_data_if_exists(workflow, run_id, "batch_plan.json")
+            chapter_count = (
+                batch_plan_payload.get("target_chapter_count")
+                or len(batch_plan_payload.get("chapter_outline_slots") or [])
+                or 3
+            )
         return workflow.prepare_chapter_package(
             run_id=run_id,
             book_id=book_id,
             product_mode=product_mode,
-            chapter_count=int(cast(Any, payload.get("chapter_count") or 3)),
+            chapter_count=int(cast(Any, chapter_count)),
         )
     if action == "continue_after_chapter_review":
         return workflow.continue_after_chapter_review(

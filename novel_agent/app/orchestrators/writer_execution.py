@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from ...runs.writer import RunWriter
 from ...schemas.continuity import ContinuityIssue, ContinuityReport
+from ..utils.json_utils import extract_json_blob
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
@@ -786,6 +787,11 @@ class RestrictedWriterExecutor:
         )
         relation_gate = self._build_relation_state_gate(chapter_brief)
         title_index = self._resolve_document_title_index(conn, book_id=book_id, run_id=run_id, chapter_id=chapter_id)
+        recent_story_synopses = self._build_recent_story_synopses(
+            conn,
+            book_id=book_id,
+            before_document_title_index=title_index,
+        )
         user_supplement = self._load_optional_run_payload(run_id, "user_supplement.json")
         if not isinstance(user_supplement, Mapping):
             user_supplement = {}
@@ -807,6 +813,12 @@ class RestrictedWriterExecutor:
             "batch_plan": dict(batch_plan or {}),
             "chapter_package_id": str(chapter_package.get("package_id") or ""),
         }
+        if recent_story_synopses:
+            fact_inputs["recent_story_synopses"] = recent_story_synopses
+            fact_inputs["memory_context_policy"] = (
+                "recent_story_synopses are compressed Memory history before the current generated chapter. "
+                "They are continuity context only; do not replay them as current chapter prose."
+            )
         fact_inputs.update(character_fact_inputs)
         execution_input = FrozenChapterExecutionInput(
             run_id=run_id,
@@ -913,6 +925,40 @@ class RestrictedWriterExecutor:
         if story_lines:
             payload["story_outline_evidence"] = story_lines
         return payload
+
+    def _build_recent_story_synopses(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        before_document_title_index: int,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        rows: list[sqlite3.Row] = []
+        for row in self.chapters_repo.list_by_book(conn, book_id=book_id):
+            title_index = int(row["document_title_index"] or 0)
+            if title_index <= 0 or title_index >= before_document_title_index:
+                continue
+            summary_short = str(row["summary_short"] or "").strip()
+            summary_md = str(row["summary_md"] or "").strip()
+            if not summary_short and not summary_md:
+                continue
+            rows.append(row)
+        selected = rows[-max(1, int(limit)) :]
+        return [
+            {
+                "document_title_index": int(row["document_title_index"] or 0),
+                "chapter_title": str(row["chapter_title"] or ""),
+                "summary_short": _safe_excerpt(str(row["summary_short"] or ""), limit=240),
+                "summary_md": _safe_excerpt(str(row["summary_md"] or ""), limit=1200),
+                "summary_status": str(row["summary_status"] or ""),
+                "summary_evidence_window": str(row["summary_evidence_window"] or ""),
+                "summary_target_range": str(row["summary_target_range"] or ""),
+                "source_total_chars": int(row["source_total_chars"] or 0),
+                "scope": "past",
+            }
+            for row in selected
+        ]
 
     def _relevant_character_profiles_for_prompt(
         self,
@@ -1386,6 +1432,17 @@ class RestrictedWriterExecutor:
             "max_chars": int(length_budget.get("max_chars") or 0),
             "combined_synopsis": chapter_brief.get("combined_synopsis"),
             "coverage_plot_beats": coverage_plot_beats,
+            "continuity_coverage_anchors": _normalize_string_list(chapter_brief.get("must_include")),
+            "relationship_bridge_anchors": [
+                bridge
+                for item in (chapter_brief.get("relationship_targets") or [])
+                if isinstance(item, Mapping)
+                for bridge in _normalize_string_list(item.get("required_bridge"))
+            ],
+            "current_chapter_boundary": {
+                "ending_hook": chapter_brief.get("ending_hook"),
+                "rule": "正文必须停在本章 ending_hook 附近，不得继续写后续章节事件。",
+            },
             "reference_document_synopses": reference_document_synopses,
             "rule": (
                 "必须覆盖 combined_synopsis 与 coverage_plot_beats 的核心事件。"
@@ -1413,6 +1470,7 @@ class RestrictedWriterExecutor:
                 "历史上下文和上一章正文只用于承接，不得作为本章正文开头重写或复述。"
                 "长度预算是硬约束：不要超过 max_chars，不要为了凑字补写前情回放、原创支线、旅程过场或设定讲解。"
                 "chapter_brief.must_include 主要是连续性校验锚点，coverage_plot_beats 才是完整剧情覆盖目标。"
+                "如果输入包含 draft_feedback 或 draft_rewrite_requests，必须优先按反馈修订当前草稿。"
                 "只输出正文，不要解释。"
             ),
             "user_prompt": json.dumps(
@@ -1429,6 +1487,8 @@ class RestrictedWriterExecutor:
                     "user_supplements": execution_input.get("user_supplements"),
                     "forbidden_inputs": execution_input.get("forbidden_inputs"),
                     "writer_rules": execution_input.get("writer_rules"),
+                    "draft_feedback": execution_input.get("draft_feedback"),
+                    "draft_rewrite_requests": execution_input.get("draft_rewrite_requests"),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1481,8 +1541,17 @@ class RestrictedWriterExecutor:
         issues: list[ContinuityIssue] = []
         draft_text = str(draft_md or "")
         self._runtime_requirement_aliases = self._load_requirement_aliases(conn, book_id=book_id)
-        for term in _normalize_string_list(chapter_brief.get("must_include")):
-            if term and not self._requirement_covered(draft_text=draft_text, requirement=term):
+        missing_must_include = [
+            term
+            for term in _normalize_string_list(chapter_brief.get("must_include"))
+            if term and not self._requirement_covered(draft_text=draft_text, requirement=term)
+        ]
+        model_coverage = self._model_resolve_requirement_coverage(
+            draft_text=draft_text,
+            requirements=missing_must_include,
+        )
+        for term in missing_must_include:
+            if not model_coverage.get(term):
                 issues.append(
                     ContinuityIssue(
                         type="missing_must_include",
@@ -2013,7 +2082,16 @@ class RestrictedWriterExecutor:
             target_state = str(item.get("target_state") or "")
             required_bridge = _normalize_string_list(item.get("required_bridge"))
             if current_state != target_state and required_bridge:
-                if not any(self._requirement_covered(draft_text=draft_text, requirement=term) for term in required_bridge):
+                deterministic_covered = {
+                    term: self._requirement_covered(draft_text=draft_text, requirement=term)
+                    for term in required_bridge
+                }
+                missing_bridges = [term for term, covered in deterministic_covered.items() if not covered]
+                model_coverage = self._model_resolve_requirement_coverage(
+                    draft_text=draft_text,
+                    requirements=missing_bridges,
+                )
+                if not any(deterministic_covered.get(term) or model_coverage.get(term) for term in required_bridge):
                     blocked = True
                     issues.append(
                         ContinuityIssue(
@@ -2024,6 +2102,69 @@ class RestrictedWriterExecutor:
                         )
                     )
         return {"blocked": blocked, "issues": issues, "gate": relation_state_gate}
+
+    def _model_resolve_requirement_coverage(
+        self,
+        *,
+        draft_text: str,
+        requirements: list[str],
+    ) -> dict[str, bool]:
+        normalized_requirements = [item for item in dict.fromkeys(requirements) if item.strip()]
+        if not normalized_requirements or self.model_client is None:
+            return {}
+        system_prompt = (
+            "你是正文连续性覆盖判定器。你只判断草稿正文是否已经以具体动作、对白、事件或结果覆盖了给定要求。"
+            "可以接受同义表达和拆分表达；不要要求逐字相同。"
+            "不能因为计划里有要求就判定覆盖，必须在 draft_text 中找到证据。"
+            "只输出 JSON。"
+        )
+        user_prompt = json.dumps(
+            {
+                "requirements": normalized_requirements,
+                "draft_text": draft_text[:18000],
+                "output_schema": {
+                    "coverage": [
+                        {
+                            "requirement": "原始要求字符串",
+                            "covered": True,
+                            "evidence": "正文中的短证据；未覆盖则为空",
+                        }
+                    ]
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        try:
+            if hasattr(self.model_client, "generate_json"):
+                payload, _raw = self.model_client.generate_json(  # type: ignore[attr-defined]
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    fallback_factory=lambda: {
+                        "coverage": [
+                            {"requirement": item, "covered": False, "evidence": ""}
+                            for item in normalized_requirements
+                        ]
+                    },
+                )
+            else:
+                raw_text = self.model_client.generate_text(  # type: ignore[attr-defined]
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+                payload = extract_json_blob(raw_text)
+        except Exception:
+            return {}
+        if not isinstance(payload, Mapping):
+            return {}
+        result: dict[str, bool] = {}
+        for item in payload.get("coverage") or []:
+            if not isinstance(item, Mapping):
+                continue
+            requirement = str(item.get("requirement") or "").strip()
+            if requirement in normalized_requirements:
+                result[requirement] = bool(item.get("covered"))
+        return result
 
     def _evaluate_planned_character_gate(
         self,

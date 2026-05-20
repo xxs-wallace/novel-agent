@@ -1975,6 +1975,7 @@ class OutlineResearchLoopController:
     def _validated_decision(self, item: SufficiencyDecision | Mapping[str, Any]) -> SufficiencyDecision:
         if isinstance(item, SufficiencyDecision):
             return item
+        item = self._normalize_sufficiency_decision_status(item)
         try:
             return SufficiencyDecision.from_dict(item)
         except ValueError as exc:
@@ -1996,4 +1997,50 @@ class OutlineResearchLoopController:
                     }
                 ]
                 return SufficiencyDecision.from_dict(data)
-            raise exc
+            raise ValueError(
+                "status must be enough, needs_user_input, proceed_with_assumptions, or blocked; "
+                f"got {data.get('status')!r}"
+            ) from exc
+
+    def _normalize_sufficiency_decision_status(self, item: Mapping[str, Any]) -> Mapping[str, Any]:
+        raw_status = str(item.get("status") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if not raw_status:
+            data = dict(item)
+            if data.get("user_questions") or data.get("blocking_gaps") or data.get("required_actions"):
+                data["status"] = "needs_user_input"
+                return data
+            if data.get("assumptions"):
+                data["status"] = "proceed_with_assumptions"
+                return data
+            data["status"] = "needs_user_input"
+            data.setdefault("user_questions", ["请补充确认：缺少大纲规划所需的授权边界"])
+            return data
+        status_aliases = {
+            "sufficient": "enough",
+            "ready": "enough",
+            "complete": "enough",
+            "completed": "enough",
+            "ok": "enough",
+            "proceed": "proceed_with_assumptions",
+            "proceed_with_assumption": "proceed_with_assumptions",
+            "needs_input": "needs_user_input",
+            "need_user_input": "needs_user_input",
+            "requires_user_input": "needs_user_input",
+            "require_user_input": "needs_user_input",
+            "need_more_info": "needs_user_input",
+            "needs_more_info": "needs_user_input",
+            "need_more_information": "needs_user_input",
+            "needs_more_information": "needs_user_input",
+            "insufficient": "needs_user_input",
+            "insufficient_information": "needs_user_input",
+            "not_enough": "needs_user_input",
+            "incomplete": "needs_user_input",
+            "questions": "needs_user_input",
+            "blocked_by_gap": "blocked",
+        }
+        normalized_status = status_aliases.get(raw_status)
+        if not normalized_status:
+            return item
+        data = dict(item)
+        data["status"] = normalized_status
+        return data

@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from ...schemas import RunConfig
-from ..orchestrators.writer_execution import build_authorized_synopsis_execution_input
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.creative_kb_storage import init_creative_kb_schema
@@ -1277,36 +1276,42 @@ class AgenticSmokeBenchmarkService:
 
         expansion_dir = run_dir / "expansion"
         expansion_dir.mkdir(parents=True, exist_ok=True)
-        expansion_execution_input = self._build_reference_synopsis_execution_input(
-            base_execution_data=execution_data,
-            reference_synopsis=reference_synopsis,
-            story_outline=story_outline,
-            story_context=story_context,
-            target_chars=len(reference_truth.strip()),
-        )
-        expansion_execution_input_path = expansion_dir / "writer_execution_input.json"
-        expansion_execution_input_path.write_text(
-            json.dumps(expansion_execution_input, ensure_ascii=False, indent=2),
+        standard_execution_input_path = expansion_dir / "chapter_execution_input.json"
+        standard_execution_input_path.write_text(
+            json.dumps(execution_data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        draft_prompt = workflow.executor.build_draft_prompt(expansion_execution_input)
-        generated_text = workflow.executor.generate_draft_from_execution_input(expansion_execution_input).strip()
+        draft_prompt = workflow.executor.build_draft_prompt(execution_data)
+        with db.connect() as conn:
+            db.init_schema(conn)
+            init_creative_kb_schema(conn)
+            execution_result = workflow.execute_current_chapter(
+                conn,
+                run_id=run_id,
+                book_id=book_id,
+                product_mode="auto_novel",
+            )
+            conn.commit()
+        draft_path = writer_run_dir / "draft.md"
+        generated_text = draft_path.read_text(encoding="utf-8", errors="replace").strip()
         draft_path = expansion_dir / "draft.md"
         draft_path.write_text(generated_text + "\n", encoding="utf-8")
         expansion_prompt = {
-            "source": "writer_execution_interface",
+            "source": "standard_writer_execute_current_chapter",
             "note": (
-                "No standalone benchmark expansion prompt was used. "
-                "The benchmark builds a Writer execution input from close-read reference_story_synopsis "
-                "and calls RestrictedWriterExecutor.generate_draft_from_execution_input."
+                "No standalone benchmark expansion prompt or execution input was used. "
+                "The draft was generated from Writer's standard chapter_execution_input.json "
+                "through workflow.execute_current_chapter."
             ),
             "planning_writer_run_dir": str(writer_run_dir),
             "planning_writer_execution_input_path": str(execution_input_path),
-            "writer_execution_input_path": str(expansion_execution_input_path),
+            "standard_chapter_execution_input_path": str(standard_execution_input_path),
             "reference_story_synopsis_path": str(reference_synopsis_path),
+            "reference_story_synopsis_usage": "reviewer_only",
             "benchmark_draft_path": str(draft_path),
-            "length_budget": dict(expansion_execution_input.get("length_budget") or {}),
+            "length_budget": dict(execution_data.get("length_budget") or {}),
             "generation_prompt": draft_prompt,
+            "execution_result": run_interactive.redact_writer_result_for_terminal(execution_result),
         }
         expansion_prompt_path = expansion_dir / "prompt.json"
         expansion_prompt_path.write_text(json.dumps(expansion_prompt, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2300,33 +2305,14 @@ class AgenticSmokeBenchmarkService:
                 )
                 synopsis_reports.append(synopsis_report)
 
-                expansion_execution_input = self._build_reference_synopsis_execution_input(
-                    base_execution_data=execution_data,
-                    reference_synopsis=step_reference_synopsis,
-                    story_outline=step_story_outline,
-                    story_context=step_story_context,
-                    target_chars=step_source_chars,
-                )
                 expansion_dir = step_dir / "expansion"
                 expansion_dir.mkdir(parents=True, exist_ok=True)
-                expansion_execution_input_path = expansion_dir / "writer_execution_input.json"
-                expansion_execution_input_path.write_text(
-                    json.dumps(expansion_execution_input, ensure_ascii=False, indent=2),
+                standard_execution_input_path = expansion_dir / "chapter_execution_input.json"
+                standard_execution_input_path.write_text(
+                    json.dumps(execution_data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                draft_prompt = workflow.executor.build_draft_prompt(expansion_execution_input)
-                workflow.run_writer.write_json(step_run_id, "chapter_execution_input.json", expansion_execution_input)
-                workflow.run_writer.write_json(
-                    step_run_id,
-                    "chapter_brief.json",
-                    dict(expansion_execution_input.get("chapter_brief") or {}),
-                )
-                workflow.run_writer.write_json(
-                    step_run_id,
-                    "chapter_length_budget.json",
-                    dict(expansion_execution_input.get("length_budget") or {}),
-                )
-                workflow.executor.confirm_freeze_d(run_id=step_run_id)
+                draft_prompt = workflow.executor.build_draft_prompt(execution_data)
                 execution_result = workflow.execute_current_chapter(
                     conn,
                     run_id=step_run_id,
@@ -2337,14 +2323,15 @@ class AgenticSmokeBenchmarkService:
                 generated_text = draft_path.read_text(encoding="utf-8", errors="replace").strip()
                 (expansion_dir / "draft.md").write_text(generated_text + "\n", encoding="utf-8")
                 expansion_prompt = {
-                    "source": "writer_execution_freeze_d",
+                    "source": "standard_writer_execute_current_chapter",
                     "note": (
-                        "The benchmark wraps close-read reference_story_synopsis into a Writer execution input, "
-                        "overrides Freeze D, and executes Writer's official execute_current_chapter path."
+                        "The benchmark uses Writer's standard chapter_execution_input.json and executes "
+                        "workflow.execute_current_chapter without replacing Freeze D."
                     ),
                     "writer_run_dir": str(step_writer_run_dir),
-                    "writer_execution_input_path": str(expansion_execution_input_path),
+                    "standard_chapter_execution_input_path": str(standard_execution_input_path),
                     "reference_story_synopsis_path": str(step_reference_synopsis_path),
+                    "reference_story_synopsis_usage": "reviewer_only",
                     "benchmark_draft_path": str(expansion_dir / "draft.md"),
                     "generation_prompt": draft_prompt,
                     "execution_result": run_interactive.redact_writer_result_for_terminal(execution_result),
@@ -3223,24 +3210,6 @@ class AgenticSmokeBenchmarkService:
                 "Reviewer reports",
             ],
         }
-
-    def _build_reference_synopsis_execution_input(
-        self,
-        *,
-        base_execution_data: dict[str, object],
-        reference_synopsis: dict[str, object],
-        story_outline: dict[str, object],
-        story_context: dict[str, object],
-        target_chars: int,
-    ) -> dict[str, object]:
-        return build_authorized_synopsis_execution_input(
-            base_execution_data=base_execution_data,
-            authorized_synopsis=reference_synopsis,
-            story_outline=story_outline,
-            story_context=story_context,
-            target_chars=target_chars,
-            synopsis_source="close_read_reference_story_synopsis",
-        )
 
     def _plot_beats_from_chapter_summaries(self, summaries: list[dict[str, object]]) -> list[str]:
         beats: list[str] = []

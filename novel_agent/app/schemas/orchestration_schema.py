@@ -1436,6 +1436,10 @@ class BatchPlan:
     must_not_consume: list[str] = field(default_factory=list)
     planned_character_beats: list[str] = field(default_factory=list)
     exit_hook: str = ""
+    target_chapter_count: int = 0
+    target_total_chars: int = 0
+    default_chapter_target_chars: int = 0
+    chapter_outline_slots: list[dict[str, Any]] = field(default_factory=list)
     evidence: list[EvidenceItem] = field(default_factory=list)
     sources: list[TraceableSource] = field(default_factory=list)
 
@@ -1451,6 +1455,10 @@ class BatchPlan:
         self.must_not_consume = _normalize_string_list(self.must_not_consume)
         self.planned_character_beats = _normalize_string_list(self.planned_character_beats)
         self.exit_hook = _normalize_text(self.exit_hook)
+        self.target_chapter_count = max(0, int(self.target_chapter_count or 0))
+        self.target_total_chars = max(0, int(self.target_total_chars or 0))
+        self.default_chapter_target_chars = max(0, int(self.default_chapter_target_chars or 0))
+        self.chapter_outline_slots = [dict(item) for item in self.chapter_outline_slots if isinstance(item, dict)]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1465,6 +1473,10 @@ class BatchPlan:
             "must_not_consume": list(self.must_not_consume),
             "planned_character_beats": list(self.planned_character_beats),
             "exit_hook": self.exit_hook,
+            "target_chapter_count": self.target_chapter_count,
+            "target_total_chars": self.target_total_chars,
+            "default_chapter_target_chars": self.default_chapter_target_chars,
+            "chapter_outline_slots": [dict(item) for item in self.chapter_outline_slots],
             "evidence": [item.to_dict() for item in self.evidence],
             "sources": [item.to_dict() for item in self.sources],
         }

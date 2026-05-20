@@ -79,6 +79,29 @@ class ModelScopedArtifactRevisionAdapter:
         )
         if not isinstance(payload, Mapping):
             raise RevisionResultError("revision adapter must return a JSON object")
+        required = {
+            "revision_id",
+            "request_id",
+            "status",
+            "target_artifact_type",
+            "target_artifact_path",
+            "change_summary",
+            "validation",
+            "created_at",
+        }
+        if not required.issubset(payload):
+            revised = payload.get("revised_artifact") if isinstance(payload.get("revised_artifact"), Mapping) else payload
+            return {
+                "revision_id": f"revision-{llm_input.request['request_id']}",
+                "request_id": llm_input.request["request_id"],
+                "status": "candidate",
+                "target_artifact_type": llm_input.request["target_artifact_type"],
+                "target_artifact_path": llm_input.request["target_artifact_path"],
+                "change_summary": "model returned a bare revised artifact; adapter wrapped it in ScopedArtifactRevisionResult",
+                "validation": {"adapter": "wrapped_bare_artifact"},
+                "created_at": _utc_now(),
+                "revised_artifact": dict(revised),
+            }
         return payload
 
 
@@ -261,6 +284,10 @@ REVISION_STAGE_POLICIES: dict[str, RevisionStagePolicy] = {
                 "must_not_consume",
                 "planned_character_beats",
                 "exit_hook",
+                "target_chapter_count",
+                "target_total_chars",
+                "default_chapter_target_chars",
+                "chapter_outline_slots",
                 "evidence",
                 "sources",
             )

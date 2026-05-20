@@ -1415,6 +1415,14 @@ class WriterLayeredGenerationOrchestrator:
             )
         payload.setdefault("batch_id", "batch-01")
         payload.setdefault("book_id", book_id)
+        effective_count = max(1, int(target_chapter_count or book_plan.target_chapter_count or 1))
+        payload.setdefault("target_chapter_count", effective_count)
+        payload.setdefault("target_total_chars", int(book_plan.target_total_chars or 0))
+        payload.setdefault("default_chapter_target_chars", int(book_plan.default_chapter_target_chars or 0))
+        if not isinstance(payload.get("chapter_outline_slots"), list) or not payload.get("chapter_outline_slots"):
+            payload["chapter_outline_slots"] = [
+                dict(item) for item in book_plan.chapter_outline_slots[:effective_count] if isinstance(item, Mapping)
+            ]
         return self._batch_plan_from_dict(payload)
 
     def plan_chapter_package(
@@ -1450,6 +1458,16 @@ class WriterLayeredGenerationOrchestrator:
                 character_introduction_plan=character_introduction_plan,
                 chapter_count=chapter_count,
             )
+        if not isinstance(payload.get("chapters"), list) or len(payload.get("chapters") or []) < max(1, int(chapter_count or 1)):
+            fallback_payload = self._fallback_chapter_package(
+                batch_plan=batch_plan,
+                character_introduction_plan=character_introduction_plan,
+                chapter_count=chapter_count,
+            )
+            fallback_chapters = [dict(item) for item in fallback_payload.get("chapters", []) if isinstance(item, Mapping)]
+            chapters = [dict(item) for item in (payload.get("chapters") or []) if isinstance(item, Mapping)]
+            chapters.extend(fallback_chapters[len(chapters) : max(1, int(chapter_count or 1))])
+            payload["chapters"] = chapters
         payload.setdefault("package_id", f"{batch_plan.batch_id}-package")
         payload.setdefault("batch_id", batch_plan.batch_id)
         payload = self._constrain_chapter_package_to_batch_boundaries(
@@ -1474,8 +1492,12 @@ class WriterLayeredGenerationOrchestrator:
         must_resolve = list(batch_plan.must_resolve) or ([batch_plan.batch_goal] if batch_plan.batch_goal else [])
         forbidden_consumption = list(batch_plan.must_not_consume)
         count = max(1, int(chapter_count or len(chapters) or 1))
+        chapters = chapters[:count]
+        slot_targets = self._chapter_package_target_word_counts(batch_plan=batch_plan, chapter_count=count)
         for index, chapter in enumerate(chapters):
             assigned_goal = must_resolve[min(index, len(must_resolve) - 1)] if must_resolve else ""
+            if slot_targets:
+                chapter["target_word_count"] = slot_targets[min(index, len(slot_targets) - 1)]
             if assigned_goal:
                 goal = _normalize_text(chapter.get("goal"))
                 if assigned_goal not in goal:
@@ -1508,6 +1530,26 @@ class WriterLayeredGenerationOrchestrator:
         _append_unique(review_notes, "ChapterBrief 已按 BatchPlan.must_resolve/must_not_consume 收紧剧情边界。")
         constrained["review_notes"] = review_notes
         return constrained
+
+    def _chapter_package_target_word_counts(self, *, batch_plan: BatchPlan, chapter_count: int) -> list[int]:
+        default_chars = int(batch_plan.default_chapter_target_chars or 0)
+        slots = [dict(item) for item in batch_plan.chapter_outline_slots if isinstance(item, Mapping)]
+        targets: list[int] = []
+        for index in range(max(1, int(chapter_count or 1))):
+            slot = slots[index] if index < len(slots) else {}
+            raw_chars = int(
+                slot.get("target_chars")
+                or slot.get("estimated_chars")
+                or slot.get("target_word_count")
+                or default_chars
+                or 0
+            )
+            if raw_chars <= 0 and batch_plan.target_total_chars and chapter_count:
+                raw_chars = max(1, int(batch_plan.target_total_chars) // max(1, int(chapter_count)))
+            if raw_chars <= 0:
+                raw_chars = 4000
+            targets.append(self._chars_to_words(raw_chars))
+        return targets
 
     def _generate_json_payload(
         self,
@@ -1762,6 +1804,12 @@ class WriterLayeredGenerationOrchestrator:
             "must_not_consume": book_plan.must_preserve[:1] + ["终局真相", "关系终局状态"],
             "planned_character_beats": planned_beats,
             "exit_hook": book_plan.open_questions[0] if book_plan.open_questions else "批次结尾引出新的未决问题。",
+            "target_chapter_count": max(1, int(target_chapter_count or book_plan.target_chapter_count or 1)),
+            "target_total_chars": int(book_plan.target_total_chars or 0),
+            "default_chapter_target_chars": int(book_plan.default_chapter_target_chars or 0),
+            "chapter_outline_slots": [
+                dict(item) for item in book_plan.chapter_outline_slots[: max(1, int(target_chapter_count or 1))]
+            ],
             "evidence": [
                 {
                     "claim": "当前批次承接 Freeze A 冻结方向。",
@@ -1840,6 +1888,9 @@ class WriterLayeredGenerationOrchestrator:
 
     def _words_to_chars(self, word_count: int) -> int:
         return max(1, int(word_count or 1200) * 2)
+
+    def _chars_to_words(self, char_count: int) -> int:
+        return max(1, int(round(max(1, int(char_count or 1)) / 2)))
 
     def _length_bounds(self, target_chars: int) -> tuple[int, int]:
         target = max(1, int(target_chars))
@@ -2086,6 +2137,12 @@ class WriterLayeredGenerationOrchestrator:
             must_not_consume=[str(item) for item in (data.get("must_not_consume") or [])],
             planned_character_beats=[str(item) for item in (data.get("planned_character_beats") or [])],
             exit_hook=str(data.get("exit_hook") or ""),
+            target_chapter_count=int(data.get("target_chapter_count") or 0),
+            target_total_chars=int(data.get("target_total_chars") or 0),
+            default_chapter_target_chars=int(data.get("default_chapter_target_chars") or 0),
+            chapter_outline_slots=[
+                dict(item) for item in (data.get("chapter_outline_slots") or []) if isinstance(item, Mapping)
+            ],
             evidence=[
                 self._evidence_item_from_dict(item) for item in (data.get("evidence") or []) if isinstance(item, Mapping)
             ],

@@ -431,6 +431,11 @@ class WebSessionService:
                     "payload": {
                         "requested_from": "writer_completion",
                         "previous_run_id": run_id,
+                        "continuation_goal": (
+                            "继续最新已写回章节之后的剧情；必须以 Writer Memory 中 "
+                            "document_title_index 最大的已写回章节作为 continuation anchor，"
+                            "不得重写已写回章节或回退到更早剧情。"
+                        ),
                         "target_chapter_count": 1,
                         "chapter_count": 1,
                     },

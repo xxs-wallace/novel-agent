@@ -1050,6 +1050,7 @@ def test_web_session_offers_next_writer_round_after_writeback_completion(tmp_pat
     assert card.actions[0]["action"] == "start_writer"
     assert card.actions[0]["label"] == "继续下一章"
     assert card.actions[0]["payload"]["previous_run_id"] == "run-1"
+    assert "最新已写回章节" in card.actions[0]["payload"]["continuation_goal"]
 
     assert session.messages("book-one") == messages
 

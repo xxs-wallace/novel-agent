@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -22,6 +23,14 @@ from ..runner.creative_kb_benchmark_runner import (
     CreativeKBBenchmarkSummaryPresenter,
 )
 from .events import RunEventStream
+
+
+def _env_optional_text(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +396,13 @@ class WorkflowFacade:
             runs_dir=self.repo_root / "runs" / "writer",
             dry_run=dry_run,
             api_key=api_key,
+            model_name=_env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME"),
+            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING"),
+            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT"),
+            include_reasoning_content=bool(
+                _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
+                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
+            ),
         )
         self.event_stream.emit("系统", "开始 Writer 分层生成", payload={"run_id": run_id})
         with db.connect() as conn:
@@ -433,6 +449,13 @@ class WorkflowFacade:
             runs_dir=self.repo_root / "runs" / "writer",
             dry_run=dry_run,
             api_key=api_key,
+            model_name=_env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME"),
+            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING"),
+            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT"),
+            include_reasoning_content=bool(
+                _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
+                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
+            ),
         )
         with db.connect() as conn:
             db.init_schema(conn)

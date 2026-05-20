@@ -566,6 +566,12 @@ class WriterInteractiveWorkflow:
             auto_confirm=mode == AUTO_NOVEL_MODE,
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
+        previous_chapter_id = str(state.get("current_chapter_id") or "").strip()
+        if previous_chapter_id and previous_chapter_id != chapter_id:
+            self._remove_run_artifact(run_id=run_id, name="generation_review_decision.json")
+            self._remove_run_artifact(run_id=run_id, name="draft_rewrite_request.json")
+            state["current_draft_id"] = ""
+            state["current_decision_id"] = ""
         state["current_chapter_id"] = chapter_id
         state["pending_checkpoint"] = None
         self.executor.confirm_freeze_d(run_id=run_id)
