@@ -108,7 +108,7 @@
   - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md)
   - [x] 当系统等待用户确认时，底部输入区切换为结构化决策面板
   - [x] 每个选项显示后续状态，例如接受本章进入“请确认写回”
-  - [x] 支持章节验收：接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定
+  - [x] 支持章节草稿决策：接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定
   - [x] 支持规划审阅：保存、确认、返回上一层、稍后继续
   - [x] 决策写入对应 artifact 或调用对应 workflow action
 
@@ -332,7 +332,7 @@
   - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md)
   - [x] 系统等待用户确认时，底部输入区替换为 `DecisionPanelWidget`
   - [x] 规划审阅支持保存、确认、返回上一层、稍后继续
-  - [x] 章节验收支持接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定
+  - [x] 章节草稿决策支持接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定
   - [x] 每个选项显示后续状态和将调用的 workflow action
   - [x] 支持数字键、上下键、Enter 选择
   - [x] 决策写入对应 artifact 或调用对应 workflow action
@@ -355,7 +355,7 @@
   - [x] 覆盖 slash command autocomplete
   - [x] 覆盖 CommandPalette 上下文过滤
   - [x] 覆盖 ArtifactEditor 保存成功与校验失败
-  - [x] 覆盖 DecisionPanelWidget 章节验收选项
+  - [x] 覆盖 DecisionPanelWidget 章节草稿决策选项
   - [x] 覆盖后台 RunEvent 不覆盖输入区
 
 - [x] Task 34: Textual 端到端验收与 run_interactive 对比退场（待新增）
@@ -626,8 +626,8 @@
   - [ ] 保存时由 ViewModel 回写原 JSON，并复用 schema / scope 校验
   - [ ] 高级 JSON 编辑仍保留，但不得作为唯一可行动路径
 
-- [ ] Task 45: 实现章节验收决策表单到 review contract 的映射
-  - `来源`: [`design.md`](design.md) 的 `章节验收到 Contract JSON 的映射`
+- [ ] Task 45: 实现章节草稿决策表单到 review contract 的映射
+  - `来源`: [`design.md`](design.md) 的 `章节草稿决策到 Contract JSON 的映射`
   - `建议只读`: [`design.md`](design.md), [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/decisions.py`, `novel_agent/app/cli/textual_widgets.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/cli/facade.py`, `novel_agent/tests/test_cli_textual_components.py`
   - [ ] 接受本章时由 TUI 收集可选备注，workflow 补齐 `GenerationReviewDecision`

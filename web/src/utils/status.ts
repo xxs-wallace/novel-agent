@@ -6,7 +6,7 @@ const INTERNAL_STAGE_LABELS: Record<string, string> = {
   freeze_c_review: "等待你审阅章节安排",
   freeze_d_review: "等待你审阅正文草稿",
   wait_length_review: "等待你确认章节长度",
-  wait_chapter_acceptance: "等待你验收本章",
+  wait_chapter_acceptance: "等待你决定本章草稿",
   wait_chapter_review: "等待你审阅章节",
   writeback_review: "等待你确认写回记忆",
   batch_review: "等待你审阅本批剧情"

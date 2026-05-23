@@ -64,7 +64,7 @@
   - [x] 将 held-out reference close-read summaries 按顺序切分为多个章节目标。
   - [x] 每章重新运行 Writer planning，generated synopsis 仅用于 Reviewer。
   - [x] 每章 expansion 使用 close-read reference synopsis 覆盖 Freeze D。
-  - [x] 每章正文走 Writer `execute_current_chapter`，通过后执行 acceptance/writeback。
+  - [x] 每章正文走 Writer `execute_current_chapter`，由 benchmark 脚本显式接受并执行 writeback。
   - [x] 下一章从写回后的 writer DB 重新读取最近上下文。
 
 - [x] 更新文档

@@ -142,7 +142,7 @@ class WriterIntentTextArea(TextArea):
 
 
 class ChapterAcceptanceTextArea(TextArea):
-    """TextArea variant for chapter acceptance forms."""
+    """TextArea variant for chapter draft decision forms."""
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key in {"ctrl+enter", "ctrl+j"}:
@@ -497,8 +497,8 @@ class ChapterAcceptanceFormWidget(Vertical, can_focus=True):
         self.form = form
 
     def compose(self) -> ComposeResult:
-        yield Static("章节验收", id="chapter-acceptance-title")
-        yield Static("这些字段会生成 GenerationReviewDecision 及必要的返工 contract。", id="chapter-acceptance-help")
+        yield Static("章节草稿决策", id="chapter-acceptance-title")
+        yield Static("这些字段会生成用户草稿决策及必要的返工 contract。", id="chapter-acceptance-help")
         yield ChapterAcceptanceTextArea(
             self.form.render_template(),
             language="markdown",

@@ -62,8 +62,8 @@ class StatusPresenter:
         "agent_running": ("Writer 分层生成", "Writer 正在推进", "等待下一次可审阅产物或正文草稿"),
         "reviewing_artifact": ("Writer 分层生成", "请审阅当前产物", "通过时可补充要求，不通过时请给出调整反馈"),
         "needs_user_input": ("Writer 分层生成", "需要你补充几个关键问题", "回答后继续大纲研究"),
-        "generating_draft": ("Writer 分层生成", "正在生成正文草稿", "完成后请验收当前章节"),
-        "reviewing_draft": ("Writer 分层生成", "请验收当前章节", "接受后进入写回确认"),
+        "generating_draft": ("Writer 分层生成", "正在生成正文草稿", "完成后请决定当前章节草稿"),
+        "reviewing_draft": ("Writer 分层生成", "请决定当前章节草稿", "接受后进入写回确认"),
         "outline_research_user_input": ("Writer 分层生成", "需要你补充几个关键问题", "回答后继续大纲研究"),
         "outline_research_blocked": ("Writer 分层生成", "前置建模不足", "先补齐建模材料再继续"),
         "freeze_a_review": ("Writer 分层生成", "请审阅全书续写规划", "确认后生成本批剧情大纲"),
@@ -78,8 +78,8 @@ class StatusPresenter:
         "freeze_d_review": ("Writer 分层生成", "旧写作材料确认待迁移", "直接进入正文生成准备"),
         "ready_for_freeze_d": ("Writer 分层生成", "写作输入已准备好", "下一步生成正文草稿"),
         "freeze_d": ("Writer 分层生成", "本章写作输入已准备好", "下一步生成正文草稿"),
-        "canon_ready": ("Writer 分层生成", "连续性检查通过", "请验收当前章节"),
-        "wait_chapter_acceptance": ("Writer 分层生成", "请验收当前章节", "接受后进入写回确认"),
+        "canon_ready": ("Writer 分层生成", "连续性检查已生成", "请决定当前章节草稿"),
+        "wait_chapter_acceptance": ("Writer 分层生成", "请决定当前章节草稿", "接受后进入写回确认"),
         "wait_chapter_review": ("Writer 分层生成", "请调整章节规划后重写", "通过后直接重新生成正文草稿"),
         "accepted": ("Writer 分层生成", "已接受本章", "下一步确认写回续写记忆"),
         "rewrite_requested": ("Writer 分层生成", "按反馈重写正文", "基于当前章节梗概重新生成正文"),
@@ -87,11 +87,11 @@ class StatusPresenter:
         "discarded": ("Writer 分层生成", "已作废当前草稿", "流程暂停，稍后可选择恢复点"),
         "writeback_review": ("Writer 分层生成", "请确认写回续写记忆", "确认后更新续写记忆"),
         "writeback_committed": ("Writer 分层生成", "已更新续写记忆", "进入完成状态"),
-        "freeze_e": ("Writer 分层生成", "本章已验收", "可以进入下一章或下一批"),
+        "freeze_e": ("Writer 分层生成", "本章已写回", "可以进入下一章或下一批"),
         "completed": ("Writer 分层生成", "本章已完成", "可以进入下一章或下一批"),
         "halted": ("Writer 分层生成", "流程已暂停", "选择恢复点后继续"),
         "ready_for_execution": ("Writer 分层生成", "写作材料已准备好", "可以生成正文草稿"),
-        "chapter_executed": ("Writer 分层生成", "正文草稿已生成", "请验收当前章节"),
+        "chapter_executed": ("Writer 分层生成", "正文草稿已生成", "请决定当前章节草稿"),
         "waiting_for_review": ("Writer 分层生成", "需要你审阅后继续", "保存不等于确认，请选择确认动作"),
     }
 
@@ -145,7 +145,7 @@ class StatusPresenter:
         ),
         "freeze_d": (WriterStageAction("生成当前章草稿", "execute_current_chapter"),),
         "wait_chapter_acceptance": (
-            WriterStageAction("接受本章", "accept_chapter", "后续进入写回确认或完成路径。"),
+            WriterStageAction("接受本章", "accept_chapter", "后续进入写回确认。"),
             WriterStageAction("基于反馈重写本章", "rewrite_chapter", "后续基于当前章节梗概重写。"),
             WriterStageAction("修改章节梗概后重写", "replan_chapter", "后续回到章节梗概调整。"),
             WriterStageAction("作废本次草稿", "discard_chapter", "后续暂停流程。"),
@@ -282,7 +282,7 @@ class StatusPresenter:
             "artifact saved": "已保存你的修改",
             "Freeze B pending": "请审阅本批剧情大纲",
             "freeze_d_review": "旧写作材料确认待迁移",
-            "wait_chapter_acceptance": "请验收当前章节",
+            "wait_chapter_acceptance": "请决定当前章节草稿",
             "checkpoint confirmed": "已确认，继续下一步",
         }
         sanitized = text

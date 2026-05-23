@@ -296,6 +296,24 @@ describe("Novel Agent Web workspace", () => {
     );
   });
 
+  it("runs the single allowed Reviewer from an outline artifact review entry", async () => {
+    const user = userEvent.setup();
+    setWriterArtifactReviewMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "Reviewer：大纲合理性" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "run_reviewer")).toBe(true));
+    const reviewerCall = calls.actions.find((call) => call.body.action === "run_reviewer");
+    expect(reviewerCall?.body.payload).toMatchObject({
+      reviewer_id: "outline_plot_development",
+      reviewer_ids: ["outline_plot_development"],
+      target_type: "outline",
+      artifact_kind: "batch_plan"
+    });
+  });
+
   it("uses the shared chat input for Writer artifact revision feedback", async () => {
     const user = userEvent.setup();
     setWriterArtifactReviewMessage("task-alpha");
@@ -342,6 +360,27 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() =>
       expect(within(document.querySelector("form.composer") as HTMLElement).queryByRole("button", { name: "基于反馈重写" })).not.toBeInTheDocument()
     );
+  });
+
+  it("shows three draft Reviewers and runs the selected one", async () => {
+    const user = userEvent.setup();
+    setWriterDraftReviewMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(await screen.findByRole("button", { name: "Reviewer：局部连续性" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reviewer：历史一致性" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reviewer：文风氛围" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Reviewer：历史一致性" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "run_reviewer")).toBe(true));
+    const reviewerCall = calls.actions.find((call) => call.body.action === "run_reviewer");
+    expect(reviewerCall?.body.payload).toMatchObject({
+      reviewer_id: "memory_draft_consistency",
+      reviewer_ids: ["memory_draft_consistency"],
+      target_type: "draft",
+      draft_id: "draft-1"
+    });
   });
 
   it("opens Writer wizard from the button and submits start_writer action", async () => {
@@ -406,8 +445,26 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.getByRole("button", { name: "大纲研究笔记" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检索轨迹" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "章节写作指导" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "验收决策" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "草稿决策" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "章节长度计划" })).not.toBeInTheDocument();
+  });
+
+  it("runs Reviewer from the right Artifact detail toolbar", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(screen.getByRole("tab", { name: /Writer/ }));
+    const draftButtons = await screen.findAllByRole("button", { name: "正文草稿" });
+    await user.click(draftButtons[0]);
+    const detailShell = document.querySelector(".detail-shell") as HTMLElement;
+    await user.click(await within(detailShell).findByRole("button", { name: "Reviewer：局部连续性" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "run_reviewer")).toBe(true));
+    expect(calls.actions.find((call) => call.body.action === "run_reviewer")?.body.payload).toMatchObject({
+      reviewer_id: "local_draft_continuity",
+      target_type: "draft"
+    });
   });
 
   it("keeps raw JSON hidden until the technical details drawer is opened", async () => {

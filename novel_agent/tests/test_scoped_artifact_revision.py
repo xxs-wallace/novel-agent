@@ -53,8 +53,7 @@ def _valid_batch_plan() -> dict[str, object]:
     return {
         "batch_id": "batch-1",
         "book_id": "book-1",
-        "scope_start": "ch-1",
-        "scope_end": "ch-3",
+        "chapters": ["chapter-1", "chapter-2", "chapter-3"],
         "batch_goal": "提前反派登场并维持主线。",
         "emotional_arc": "紧张度上升",
         "conflict_arc": "暗线转明",
@@ -222,8 +221,7 @@ def test_scoped_revision_result_requires_schema_fields(tmp_path: Path) -> None:
         revised_artifact={
             "batch_id": "batch-1",
             "book_id": "book-1",
-            "scope_start": "ch-1",
-            "scope_end": "ch-3",
+            "chapters": ["chapter-1", "chapter-2", "chapter-3"],
         },
         validation={"schema_valid": False},
         created_at="2026-05-10T00:01:00+00:00",

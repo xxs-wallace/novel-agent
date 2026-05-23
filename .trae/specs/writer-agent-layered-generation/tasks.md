@@ -3,11 +3,11 @@
 ## Reading Rules
 
 - `spec.md` 与 `design.md` 现在主要作为总览和索引页使用；做具体任务时，优先只读任务下方标注的文档。
-- 只有涉及章节验收对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
+- 只有涉及用户草稿决策对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
 - 只有涉及跨层输入对象时才读 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)。
 - 当前尚未拆出的规划域与人物补充域，暂时继续以 [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 和 [design.md](.trae/specs/writer-agent-layered-generation/design.md) 为主。
-- 涉及 terminal 展示、artifact review gate、章节验收与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
-- 涉及正文草稿审阅、`draft.md` 预览和验收分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及 terminal 展示、artifact review gate、用户草稿决策与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及正文草稿审阅、`draft.md` 预览和草稿决策分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
 - 涉及 `NarrativeStructurePattern` / `ArcPatternCard` 如何进入 Writer 输入，或 `SourceArcMap` 如何作为源作品定位事实可选进入上下文时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 与 [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)。
 - 本文件中部分已完成历史任务仍记录旧流程实现状态；新增实现必须以当前 `spec.md` / `design.md` / `contracts.md` 的 Agent Loop 与 artifact review gate 语义为准，旧式独立长度确认和写作材料确认由 Group L 负责迁移移除。
 
@@ -165,22 +165,22 @@
   - [x] 标记本章是否成为可继续消费的 canon
   - [x] 当计划角色首次正式登场并通过校验后，将其转写为正式 Character Memory
 
-- [ ] Task 10A: 优化章节验收界面的 draft 展示策略
+- [ ] Task 10A: 优化章节草稿决策界面的 draft 展示策略
   - `来源`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 的 `User Review Display`
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
-  - [ ] 在章节验收节点展示 `draft.md` 路径、当前字数、目标字数、连续性状态与开头短预览
+  - [ ] 在章节草稿决策节点展示 `draft.md` 路径、当前字数、目标字数、连续性风险提示与开头短预览
   - [ ] 默认草稿预览限制在约 1-2KB，不把完整正文刷入 terminal
   - [ ] 完整展示或提示 `generation_review_decision.json` 的可编辑位置
   - [ ] 增加测试覆盖：长草稿只输出短预览、完整路径仍可见、结构化审阅产物可编辑
 
-- [x] Task 14A: 旧代码结构改造 - 将写入流程重构为“验收后提交”
+- [x] Task 14A: 旧代码结构改造 - 将写入流程重构为“用户接受后提交”
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 拆分旧的“生成后直接回写”路径，引入 `GenerationReviewDecision` 驱动的 accept-gated commit
   - [x] 仅当 `GenerationReviewDecision.status = accepted` 时允许进入 `Freeze E` 与正式 `MemoryWriteback`
   - [x] 当 `GenerationReviewDecision.status = revise_length` 时，消费 `LengthPlanUpdate` 并回退到 `wait_length_review`，不得触发正式回写
   - [x] 当 `GenerationReviewDecision.status = replan_chapter` 时，消费 `ChapterReplanRequest` 并回退到 `wait_chapter_review`，不得触发正式回写
   - [x] 当 `GenerationReviewDecision.status = discarded` 时，仅保留运行产物并暂停流程，不得触发正式回写或自动进入下一章
-  - [x] 为旧 writeback 入口增加保护，阻止绕过章节验收节点直接提交旧草稿
+  - [x] 为旧 writeback 入口增加保护，阻止绕过用户草稿决策节点直接提交旧草稿
   - [x] 将“是否成为 canon”的判定从“生成完成”改为“用户接受并完成回写”
 
 - [x] Task 14C: 旧代码结构改造 - 重构 runs 产物与评审决策落盘
@@ -219,7 +219,7 @@
   - [x] 支持从最近确认点恢复
   - [x] 记录每次确认的时间与来源
 
-- [x] Task 14B: 旧代码结构改造 - 重构工作流状态机以接入章节验收分支
+- [x] Task 14B: 旧代码结构改造 - 重构工作流状态机以接入用户草稿决策分支
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - [x] 在旧工作流控制器中补齐 `wait_chapter_acceptance`
   - [x] 在旧工作流控制器中补齐 `wait_length_review`
@@ -281,7 +281,7 @@
   - [x] 将正式回写前置条件收紧为“continuity 通过 + review decision 已 accepted”
   - [x] 保持 continuity 校验与 state delta 提取逻辑可独立运行
 
-- [x] Task 14A-3: 为旧 writeback 审批入口增加 guard，阻止绕过章节验收直接提交
+- [x] Task 14A-3: 为旧 writeback 审批入口增加 guard，阻止绕过用户草稿决策直接提交
   - `来源`: 拆自 `Task 14A`
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
@@ -374,7 +374,7 @@
   - [x] 覆盖 `artifact saved -> 已保存你的修改`
   - [x] 覆盖 `batch_review` / “Freeze B pending” -> “请审阅本批剧情大纲”
   - [x] 覆盖 `freeze_d_review -> 请确认本章写作材料`
-  - [x] 覆盖 `wait_chapter_acceptance -> 请验收当前章节`
+  - [x] 覆盖 `wait_chapter_acceptance -> 请决定当前章节草稿`
   - [x] 覆盖 `writeback_review -> 请确认写回续写记忆`
   - [x] 将内部 stage、freeze record、checkpoint path 放入技术详情，不作为主状态展示
 
@@ -384,7 +384,7 @@
   - `建议只关注代码文件`: `novel_agent/app/run_interactive.py`, `novel_agent/app/gui/writer_cli.py`
   - [x] `_prompt_writer_review` 等交互提示显示中文状态、背景说明和下一步动作
   - [x] 保存 artifact 后显示“已保存你的修改”，并明确“保存不等于确认”
-  - [x] 章节验收提示显示“接受本章 / 调整字数后重写 / 修改章节梗概后重写 / 作废草稿 / 稍后决定”
+  - [x] 章节草稿决策提示显示“接受本章 / 调整字数后重写 / 修改章节梗概后重写 / 作废草稿 / 稍后决定”
   - [x] `wait_length_review` 提示说明它既可能来自初次长度确认，也可能来自“调整字数后重写”
   - [x] 不再把 `freeze_d_review`、`wait_chapter_acceptance`、`checkpoint confirmed` 作为主输出给用户
 
@@ -519,7 +519,7 @@
   - [x] `chapter_execution_input.json` 映射为章节 brief、长度预算、事实约束、风格参考、人物门禁、禁止项
   - [x] 高级 JSON 编辑保留，但普通路径必须可通过字段化编辑或受控修订完成
 
-- [x] Task 24: 定义章节验收 TUI 决策到 review contract 的映射
+- [x] Task 24: 定义章节草稿决策 TUI 到 review contract 的映射
   - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md)
   - `建议只读`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - `建议只关注代码文件`: `novel_agent/app/cli/decisions.py`, `novel_agent/app/cli/textual_screens.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_cli_textual_components.py`
@@ -785,7 +785,7 @@
   - [ ] 不再要求用户单独审阅长度计划或写作材料后才生成正文
   - [ ] 测试覆盖通过章节梗概后直接进入正文生成准备
 
-- [ ] Task 67: 重构章节草稿验收分支
+- [ ] Task 67: 重构章节草稿决策分支
   - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `依赖`: Task 64, Task 66
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/cli/decisions.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`

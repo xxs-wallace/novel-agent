@@ -22,6 +22,7 @@ from ..schemas import (
     WriterReviewAction,
 )
 from .artifact_ids import encode_artifact_id
+from .reviewer_action_specs import reviewer_specs_for_stage, writer_reviewer_actions
 
 
 def _utc_now() -> datetime:
@@ -370,7 +371,7 @@ class WebSessionService:
         return self.append_message(
             task_id,
             role="assistant",
-            content="请验收当前章节草稿。",
+            content="请决定当前章节草稿。",
             payload={
                 "channel": "writer_draft_review",
                 "run_id": review_model.run_id,
@@ -679,15 +680,9 @@ class WebSessionService:
         run_dir = Path(str(writer_state.get("run_dir") or ""))
         if not run_dir.exists():
             return False
-        report = self._load_json_data(run_dir / "continuity_report.json")
-        if not report:
-            return False
-        if report.get("blocked") is True:
-            return True
-        if report.get("canon_ready") is False:
-            return True
-        blocked_reason = str(report.get("writeback_blocked_reason") or "").strip()
-        return blocked_reason == "continuity_blocked"
+        generation_review = self._load_json_data(run_dir / "generation_review_decision.json")
+        status = str(generation_review.get("status") or "").strip().lower()
+        return status != "accepted"
 
     @staticmethod
     def _artifact_path_exists(payload: Mapping[str, Any]) -> bool:
@@ -825,6 +820,17 @@ class WebSessionService:
         )
         review_id = f"artifact-review-{run_id}-{active_stage}"
         summary = self._writer_artifact_summary(Path(artifact_path), title)
+        reviewer_actions = writer_reviewer_actions(
+            reviewer_specs_for_stage(active_stage),
+            task_id=task_id,
+            run_id=run_id,
+            target_id=detail_artifact_id or f"{run_id}:{active_stage}",
+            artifact_id=detail_artifact_id,
+            artifact_kind=artifact_kind,
+            artifact_path=artifact_path,
+            review_id=review_id,
+            source="writer_artifact_review_card",
+        )
         return WriterArtifactReview(
             run_id=run_id,
             review_id=review_id,
@@ -838,6 +844,7 @@ class WebSessionService:
             ),
             detail_artifact_id=detail_artifact_id,
             actions=[
+                *reviewer_actions,
                 WriterReviewAction(
                     action="approve_writer_artifact",
                     label="通过并继续",
@@ -894,6 +901,19 @@ class WebSessionService:
         )
         review_id = str(generation_review.get("decision_id") or f"draft-review-{run_id}-{chapter_id or 'chapter'}-{draft_id}")
         common_payload = {"run_id": run_id, "chapter_id": chapter_id, "draft_id": draft_id, "review_id": review_id}
+        reviewer_actions = writer_reviewer_actions(
+            reviewer_specs_for_stage("wait_chapter_acceptance"),
+            task_id=task_id,
+            run_id=run_id,
+            target_id=detail_artifact_id or draft_id or f"{run_id}:{chapter_id}:draft",
+            artifact_id=detail_artifact_id,
+            artifact_kind="draft",
+            artifact_path=str(draft_path),
+            review_id=review_id,
+            chapter_id=chapter_id,
+            draft_id=draft_id,
+            source="writer_draft_review_card",
+        )
         return WriterDraftReview(
             run_id=run_id,
             review_id=review_id,
@@ -905,6 +925,7 @@ class WebSessionService:
             continuity_summary=continuity,
             detail_artifact_id=detail_artifact_id,
             actions=[
+                *reviewer_actions,
                 WriterReviewAction(
                     action="accept_chapter",
                     label="接受本章",
@@ -940,7 +961,7 @@ class WebSessionService:
                     action="defer_chapter_acceptance",
                     label="稍后再决定",
                     payload=dict(common_payload),
-                    description="保留当前待验收状态，不写正式 decision。",
+                    description="保留当前待决策状态，不写正式 decision。",
                 ),
             ],
             technical_details={
@@ -1080,7 +1101,7 @@ class WebSessionService:
                 if self._compact_text(item.get("message") or item.get("type") or "")
             ]
             if public_issues:
-                prefix = "连续性检查发现需要注意的问题：" if payload.get("blocked") else "连续性检查提示："
+                prefix = "连续性风险提示：" if payload.get("blocked") else "连续性检查提示："
                 return f"{prefix}{'；'.join(public_issues[:3])}"
         for key in ("summary", "overall_summary", "status", "review_summary"):
             value = payload.get(key)
@@ -1152,7 +1173,7 @@ class WebSessionService:
             DecisionCard(
                 card_id=f"{task_id}:writer-empty-recovery:{run_id}",
                 title="没有可恢复审阅点",
-                body="当前 run 没有问题集、审阅产物或草稿验收点。请重新开始续写，或删除最近续写后重试。",
+                body="当前 run 没有问题集、审阅产物或草稿决策点。请重新开始续写，或删除最近续写后重试。",
                 actions=[],
             ),
         )

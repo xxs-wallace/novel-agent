@@ -1,6 +1,6 @@
-import { CheckCircle2, MessageSquareText, PauseCircle, RotateCcw } from "lucide-react";
+import { CheckCircle2, ClipboardCheck, MessageSquareText, PauseCircle, RotateCcw } from "lucide-react";
 
-import type { WriterArtifactReview } from "../../api/types";
+import type { WriterArtifactReview, WriterReviewAction } from "../../api/types";
 
 interface WriterArtifactReviewCardProps {
   review: WriterArtifactReview;
@@ -13,6 +13,7 @@ interface WriterArtifactReviewCardProps {
   onApprove: (review: WriterArtifactReview) => void;
   onRequestRevision: (review: WriterArtifactReview) => void;
   onDefer: (review: WriterArtifactReview) => void;
+  onReviewerAction?: (review: WriterArtifactReview, action: WriterReviewAction) => void;
   onOpenDetail?: (artifactId: string) => void;
 }
 
@@ -27,10 +28,12 @@ export function WriterArtifactReviewCard({
   onApprove,
   onRequestRevision,
   onDefer,
+  onReviewerAction,
   onOpenDetail
 }: WriterArtifactReviewCardProps) {
   const hasRevisionFeedback = Boolean(latestRevisionFeedback.trim());
   const detailArtifactId = review.detail_artifact_id || review.artifact_id;
+  const reviewerActions = review.actions.filter((action) => action.action === "run_reviewer");
 
   return (
     <article className="writer-review-card">
@@ -48,6 +51,19 @@ export function WriterArtifactReviewCard({
             查看详情
           </button>
         ) : null}
+        {reviewerActions.map((action) => (
+          <button
+            key={`${action.action}:${action.label}:${String(action.payload?.reviewer_id ?? "")}`}
+            type="button"
+            className="secondary-button"
+            disabled={pending}
+            title={action.description}
+            onClick={() => onReviewerAction?.(review, action)}
+          >
+            <ClipboardCheck size={15} aria-hidden="true" />
+            {action.label}
+          </button>
+        ))}
         <button
           type="button"
           className="secondary-button"

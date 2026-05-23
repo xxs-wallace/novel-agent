@@ -129,7 +129,7 @@ def test_writer_cli_public_result_does_not_leak_internal_stage_tokens(capsys) ->
     )
     output = capsys.readouterr().out
 
-    assert "请验收当前章节" in output
+    assert "请决定当前章节草稿" in output
     for token in ["artifact saved", "Freeze B pending", "freeze_d_review", "wait_chapter_acceptance", "checkpoint confirmed"]:
         assert token not in output
 

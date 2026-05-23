@@ -9,9 +9,11 @@ import { WriterArtifactView } from "./WriterArtifactView";
 interface ArtifactDetailProps {
   view: ArtifactView | undefined;
   isLoading?: boolean;
+  actionPending?: boolean;
+  onAction?: (action: string, payload?: Record<string, unknown>) => Promise<unknown> | void;
 }
 
-export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps) {
+export function ArtifactDetail({ view, isLoading = false, actionPending = false, onAction }: ArtifactDetailProps) {
   if (isLoading) {
     return <div className="empty-state">正在加载产物...</div>;
   }
@@ -29,7 +31,7 @@ export function ArtifactDetail({ view, isLoading = false }: ArtifactDetailProps)
   if (view.kind.startsWith("writer_")) {
     return (
       <div className="artifact-detail">
-        <WriterArtifactView view={view} />
+        <WriterArtifactView view={view} actionPending={actionPending} onAction={onAction} />
         <TechnicalDetailsDrawer artifactId={view.artifact_id} available={view.technical_available} />
       </div>
     );

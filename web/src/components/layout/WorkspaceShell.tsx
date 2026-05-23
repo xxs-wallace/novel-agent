@@ -307,7 +307,12 @@ export function WorkspaceShell() {
         </section>
 
         <section className={`workspace-panel result-panel mobile-${mobilePanel === "results" ? "visible" : "hidden"}`} aria-label="结果浏览器">
-          <ResultExplorer selectedTaskId={selectedTask?.task_id ?? ""} focusedArtifactId={focusedArtifactId} />
+          <ResultExplorer
+            selectedTaskId={selectedTask?.task_id ?? ""}
+            focusedArtifactId={focusedArtifactId}
+            actionPending={actionMutation.isPending}
+            onAction={handleAction}
+          />
         </section>
       </main>
     </div>

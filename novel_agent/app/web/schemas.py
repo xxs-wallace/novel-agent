@@ -119,7 +119,7 @@ class WriterDraftReview(BaseModel):
     review_id: str
     chapter_id: str
     draft_id: str
-    title: str = "章节草稿验收"
+    title: str = "章节草稿决策"
     preview: str = ""
     word_count: int = 0
     target_word_count: int | None = None
@@ -209,10 +209,19 @@ class ArtifactTable(BaseModel):
     rows: list[dict[str, str]] = Field(default_factory=list)
 
 
+class ArtifactAction(BaseModel):
+    action: str
+    label: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
+    variant: Literal["primary", "secondary", "danger"] = "secondary"
+
+
 class ArtifactView(BaseModel):
     artifact_id: str
     title: str
     kind: str
+    actions: list[ArtifactAction] = Field(default_factory=list)
     sections: list[ArtifactSection] = Field(default_factory=list)
     cards: list[ArtifactCard] = Field(default_factory=list)
     tables: list[ArtifactTable] = Field(default_factory=list)

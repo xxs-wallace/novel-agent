@@ -259,7 +259,7 @@
 4. 保存失败显示行列号、错误原因和恢复操作。
 5. 实现 DecisionPanelWidget，阻塞确认时替代底部输入区。
 6. 规划审阅支持保存、确认、返回上一层、稍后继续。
-7. 章节验收支持接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定。
+7. 章节草稿决策支持接受本章、调整字数后重写、修改章节梗概后重写、作废草稿、稍后决定。
 8. 实现 Toast、错误恢复与技术详情 overlay。
 
 验收：
@@ -293,7 +293,7 @@
 4. slash command autocomplete。
 5. CommandPalette 上下文过滤。
 6. ArtifactEditor 保存成功与校验失败。
-7. DecisionPanelWidget 章节验收选项。
+7. DecisionPanelWidget 章节草稿决策选项。
 8. 后台 RunEvent 不覆盖输入区。
 9. 同一 Textual 会话中 粗读 -> 精读 -> 建模状态 -> Writer 的最小路径。
 10. Writer batch_review -> 编辑保存 -> 确认 -> chapter_review。

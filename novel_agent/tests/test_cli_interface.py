@@ -37,7 +37,7 @@ def test_status_presenter_translates_internal_writer_and_read_states() -> None:
     )
 
     assert "请确认本章写作材料" in rendered
-    assert "请验收当前章节" in rendered
+    assert "请决定当前章节草稿" in rendered
     assert "请审阅本批剧情大纲" in rendered
     assert "已保存你的修改" in rendered
     assert "正在导入原文并切分" in rendered
@@ -68,7 +68,7 @@ def test_writer_status_presenter_covers_confirmation_points_events_and_gui_actio
     assert "已保存你的修改" in rendered
     assert "请审阅本批剧情大纲" in rendered
     assert "请确认本章写作材料" in rendered
-    assert "请验收当前章节" in rendered
+    assert "请决定当前章节草稿" in rendered
     assert "请确认写回续写记忆" in rendered
     assert "请调整章节规划后重写" in rendered
     assert "已确认，继续下一步" in rendered
@@ -295,7 +295,7 @@ def test_artifact_presenter_summarizes_batch_chapter_length_and_draft(tmp_path: 
     assert "2600" in presenter.summarize(length_path, stage="wait_length_review").render()
     draft_summary = presenter.summarize(draft_path, stage="wait_chapter_acceptance", target_chars=2000)
     assert draft_summary.collapsed is True
-    assert "请验收当前章节" in draft_summary.render()
+    assert "请决定当前章节草稿" in draft_summary.render()
 
 
 def test_artifact_presenter_summarizes_writer_scale_climax_and_character_cast(tmp_path: Path) -> None:
@@ -902,7 +902,7 @@ def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> N
     assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
     assert "作废本次草稿 -> 流程已暂停" in rendered
-    assert "稍后再决定 -> 请验收当前章节" in rendered
+    assert "稍后再决定 -> 请决定当前章节草稿" in rendered
     assert panel.choose("2").workflow_action == "show_chapter_acceptance_form"
     assert panel.choose("2").payload == {"status": "revise_length"}
     assert panel.choose("3").workflow_action == "show_chapter_acceptance_form"

@@ -371,6 +371,10 @@ def test_writer_layered_generation_pipeline_supports_review_and_freeze_chain(tmp
 
     batch_plan_path = Path(orchestrator.run_writer.layout.run_dir("run-1") / "batch_plan.json")
     batch_plan_doc = json.loads(batch_plan_path.read_text(encoding="utf-8"))
+    assert batch_plan_doc["data"]["chapters"] == ["chapter-11", "chapter-12"]
+    assert "scope_start" not in batch_plan_doc["data"]
+    assert "scope_end" not in batch_plan_doc["data"]
+    assert "后端已冻结的当前批次章节列表" in orchestrator.model_client.json_calls[-1][1]
     batch_plan_doc["data"]["batch_goal"] = "用户修改后的批次目标"
     batch_plan_path.write_text(json.dumps(batch_plan_doc, ensure_ascii=False, indent=2), encoding="utf-8")
 

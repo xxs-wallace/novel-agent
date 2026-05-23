@@ -211,10 +211,19 @@ export interface ArtifactTable {
   rows: Record<string, string>[];
 }
 
+export interface ArtifactAction {
+  action: string;
+  label: string;
+  payload?: Record<string, unknown>;
+  description?: string;
+  variant?: "primary" | "secondary" | "danger";
+}
+
 export interface ArtifactView {
   artifact_id: string;
   title: string;
   kind: string;
+  actions: ArtifactAction[];
   sections: ArtifactSection[];
   cards: ArtifactCard[];
   tables: ArtifactTable[];

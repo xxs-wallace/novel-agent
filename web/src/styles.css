@@ -1085,6 +1085,13 @@ textarea {
   gap: 2px;
 }
 
+.artifact-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 .artifact-detail-header span,
 .person-entry-view header span,
 .writer-artifact-view header span {

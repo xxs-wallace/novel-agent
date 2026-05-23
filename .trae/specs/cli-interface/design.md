@@ -493,9 +493,9 @@ CLI 禁止事项：
 
 但不得把“高级 JSON 编辑”作为唯一可行动路径。
 
-### 9.5 章节验收到 Contract JSON 的映射
+### 9.5 章节草稿决策到 Contract JSON 的映射
 
-章节验收是最容易把用户逼去填 JSON 的环节，必须通过决策面板收集。
+章节草稿决策是最容易把用户逼去填 JSON 的环节，必须通过决策面板收集。
 
 | TUI 决策 | 用户输入控件 | Workflow payload / JSON contract | 后续状态 |
 |---|---|---|---|
@@ -503,7 +503,7 @@ CLI 禁止事项：
 | 调整字数后重写 | 目标字数、最小/最大字数、原因、保留方向说明 | `GenerationReviewDecision(status="revise_length")` + `LengthPlanUpdate` | 请确认章节长度与节奏 |
 | 修改章节梗概后重写 | 不满意原因、必须保留、必须改变、禁止沿用、可选长度建议 | `GenerationReviewDecision(status="replan_chapter")` + `ChapterReplanRequest` | 请调整章节规划后重写 |
 | 作废本次草稿 | 作废原因 | `GenerationReviewDecision(status="discarded")` | 流程已暂停 |
-| 稍后再决定 | 无 | 不写正式 decision，只保留 checkpoint | 请验收当前章节 |
+| 稍后再决定 | 无 | 不写正式 decision，只保留 checkpoint | 请决定当前章节草稿 |
 
 CLI / TUI 不应要求用户填写 `decision_id`、`draft_id`、`created_at`、`next_action_checkpoint` 等技术字段。这些字段由 workflow / orchestration 层生成或补齐，必要时放入技术详情。
 
@@ -519,7 +519,7 @@ CLI / TUI 不应要求用户填写 `decision_id`、`draft_id`、`created_at`、`
 | Writer 章节梗概 | `chapter_package.json` | 标题、章节目标、关系推进、禁止项 |
 | Writer 长度计划 | `chapter_length_plan.json` | 默认字数、重点章节、单章 override |
 | Writer 写作输入 | `chapter_execution_input.json` | brief、事实约束、风格参考、人物门禁 |
-| Writer 验收 | `draft.md`、`continuity_report.json` | 正文字数、连续性、是否接受或重写 |
+| Writer 草稿决策 | `draft.md`、`continuity_report.json` | 正文字数、连续性风险、是否接受或重写 |
 | Writer 写回 | `state_delta.json`、`memory_writeback.json` | 将写入的事实、人物和关系变化 |
 
 ## 10. 阻塞决策面板
@@ -528,14 +528,14 @@ CLI / TUI 不应要求用户填写 `decision_id`、`draft_id`、`created_at`、`
 
 规划类审阅点应同时提供“按我的反馈修改”和“手动编辑”。前者触发 `Scoped Artifact Revision`，后者打开原地编辑器。两者都不自动推进流程。
 
-示例：Writer 章节验收
+示例：Writer 章节草稿决策
 
 ```text
-请验收当前章节
+请决定当前章节草稿
 
 草稿：draft.md
 字数：4,820 / 目标 5,000
-连续性：通过
+连续性：请查看风险提示
 
 [1] 接受本章
 [2] 调整字数后重写
@@ -680,7 +680,7 @@ CLI 层只负责三件事：
 
 - “请审阅本批剧情大纲”
 - “请确认本章写作材料”
-- “请验收当前章节”
+- “请决定当前章节草稿”
 - “已保存你的修改”
 
 ## 13. 错误与恢复

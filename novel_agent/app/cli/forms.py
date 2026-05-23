@@ -241,7 +241,7 @@ class ChapterAcceptanceForm:
 
     def render_template(self) -> str:
         lines = [
-            "# 章节验收表单：补齐字段后 Ctrl+Enter 提交。",
+            "# 章节草稿决策表单：补齐字段后 Ctrl+Enter 提交。",
             f"决策: {self.status}",
             f"原因代码: {self.reason_code}",
             f"反馈: {self.feedback_text}",

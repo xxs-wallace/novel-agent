@@ -18,7 +18,7 @@ Writer 层负责把已经建模的原作事实、世界观、人物档案、故�
 - 创作知识库字段与 rerank，见 [`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md)
 - Memory 字段与上下文装配，见 [`../narrative-memory-context/spec.md`](../narrative-memory-context/spec.md)
 - 大纲生成 research / query 细节，见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)
-- 正文执行输入、恢复回滚、章节验收与写回运行边界，见 [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)
+- 正文执行输入、恢复回滚、用户草稿决策与写回运行边界，见 [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)
 
 Writer 层新增或消费的对象不得与 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md) 中已稳定的跨层对象冲突。
 
@@ -286,7 +286,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 - 一个批次必须有明确起点、阶段任务和收束目标
 - `BatchPlan` SHALL 以用户已通过的 `BookContinuationPlan` review artifact 为强前置输入，而不是仅依据用户即时意图直接生成
-- `BatchPlan` SHALL 从 `BookContinuationPlan.chapter_outline_slots` 中选择当前批次覆盖范围，并保留对应章节的默认字数、章节功能、铺垫/回收目标和高潮接近度
+- `BatchPlan` SHALL 使用后端根据 Writer Memory `document_title_index` 计算并注入的 `chapters` 列表表达当前批次覆盖章节，不得让模型自行推导章节编号；并从 `BookContinuationPlan.chapter_outline_slots` 中选择对应范围，保留默认字数、章节功能、铺垫/回收目标和高潮接近度
 - 若 KB 层提供相关 `NarrativeStructurePattern` / `ArcPatternCard`，`BatchPlan` SHALL 标注自己借鉴的结构模式、过渡功能、铺垫/回收目标与节奏类型
 - 若 Memory 层提供相关 `SourceArcMap`，`BatchPlan` MAY 记录源作品结构参考来源，但不应把源作品 arc 当作目标剧情事实
 - 若存在 `CharacterCastPlan`，`BatchPlan` SHALL 同时消费用户已通过的人物补充结果，并为首次登场角色预留执行位置
@@ -367,7 +367,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 ### Layer 5: 回写与校验层
 
-本层负责章节校验、章节验收、状态提取与正式回写。
+本层负责章节风险提示、用户草稿决策、状态提取与正式回写。
 
 详细产品语义已迁移到：
 
@@ -376,16 +376,16 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 在主 spec 中仅保留摘要：
 
-- 本层必须提供显式章节验收节点
+- 本层必须提供显式用户草稿决策节点
 - 只有 `GenerationReviewDecision.status = accepted` 才允许进入正式写回候选
-- 未验收、被替换或被作废的草稿不得进入正式 Memory / KB
+- 未被用户接受、被替换或被作废的草稿不得进入正式 Memory / KB
 
 ## Artifact Review Gates
 
 主 spec 中仅保留 artifact review gate 摘要：
 
 - `BookContinuationPlan` review：用户审阅全书方向、规模、高潮、角色弧和未决问题。
-- `BatchPlan` review：用户审阅当前批次目标、入口、冲突、中点、出口和禁止提前消费项。
+- `BatchPlan` review：用户审阅当前批次章节列表、目标、冲突、中点、出口和禁止提前消费项。
 - `ChapterPackage` / `ChapterBrief` review：用户审阅章节标题、梗概、场景顺序、人物行动、关系推进和伏笔安排。
 - `draft.md` review：用户验收章节正文，或要求 Agent 带反馈重写 / 回到章节梗概修订。
 - `memory_writeback.json` review：用户确认写回摘要后，正式更新 Memory / KB。
@@ -600,7 +600,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 #### Scenario: 不再暴露独立长度确认节点
 - **WHEN** 用户已经通过章节梗概 review gate
 - **THEN** workflow 不得进入 `wait_length_review` 或 `freeze_d_review` 作为普通用户必须处理的主状态
-- **AND** 如果需要调整字数或风格，用户应通过通过动作中的 `supplement_text` 或草稿验收反馈表达
+- **AND** 如果需要调整字数或风格，用户应通过通过动作中的 `supplement_text` 或草稿决策反馈表达
 
 ### Requirement: Writer 规划必须消费结构模式以改善铺垫
 

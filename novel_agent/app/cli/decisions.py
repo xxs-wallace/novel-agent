@@ -32,9 +32,9 @@ class DecisionPanel:
     def chapter_acceptance(cls, *, draft_path: str, draft_chars: int = 0, target_chars: int = 0) -> "DecisionPanel":
         summary = f"草稿：{draft_path}"
         if draft_chars or target_chars:
-            summary = f"{summary}\n字数：{draft_chars} / 目标 {target_chars or '未设置'}\n连续性：通过"
+            summary = f"{summary}\n字数：{draft_chars} / 目标 {target_chars or '未设置'}\n连续性：请查看风险提示"
         return cls(
-            title="请验收当前章节",
+            title="请决定当前章节草稿",
             artifact_path=draft_path,
             summary=summary,
             options=(
@@ -42,7 +42,7 @@ class DecisionPanel:
                 DecisionOption("2", "基于反馈重写本章", "正在重写正文草稿", "show_chapter_acceptance_form", {"status": "rewrite_requested"}),
                 DecisionOption("3", "修改章节梗概后重写", "请调整章节规划后重写", "show_chapter_acceptance_form", {"status": "replan_requested"}),
                 DecisionOption("4", "作废本次草稿", "流程已暂停", "show_chapter_acceptance_form", {"status": "discarded"}),
-                DecisionOption("5", "稍后再决定", "请验收当前章节", "defer_decision", {"status": ""}),
+                DecisionOption("5", "稍后再决定", "请决定当前章节草稿", "defer_decision", {"status": ""}),
             ),
         )
 

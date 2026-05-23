@@ -1280,10 +1280,8 @@ class RestrictedWriterExecutor:
         draft_md: str,
         continuity_report: ContinuityReport,
     ) -> MemoryWritebackRecord:
-        if not continuity_report.canon_ready:
-            raise ValueError("continuity report is not canon ready")
         if not continuity_report.accepted_for_writeback:
-            raise ValueError("writeback requires accepted review decision")
+            raise ValueError("writeback requires accepted user draft decision")
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
         chapter_title = str(execution_input.get("chapter_title") or chapter_brief.get("title") or "新章节")
         document_title_index = int(execution_input.get("document_title_index") or 1)
@@ -1305,7 +1303,11 @@ class RestrictedWriterExecutor:
                 "content": draft_md,
                 "content_chars": len(draft_md),
                 "character_keywords": continuity_report.state_delta.get("mentioned_characters", []),
-                "content_tags": ["writer_generated", "canon_ready"],
+                "content_tags": [
+                    "writer_generated",
+                    "user_accepted",
+                    "continuity_ok" if continuity_report.canon_ready else "continuity_risk",
+                ],
                 "source_path": generated_path,
                 "source_file_name": Path(generated_path).name,
                 "source_start_offset": 0,
@@ -1607,7 +1609,7 @@ class RestrictedWriterExecutor:
         return ContinuityReport(
             issues=issues,
             blocked=blocked,
-            summary="continuity_blocked" if blocked else "continuity_ok",
+            summary="continuity_risk" if blocked else "continuity_ok",
             relation_state_gate=relation_gate["gate"],
             planned_character_gate=planned_gate["gate"],
             state_delta=state_delta,
@@ -2376,6 +2378,7 @@ class RestrictedWriterExecutor:
         chapter_id: str,
         canon_ready: bool,
     ) -> tuple[str, bool, str]:
+        _ = canon_ready
         decision = self._load_optional_run_payload(run_id, "generation_review_decision.json")
         status = ""
         if isinstance(decision, dict):
@@ -2383,10 +2386,8 @@ class RestrictedWriterExecutor:
             decision_chapter_id = str(decision.get("chapter_id") or "").strip()
             if decision_chapter_id and chapter_id and decision_chapter_id != chapter_id:
                 return status, False, "review_decision_chapter_mismatch"
-        if not canon_ready:
-            return status, False, "continuity_blocked"
         if status != "accepted":
-            return status, False, "review_not_accepted"
+            return status, False, "user_decision_not_accepted"
         return status, True, ""
 
     def refresh_writeback_gate(

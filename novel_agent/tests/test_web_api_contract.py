@@ -1021,10 +1021,14 @@ def test_web_session_replays_writer_artifact_review_card(tmp_path: Path) -> None
     assert review.title == "本批剧情大纲"
     assert "旧案线索" in review.summary
     assert [action.action for action in review.actions] == [
+        "run_reviewer",
         "approve_writer_artifact",
         "request_writer_artifact_revision",
         "defer_writer_artifact_review",
     ]
+    reviewer_action = review.actions[0]
+    assert reviewer_action.payload["reviewer_id"] == "outline_plot_development"
+    assert reviewer_action.payload["target_type"] == "outline"
 
 
 def test_web_session_replays_chapter_package_content_in_review_message(tmp_path: Path) -> None:
@@ -1072,6 +1076,10 @@ def test_web_session_replays_chapter_package_content_in_review_message(tmp_path:
     assert "章节梗概" in review.summary
     assert "ChapterBrief" not in review.summary
     assert "BatchPlan" not in review.summary
+    reviewer_actions = [action for action in review.actions if action.action == "run_reviewer"]
+    assert len(reviewer_actions) == 1
+    assert reviewer_actions[0].payload["reviewer_id"] == "chapter_synopsis_plot_character"
+    assert reviewer_actions[0].payload["target_type"] == "chapter_brief"
 
 
 def test_web_session_replays_writer_draft_review_card(tmp_path: Path) -> None:
@@ -1109,11 +1117,20 @@ def test_web_session_replays_writer_draft_review_card(tmp_path: Path) -> None:
     assert review.draft_id == "draft-1"
     assert "雨落下来" in review.preview
     assert [action.action for action in review.actions] == [
+        "run_reviewer",
+        "run_reviewer",
+        "run_reviewer",
         "accept_chapter",
         "rewrite_chapter",
         "replan_chapter",
         "discard_chapter",
         "defer_chapter_acceptance",
+    ]
+    reviewer_ids = [action.payload["reviewer_id"] for action in review.actions if action.action == "run_reviewer"]
+    assert reviewer_ids == [
+        "local_draft_continuity",
+        "memory_draft_consistency",
+        "kb_draft_style_atmosphere",
     ]
 
 
@@ -1196,7 +1213,7 @@ def test_web_session_offers_next_writer_round_after_writeback_completion(tmp_pat
     assert session.messages("book-one") == messages
 
 
-def test_web_session_routes_blocked_writeback_back_to_draft_review(tmp_path: Path) -> None:
+def test_web_session_keeps_writeback_review_when_continuity_has_risk(tmp_path: Path) -> None:
     fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
     run_dir = tmp_path / "runs" / "writer" / "run-1"
     draft_path = run_dir / "draft.md"
@@ -1221,7 +1238,7 @@ def test_web_session_routes_blocked_writeback_back_to_draft_review(tmp_path: Pat
                 "data": {
                     "blocked": True,
                     "canon_ready": False,
-                    "writeback_blocked_reason": "continuity_blocked",
+                    "writeback_blocked_reason": "",
                     "issues": [{"message": "必写点未出现：聚会场景"}],
                 }
             },
@@ -1234,11 +1251,10 @@ def test_web_session_routes_blocked_writeback_back_to_draft_review(tmp_path: Pat
     messages = session.messages("book-one")
 
     assert len(messages) == 1
-    assert messages[0].writer_artifact_review is None
-    review = messages[0].writer_draft_review
+    assert messages[0].writer_draft_review is None
+    review = messages[0].writer_artifact_review
     assert review is not None
-    assert review.chapter_id == "ch-1"
-    assert "必写点未出现：聚会场景" in review.continuity_summary
+    assert review.artifact_kind == "writeback_summary"
 
 
 def test_web_session_offers_resume_for_confirmed_writer_stage(tmp_path: Path) -> None:

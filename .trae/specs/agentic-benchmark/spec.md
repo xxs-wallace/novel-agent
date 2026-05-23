@@ -208,7 +208,7 @@ benchmark 模块不得重新定义与主链路冲突的跨层对象。
 - held-out reference close-read 的连续 summaries SHALL 被按顺序切分为多个目标章节窗口。
 - 每一章都 SHALL 重新执行 Writer planning workflow 并生成本章 `generated_story_synopsis.json`，该产物只用于 SynopsisReviewer，不得进入 Expansion 生成输入。
 - 每一章 Expansion 的输入 story synopsis SHALL 来自对应 close-read reference summary group，而不是 Writer 自己生成的 chapter brief。
-- 每一章正文生成后 SHALL 走 Writer 正式执行链路，并在通过 continuity / acceptance 后写回 Writer memory DB。
+- 每一章正文生成后 SHALL 走 Writer 正式执行链路；benchmark 脚本可显式写入 `GenerationReviewDecision.status = accepted` 并确认写回，但 continuity / Reviewer 报告只作为风险与评分参考，不作为硬 gate。
 - 下一章 planning / execution SHALL 从写回后的 Writer memory DB 读取最近章节摘要和人物/世界状态，形成类似 sliding-window attention 的连续上下文。
 
 #### Scenario: 三章连续 smoke

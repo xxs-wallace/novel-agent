@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1385,12 +1386,20 @@ class WriterLayeredGenerationOrchestrator:
         character_cast_plan: dict[str, Any] | None,
         target_chapter_count: int,
     ) -> BatchPlan:
+        chapters = self._planned_batch_chapters(
+            conn=conn,
+            book_id=book_id,
+            book_plan=book_plan,
+            target_chapter_count=target_chapter_count,
+        )
+        effective_count = len(chapters)
         system_prompt, user_prompt = build_batch_plan_prompt(
             book_id=book_id,
             book_continuation_plan=book_plan.to_dict(),
             world_expansion_pack=world_pack.to_dict(),
             character_cast_plan=character_cast_plan,
-            target_chapter_count=target_chapter_count,
+            target_chapter_count=effective_count,
+            chapters=chapters,
         )
         payload = self._generate_json_payload(
             system_prompt=system_prompt,
@@ -1401,7 +1410,8 @@ class WriterLayeredGenerationOrchestrator:
                 book_plan=book_plan,
                 world_pack=world_pack,
                 character_cast_plan=character_cast_plan,
-                target_chapter_count=target_chapter_count,
+                target_chapter_count=effective_count,
+                chapters=chapters,
             ),
         )
         if not isinstance(payload, dict):
@@ -1411,12 +1421,15 @@ class WriterLayeredGenerationOrchestrator:
                 book_plan=book_plan,
                 world_pack=world_pack,
                 character_cast_plan=character_cast_plan,
-                target_chapter_count=target_chapter_count,
+                target_chapter_count=effective_count,
+                chapters=chapters,
             )
         payload.setdefault("batch_id", "batch-01")
         payload.setdefault("book_id", book_id)
-        effective_count = max(1, int(target_chapter_count or book_plan.target_chapter_count or 1))
-        payload.setdefault("target_chapter_count", effective_count)
+        payload["chapters"] = chapters
+        payload.pop("scope_start", None)
+        payload.pop("scope_end", None)
+        payload["target_chapter_count"] = effective_count
         payload.setdefault("target_total_chars", int(book_plan.target_total_chars or 0))
         payload.setdefault("default_chapter_target_chars", int(book_plan.default_chapter_target_chars or 0))
         if not isinstance(payload.get("chapter_outline_slots"), list) or not payload.get("chapter_outline_slots"):
@@ -1781,10 +1794,18 @@ class WriterLayeredGenerationOrchestrator:
         world_pack: WorldExpansionPack,
         character_cast_plan: dict[str, Any] | None,
         target_chapter_count: int,
+        chapters: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        title_indexes = self.documents_repo.list_title_indexes(conn, book_id=book_id)
-        start_index = (max(title_indexes) + 1) if title_indexes else 1
-        end_index = start_index + max(1, target_chapter_count) - 1
+        planned_chapters = list(
+            chapters
+            or self._planned_batch_chapters(
+                conn=conn,
+                book_id=book_id,
+                book_plan=book_plan,
+                target_chapter_count=target_chapter_count,
+            )
+        )
+        start_index = (self._chapter_id_suffix_number(planned_chapters[0]) if planned_chapters else None) or 1
         planned_beats: list[str] = []
         if character_cast_plan:
             for item in character_cast_plan.get("planned_characters", []) or []:
@@ -1795,8 +1816,7 @@ class WriterLayeredGenerationOrchestrator:
         return {
             "batch_id": f"batch-{start_index:02d}",
             "book_id": book_id,
-            "scope_start": f"chapter-{start_index}",
-            "scope_end": f"chapter-{end_index}",
+            "chapters": planned_chapters,
             "batch_goal": book_plan.continuation_goal,
             "emotional_arc": book_plan.relationship_guardrails[0] if book_plan.relationship_guardrails else "维持克制推进",
             "conflict_arc": world_pack.required_for_plot[0] if world_pack.required_for_plot else "推进主线冲突",
@@ -1804,11 +1824,11 @@ class WriterLayeredGenerationOrchestrator:
             "must_not_consume": book_plan.must_preserve[:1] + ["终局真相", "关系终局状态"],
             "planned_character_beats": planned_beats,
             "exit_hook": book_plan.open_questions[0] if book_plan.open_questions else "批次结尾引出新的未决问题。",
-            "target_chapter_count": max(1, int(target_chapter_count or book_plan.target_chapter_count or 1)),
+            "target_chapter_count": len(planned_chapters),
             "target_total_chars": int(book_plan.target_total_chars or 0),
             "default_chapter_target_chars": int(book_plan.default_chapter_target_chars or 0),
             "chapter_outline_slots": [
-                dict(item) for item in book_plan.chapter_outline_slots[: max(1, int(target_chapter_count or 1))]
+                dict(item) for item in book_plan.chapter_outline_slots[: len(planned_chapters)]
             ],
             "evidence": [
                 {
@@ -1828,6 +1848,41 @@ class WriterLayeredGenerationOrchestrator:
                 }
             ],
         }
+
+    def _planned_batch_chapters(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        book_id: str,
+        book_plan: BookContinuationPlan,
+        target_chapter_count: int,
+    ) -> list[str]:
+        effective_count = max(1, int(target_chapter_count or book_plan.target_chapter_count or 1))
+        title_indexes = self.documents_repo.list_title_indexes(conn, book_id=book_id)
+        start_index = (max(title_indexes) + 1) if title_indexes else 1
+        return [f"chapter-{index}" for index in range(start_index, start_index + effective_count)]
+
+    def _batch_plan_chapters_from_data(self, data: Mapping[str, Any]) -> list[str]:
+        raw_chapters = data.get("chapters")
+        if isinstance(raw_chapters, Sequence) and not isinstance(raw_chapters, (str, bytes)):
+            return _normalize_string_list(list(raw_chapters))
+        legacy_start = _normalize_text(data.get("scope_start"))
+        legacy_end = _normalize_text(data.get("scope_end")) or legacy_start
+        if not legacy_start:
+            return []
+        start_index = self._chapter_id_suffix_number(legacy_start)
+        end_index = self._chapter_id_suffix_number(legacy_end)
+        if start_index is None or end_index is None or end_index < start_index:
+            return [legacy_start]
+        prefix = re.sub(r"\d+\s*$", "", legacy_start) or "chapter-"
+        return [f"{prefix}{index}" for index in range(start_index, end_index + 1)]
+
+    @staticmethod
+    def _chapter_id_suffix_number(value: object) -> int | None:
+        match = re.search(r"(\d+)\s*$", _normalize_text(value))
+        if not match:
+            return None
+        return int(match.group(1))
 
     def _fallback_chapter_package(
         self,
@@ -2128,8 +2183,7 @@ class WriterLayeredGenerationOrchestrator:
         return BatchPlan(
             batch_id=str(data.get("batch_id") or ""),
             book_id=str(data.get("book_id") or ""),
-            scope_start=str(data.get("scope_start") or ""),
-            scope_end=str(data.get("scope_end") or ""),
+            chapters=self._batch_plan_chapters_from_data(data),
             batch_goal=str(data.get("batch_goal") or ""),
             emotional_arc=str(data.get("emotional_arc") or ""),
             conflict_arc=str(data.get("conflict_arc") or ""),

@@ -969,7 +969,7 @@ def _write_writer_review_decision_payload(
             "length_plan_update": length_plan_update if status == "revise_length" else None,
             "chapter_replan_request": chapter_replan_request if status == "replan_chapter" else None,
             "source_message_id": str(payload.get("source_message_id") or ""),
-            "reviewer_type": "user",
+            "reviewer_type": str(payload.get("reviewer_type") or "user"),
         },
     )
 
@@ -1113,7 +1113,7 @@ def _prompt_writer_acceptance_review(workflow: WriterInteractiveWorkflow, run_id
         build_writer_draft_review_payload(run_dir=run_dir, artifact_path=artifact_path),
     )
     choice = _prompt_choice(
-        "请审核本章草稿",
+        "请决定本章草稿",
         choices={
             "accept": "接受并进入写回确认",
             "revise": "调整字数后重写",

@@ -1,19 +1,39 @@
 import ReactMarkdown from "react-markdown";
+import { ClipboardCheck } from "lucide-react";
 
 import type { ArtifactView } from "../../api/types";
 import { normalizePublicTerms } from "../../utils/status";
 
 interface WriterArtifactViewProps {
   view: ArtifactView;
+  actionPending?: boolean;
+  onAction?: (action: string, payload?: Record<string, unknown>) => Promise<unknown> | void;
 }
 
-export function WriterArtifactView({ view }: WriterArtifactViewProps) {
+export function WriterArtifactView({ view, actionPending = false, onAction }: WriterArtifactViewProps) {
   return (
     <article className="writer-artifact-view">
       <header>
         <span>Writer</span>
         <h2>{normalizePublicTerms(view.title)}</h2>
       </header>
+      {view.actions.length ? (
+        <div className="artifact-toolbar" aria-label="产物工具">
+          {view.actions.map((action) => (
+            <button
+              key={`${action.action}:${action.label}:${String(action.payload?.reviewer_id ?? "")}`}
+              type="button"
+              className={action.variant === "danger" ? "danger-button" : action.variant === "primary" ? "primary-button" : "secondary-button"}
+              disabled={actionPending || !onAction}
+              title={action.description}
+              onClick={() => void onAction?.(action.action, action.payload ?? {})}
+            >
+              <ClipboardCheck size={15} aria-hidden="true" />
+              {normalizePublicTerms(action.label)}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="artifact-section-grid">
         {view.sections.map((section) => (
           <section className="artifact-section" key={section.title}>

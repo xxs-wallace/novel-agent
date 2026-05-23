@@ -652,50 +652,35 @@ class WriterInteractiveWorkflow:
         product_mode: str,
     ) -> dict[str, Any]:
         mode = self._normalize_mode(product_mode)
-        commit_writeback = mode in {BATCH_MODE, AUTO_NOVEL_MODE}
         result = self.executor.execute_frozen_chapter(
             conn,
             run_id=run_id,
             book_id=book_id,
-            commit_writeback=commit_writeback,
-            auto_freeze_e=True,
+            commit_writeback=False,
+            auto_freeze_e=False,
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
         if result["canon_ready"]:
             state["failure_count"] = 0
-            if bool(result.get("writeback_committed")):
-                self._ensure_memory_writeback_artifact(
-                    run_id=run_id,
-                    payload=result.get("memory_writeback"),
-                )
-            self._route_chapter_acceptance_decision(
-                run_id=run_id,
-                state=state,
-                mode=mode,
-                source="execute_current_chapter",
-            )
-            self._sync_current_draft_retention_record(
-                run_id=run_id,
-                state=state,
-                include_memory_writeback=bool(result.get("writeback_committed")),
-            )
+            state["last_rollback"] = None
+            state.pop("last_continuity_risk", None)
         else:
-            failure_count = int(state.get("failure_count") or 0) + 1
-            state["failure_count"] = failure_count
-            rollback_event = self.rollback_manager.rollback_after_failure(
-                run_id=run_id,
-                failure_count=failure_count,
-                reason="正文执行未通过 continuity 校验。",
-            )
-            state["last_rollback"] = rollback_event.to_dict()
-            self._set_workflow_position(state, technical_stage=rollback_event.target_freeze_stage, agent_state="agent_running")
-            self._route_chapter_acceptance_decision(
-                run_id=run_id,
-                state=state,
-                mode=mode,
-                source="execute_current_chapter_continuity_review",
-                review_status="",
-            )
+            state["last_rollback"] = None
+            state["last_continuity_risk"] = {
+                "reason": "正文连续性检查存在风险，作为用户决策参考，不会自动回滚或阻止接受。",
+                "continuity_report_path": result.get("continuity_report_path", ""),
+            }
+        self._route_chapter_acceptance_decision(
+            run_id=run_id,
+            state=state,
+            mode=mode,
+            source="execute_current_chapter",
+        )
+        self._sync_current_draft_retention_record(
+            run_id=run_id,
+            state=state,
+            include_memory_writeback=False,
+        )
         self._save_workflow_state(run_id, state)
         return result
 
@@ -1853,8 +1838,7 @@ class WriterInteractiveWorkflow:
         if target_stage == "batch_review":
             context["current_batch"] = {
                 "batch_id": target_artifact.get("batch_id", ""),
-                "scope_start": target_artifact.get("scope_start", ""),
-                "scope_end": target_artifact.get("scope_end", ""),
+                "chapters": list(target_artifact.get("chapters") or []),
             }
             context["upstream_freezes"]["freeze_a"] = self._summarize_frozen_artifact(
                 run_id,
@@ -1868,7 +1852,7 @@ class WriterInteractiveWorkflow:
                 run_id,
                 "freeze_b",
                 "batch_plan.json",
-                fields=("batch_id", "book_id", "scope_start", "scope_end", "batch_goal", "planned_character_beats"),
+                fields=("batch_id", "book_id", "chapters", "batch_goal", "planned_character_beats"),
             )
             context["allowed_character_summary"] = self._summarize_frozen_artifact(
                 run_id,
@@ -2213,6 +2197,7 @@ class WriterInteractiveWorkflow:
         source: str,
         review_status: str | None = None,
     ) -> dict[str, Any]:
+        _ = mode
         status = (review_status or self._load_generation_review_status(run_id)).strip().lower()
         run_dir = self.run_writer.layout.run_dir(run_id)
         continuity_report_path = str(run_dir / "continuity_report.json")
@@ -2238,19 +2223,16 @@ class WriterInteractiveWorkflow:
         if status == "accepted":
             state["pending_checkpoint"] = None
             state["terminal_stage"] = None
-            self._set_workflow_position(state, technical_stage="freeze_e", agent_state="completed")
-            if mode == ASSIST_MODE:
-                checkpoint = self._write_checkpoint(
-                    run_id=run_id,
-                    stage="writeback_review",
-                    artifact_path=continuity_report_path,
-                    source=source,
-                )
-                state["pending_checkpoint"] = checkpoint
-                state["terminal_stage"] = None
-                self._set_workflow_position(state, technical_stage="writeback_review", agent_state="writeback_review")
-                return checkpoint
-            return {"stage": "freeze_e", "artifact_path": continuity_report_path, "source": source}
+            checkpoint = self._write_checkpoint(
+                run_id=run_id,
+                stage="writeback_review",
+                artifact_path=continuity_report_path,
+                source=source,
+            )
+            state["pending_checkpoint"] = checkpoint
+            state["terminal_stage"] = None
+            self._set_workflow_position(state, technical_stage="writeback_review", agent_state="writeback_review")
+            return checkpoint
         if status == "rewrite_requested":
             state["pending_checkpoint"] = None
             state["terminal_stage"] = None
@@ -2791,7 +2773,7 @@ class WriterInteractiveWorkflow:
             run_id,
             FreezeRecord(
                 freeze_stage="freeze_e",
-                summary="正文执行、章节验收与正式回写完成。",
+                summary="正文执行、用户草稿决策与正式回写完成。",
                 depends_on=["freeze_d"],
             ),
             artifact_payloads=artifact_payloads,

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-本 spec 收束 Writer 运行期边界：正文输入、review artifact 恢复、回滚、章节验收和 accepted-only writeback。
+本 spec 收束 Writer 运行期边界：正文输入、review artifact 恢复、回滚、用户草稿决策和 accepted-only writeback。
 
 它不描述大纲 research 的 prompt / query 细节；相关内容见 [`../designs/outline-research-loop.design.md`](../designs/outline-research-loop.design.md)。
 
@@ -13,7 +13,7 @@
 - facts / style / forbidden / relation / character / budget 的输入分类
 - artifact review gate 的运行语义
 - 用户确认点、恢复点、失败重试和级联回滚
-- 章节验收、`GenerationReviewDecision` 和 accepted-only writeback
+- 用户草稿决策、`GenerationReviewDecision` 和 accepted-only writeback
 - 大体量正文的审阅展示策略
 
 正式字段结构以 [`../contracts.md`](../contracts.md) 和 [`../../novel-continuation-mvp/contracts.md`](../../novel-continuation-mvp/contracts.md) 为准。
@@ -147,23 +147,24 @@ review gate 应显示自然语言下一步提示：
 
 内部 stage、run id、artifact path 和 action 名只放技术详情、debug drawer 或日志，不作为普通用户主状态。
 
-## 7. Chapter Acceptance
+## 7. User Draft Decision
 
-章节草稿通过基础校验后必须进入显式验收节点，并输出 `GenerationReviewDecision`。
+章节草稿生成后必须进入显式用户草稿决策节点，并输出 `GenerationReviewDecision`。
 
 状态语义：
 
-- `accepted`：允许进入写回摘要审阅或正式写回候选，当前版本可以成为 canon。
+- `accepted`：允许进入写回摘要审阅；用户确认写回后，当前版本才会成为后续可消费的 canon。
 - `rewrite_requested`：基于当前已通过的章节 brief、用户反馈和装配输入重写；不回写。
 - `replan_requested`：回到章节梗概层，修订 `ChapterPackage` / `ChapterBrief` 后再生成新稿；不回写。
 - `discarded`：当前版本仅保留运行产物，进入暂停或等待用户下一步；不回写。
 
 规则：
 
-- 未通过关键校验的正文不得直接进入下一章输入。
+- `continuity_report.canon_ready` 只表示连续性风险等级，不得作为自动回滚、自动拒绝或写回硬 gate。
+- Reviewer 报告与连续性报告只能作为用户决策参考，不得替代 `GenerationReviewDecision`。
 - 未被用户接受的正文不得写回人物档案、关系状态、时间线、世界状态或 Creative KB。
 - 被替换或作废的草稿只保留在 `runs` 等临时产物中。
-- 后续章节只允许消费“已验收且已回写”的 canon 状态。
+- 后续章节只允许消费“已被用户接受且已确认写回”的 canon 状态。
 
 ## 8. Writeback
 
@@ -176,7 +177,7 @@ accepted 后的写回至少包含：
 - 伏笔状态变化
 - 批次 / 大纲进度
 
-`StateDelta` 和 `MemoryWriteback` 必须能追溯到对应草稿版本、验收决策和来源。写回摘要本身应作为 review artifact；用户确认后才执行正式 Memory / KB 更新。
+`StateDelta` 和 `MemoryWriteback` 必须能追溯到对应草稿版本、用户草稿决策和来源。写回摘要本身应作为 review artifact；用户确认后才执行正式 Memory / KB 更新。
 
 ## Requirements
 
@@ -196,9 +197,9 @@ accepted 后的写回至少包含：
 
 系统 SHALL 将分层规划产物视为带依赖关系的 review artifact；当上游 artifact 修改并重新通过时，相关下游节点必须失效。
 
-### Requirement: 章节生成后必须支持验收或重生成
+### Requirement: 章节生成后必须支持用户决策或重生成
 
-系统 SHALL 在章节通过基础校验后提供显式验收节点，允许接受、基于反馈重写、退回章节梗概重规划，或作废本次草稿。
+系统 SHALL 在章节生成后提供显式用户草稿决策节点，允许接受、基于反馈重写、退回章节梗概重规划，或作废本次草稿。
 
 ### Requirement: 章节终稿必须 accepted 后才能回写
 

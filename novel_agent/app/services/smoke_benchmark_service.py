@@ -2340,19 +2340,17 @@ class AgenticSmokeBenchmarkService:
                     json.dumps(expansion_prompt, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                if bool(execution_result.get("canon_ready")):
-                    run_interactive._write_writer_review_decision_status(  # noqa: SLF001
-                        workflow=workflow,
-                        run_id=step_run_id,
-                        status="accepted",
-                    )
-                    workflow.continue_after_chapter_acceptance(run_id=step_run_id)
-                    writeback_result = workflow.approve_writeback(conn, run_id=step_run_id, book_id=book_id)
-                else:
-                    writeback_result = {
-                        "status": "skipped",
-                        "reason": "continuity_report_not_canon_ready",
-                    }
+                run_interactive._write_writer_review_decision_status(  # noqa: SLF001
+                    workflow=workflow,
+                    run_id=step_run_id,
+                    status="accepted",
+                    payload={
+                        "reviewer_type": "benchmark_script",
+                        "feedback_text": "benchmark scripted acceptance; continuity findings are retained as advisory risk.",
+                    },
+                )
+                workflow.continue_after_chapter_acceptance(run_id=step_run_id)
+                writeback_result = workflow.approve_writeback(conn, run_id=step_run_id, book_id=book_id)
                 (step_dir / "writeback_result.json").write_text(
                     json.dumps(writeback_result, ensure_ascii=False, indent=2),
                     encoding="utf-8",

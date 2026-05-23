@@ -270,13 +270,13 @@ class WorkbenchScreen(Screen[None]):
             self.pending_chapter_acceptance_form = event.form
             self.refresh_all()
             return
-        self._append_message("确认", f"已生成章节验收决策：{payload['status']}")
+        self._append_message("确认", f"已生成章节草稿决策：{payload['status']}")
         self.confirm_current_step(action_override="continue_after_chapter_acceptance", payload=payload)
 
     def on_chapter_acceptance_form_widget_cancelled(self, _event: ChapterAcceptanceFormWidget.Cancelled) -> None:
         self.chapter_acceptance_form_active = False
         self.pending_chapter_acceptance_form = None
-        self._append_message("系统", "已返回章节验收面板，未提交决策。")
+        self._append_message("系统", "已返回章节草稿决策面板，未提交决策。")
         self.refresh_all()
 
     def handle_invocation(self, invocation: CommandInvocation) -> None:
@@ -873,7 +873,7 @@ class WorkbenchScreen(Screen[None]):
     def show_chapter_acceptance_form(self, status: str) -> None:
         normalized = status.strip().lower()
         if normalized not in {"accepted", "revise_length", "replan_chapter", "discarded"}:
-            self._append_message("错误", "未知章节验收动作。")
+            self._append_message("错误", "未知章节草稿决策动作。")
             return
         self.chapter_acceptance_form_active = True
         self.scoped_revision_feedback_active = False

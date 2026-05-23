@@ -22,6 +22,12 @@ def _clean_tuple(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(_clean_text(value) for value in values if _clean_text(value))
 
 
+def _clean_list_field(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [_clean_text(item) for item in value if _clean_text(item)]
+
+
 class ScopedArtifactRevisionError(ValueError):
     """Base error for scoped artifact revision contract violations."""
 
@@ -270,13 +276,12 @@ REVISION_STAGE_POLICIES: dict[str, RevisionStagePolicy] = {
         review_stage="batch_review",
         artifact_types=("BatchPlan",),
         artifact_filenames={"BatchPlan": ("batch_plan.json",)},
-        schema_required_fields={"BatchPlan": ("batch_id", "book_id", "scope_start", "scope_end", "batch_goal")},
+        schema_required_fields={"BatchPlan": ("batch_id", "book_id", "chapters", "batch_goal")},
         allowed_fields={
             "BatchPlan": (
                 "batch_id",
                 "book_id",
-                "scope_start",
-                "scope_end",
+                "chapters",
                 "batch_goal",
                 "emotional_arc",
                 "conflict_arc",
@@ -864,6 +869,11 @@ def validate_upstream_freeze_constraints(
         book_id = _clean_text(freeze_a.get("book_id"))
         if book_id and _clean_text(revised_artifact.get("book_id")) != book_id:
             raise RevisionResultError("BatchPlan cannot switch book_id away from frozen Freeze A context")
+        current_batch = dict(allowed_context.get("current_batch") or {})
+        frozen_chapters = _clean_list_field(current_batch.get("chapters"))
+        revised_chapters = _clean_list_field(revised_artifact.get("chapters"))
+        if frozen_chapters and revised_chapters != frozen_chapters:
+            raise RevisionResultError("BatchPlan cannot change code-computed chapters")
     if artifact_type in {"ChapterPackage", "ChapterBrief"}:
         batch_plan = dict(upstream_freezes.get("freeze_b") or {})
         batch_id = _clean_text(batch_plan.get("batch_id"))

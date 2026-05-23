@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Sequence
 
 
 def build_book_continuation_plan_prompt(
@@ -119,6 +119,7 @@ def build_batch_plan_prompt(
     world_expansion_pack: dict[str, Any],
     character_cast_plan: dict[str, Any] | None,
     target_chapter_count: int,
+    chapters: Sequence[str],
 ) -> tuple[str, str]:
     system_prompt = (
         "你是小说续写 Layer 2 批次剧情规划助手。\n"
@@ -134,10 +135,14 @@ def build_batch_plan_prompt(
         "6. exit_hook 只能停在当前批次边界上的悬念，不得直接写成下一批次的完整事件。\n"
         "7. 必须继承 BookContinuationPlan 的 target_chapter_count、target_total_chars、default_chapter_target_chars "
         "以及当前批次覆盖的 chapter_outline_slots；不得擅自缩短用户授权的章节数或字数。\n"
+        "8. chapters 是后端根据 Writer Memory document_title_index 计算并冻结的章节列表，必须原样输出；"
+        "不得自行推导、改写、重排章节编号，也不要输出 scope_start 或 scope_end。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
         f"目标批次章节数: {target_chapter_count}\n\n"
+        "后端已冻结的当前批次章节列表：\n"
+        f"{json.dumps(list(chapters), ensure_ascii=False, indent=2)}\n\n"
         "BookContinuationPlan：\n"
         f"{json.dumps(book_continuation_plan, ensure_ascii=False, indent=2)}\n\n"
         "WorldExpansionPack：\n"
@@ -364,8 +369,7 @@ def _character_cast_example() -> dict[str, Any]:
 def _batch_plan_example() -> dict[str, Any]:
     return {
         "batch_id": "batch-01",
-        "scope_start": "chapter-11",
-        "scope_end": "chapter-13",
+        "chapters": ["chapter-11", "chapter-12", "chapter-13"],
         "batch_goal": "推进调查线并完成一次关系站队",
         "emotional_arc": "由紧绷防备转向有限信任",
         "conflict_arc": "追捕压力持续抬升",

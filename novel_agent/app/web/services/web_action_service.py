@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
 from ...cli.events import RunEvent
 from ...cli.status import WriterStatusPresenter
+from ...llm import JsonModelClient, ModelSettings
+from ...reviewer.registry import ReviewerRegistry
+from ...reviewer.reviewers import default_reviewers
+from ...reviewer.runtime import ReviewerRuntime
+from ...reviewer.suite import ReviewerSuite
+from ...reviewer.target_resolver import ReviewTargetResolver
+from ...reviewer.tools import ReviewerArtifactTool, ReviewerMemoryTool
+from ...schemas.reviewer_schema import ReviewBudget, ReviewContextPolicy, ReviewRequest, ReviewTarget, utc_now
 from ..schemas import DecisionCard, WebActionRequest, WebActionResult
+from .artifact_ids import decode_artifact_id
 from .artifact_view_service import ArtifactViewService
 from .job_manager import JobContext, JobManager
 from .web_session_service import WebSessionService
@@ -36,8 +46,9 @@ class WebActionService:
         "build_narrative_scene_index": "narrative_scene_index",
         "start_writer": "writer",
         "resume": "writer_resume",
+        "run_reviewer": "reviewer",
     }
-    _EXCLUSIVE_TASK_JOB_TYPES = {"read", "close_read", "kb", "narrative_scene_index", "writer", "writer_resume"}
+    _EXCLUSIVE_TASK_JOB_TYPES = {"read", "close_read", "kb", "narrative_scene_index", "writer", "writer_resume", "reviewer"}
 
     _WRITER_REVIEW_ACTIONS = {
         "confirm_current_step",
@@ -83,6 +94,7 @@ class WebActionService:
         "build_narrative_scene_index",
         "start_writer",
         "resume",
+        "run_reviewer",
         "confirm_current_step",
         "approve_writer_artifact",
         "request_writer_artifact_revision",
@@ -251,8 +263,9 @@ class WebActionService:
                 "start_close_read": "已准备开始阅读，进度会通过后台事件更新。",
                 "build_creative_kb": "已准备构建 Creative KB，进度会通过后台事件更新。",
                 "build_narrative_scene_index": "已准备构建叙事场景索引，进度会通过后台事件更新。",
-                "start_writer": "已收到续写意图，Writer 正在生成下一条可审阅内容；需要你回答、审阅或验收时会继续发到会话里。",
+                "start_writer": "已收到续写意图，Writer 正在生成下一条可审阅内容；需要你回答、审阅、验收或决定草稿时会继续发到会话里。",
                 "resume": "已准备恢复最近一次未完成流程。",
+                "run_reviewer": "已准备运行 Reviewer，报告完成后会发到会话里。",
             }[action]
         self.session_service.append_message(task_id, role="assistant", content=message, payload={"job_id": job.job_id})
         return WebActionResult(
@@ -277,6 +290,8 @@ class WebActionService:
             return await self._run_writer(context)
         if context.job_type == "writer_resume":
             return await self._run_writer_resume(context)
+        if context.job_type == "reviewer":
+            return await self._run_reviewer(context)
         raise ValueError(f"不支持的后台任务类型：{context.job_type}")
 
     async def _run_read_pipeline(self, context: JobContext, *, read_only: bool) -> dict[str, Any]:
@@ -493,6 +508,112 @@ class WebActionService:
         )
         return result_payload
 
+    async def _run_reviewer(self, context: JobContext) -> dict[str, Any]:
+        payload = dict(context.payload or {})
+        api_key = self._require_api_key()
+        registry = ReviewerRegistry(default_reviewers())
+        reviewer_ids = self._reviewer_ids_from_payload(payload)
+        target_type = str(payload.get("target_type") or "").strip()
+        if not target_type and len(reviewer_ids) == 1:
+            manifest = registry.get(reviewer_ids[0]).manifest()
+            if len(manifest.supported_target_types) == 1:
+                target_type = manifest.supported_target_types[0]
+        if not target_type:
+            raise ValueError("Reviewer action 缺少 target_type。")
+        for reviewer_id in reviewer_ids:
+            registry.get(reviewer_id, target_type=target_type)
+
+        target = self._review_target_from_payload(context, payload=payload, target_type=target_type)
+        budget = self._review_budget_from_payload(registry=registry, reviewer_ids=reviewer_ids, payload=payload)
+        request = ReviewRequest(
+            review_request_id=str(payload.get("review_request_id") or f"web-review-{context.job_id}"),
+            book_id=context.task_id,
+            target=target,
+            reviewer_ids=reviewer_ids,
+            context_policy=ReviewContextPolicy(
+                purpose="writer_assist",
+                allow_memory=True,
+                allow_kb=True,
+                allow_writer_artifacts=True,
+                allow_reference_truth=False,
+                allowed_artifact_kinds=[
+                    "outline",
+                    "synopsis",
+                    "chapter_brief",
+                    "draft",
+                    "book_plan",
+                    "batch_plan",
+                    "chapter_package",
+                ],
+                leakage_guard="prefix_only",
+                notes="Web UI Reviewer 入口只提供参考评分和修改意见，不推进 Writer 或 benchmark 决策。",
+            ),
+            budget=budget,
+            created_at=utc_now(),
+            user_focus=str(payload.get("user_focus") or ""),
+            metadata={
+                "source": str(payload.get("source") or "web_ui"),
+                "run_id": str(payload.get("run_id") or ""),
+                "review_id": str(payload.get("review_id") or ""),
+                "artifact_kind": str(payload.get("artifact_kind") or ""),
+                "reviewer_label": str(payload.get("reviewer_label") or ""),
+            },
+        )
+        snapshot = self.session_service.facade.task_snapshot(book_id=context.task_id)
+        db_path = Path(snapshot.db_path or self.session_service.facade.db_path_for_book(context.task_id))
+        if not db_path.exists():
+            raise FileNotFoundError("Reviewer 需要先完成任务索引和 Memory/KB 准备，当前没有可用数据库。")
+        artifact_root = self.session_service.repo_root / "runs" / "web_reviewer" / context.task_id / context.job_id
+        model_client = JsonModelClient(self._reviewer_model_settings(api_key=api_key, payload=payload))
+        runtime = ReviewerRuntime(
+            model_client=model_client,
+            target_resolver=ReviewTargetResolver(repo_root=self.session_service.repo_root),
+            memory_tool=ReviewerMemoryTool(repo_root=self.session_service.repo_root),
+            artifact_tool=ReviewerArtifactTool(repo_root=self.session_service.repo_root),
+            artifact_root=artifact_root,
+        )
+        suite = ReviewerSuite(registry=registry, runtime=runtime, artifact_root=artifact_root)
+        label = str(payload.get("reviewer_label") or "Reviewer")
+        context.emit("progress", f"开始运行 {label}。", payload={"reviewer_ids": reviewer_ids, "target_type": target_type})
+
+        def call() -> dict[str, Any]:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                return suite.run(request, conn=conn).to_dict()
+
+        report_payload = await asyncio.to_thread(call)
+        report_path = artifact_root / request.review_request_id / "suite_report.json"
+        message = self._reviewer_report_message(label=label, report=report_payload)
+        self.session_service.append_message(
+            context.task_id,
+            role="assistant",
+            content=message,
+            payload={
+                "channel": "reviewer_report",
+                "run_id": str(payload.get("run_id") or ""),
+                "review_request_id": request.review_request_id,
+                "reviewer_ids": reviewer_ids,
+                "target_id": target.target_id,
+                "target_type": target.target_type,
+                "report_path": str(report_path),
+            },
+        )
+        context.emit(
+            "progress",
+            f"{label} 已完成。",
+            payload={
+                "review_request_id": request.review_request_id,
+                "status": report_payload.get("status"),
+                "overall_score": report_payload.get("overall_score"),
+                "report_path": str(report_path),
+            },
+        )
+        return {
+            "review_request": request.to_dict(),
+            "suite_report": report_payload,
+            "report_path": str(report_path),
+        }
+
     async def _call_facade_with_events(self, context: JobContext, call: Any) -> dict[str, Any]:
         event_stream = getattr(self.session_service.facade, "event_stream", None)
         if event_stream is not None and hasattr(event_stream, "clear"):
@@ -545,6 +666,130 @@ class WebActionService:
         if not api_key:
             raise ValueError("未检测到 DEEPSEEK_API_KEY。请先 source ~/.bash_profile 后重启 Web 服务。")
         return api_key
+
+    @classmethod
+    def _reviewer_ids_from_payload(cls, payload: Mapping[str, Any]) -> list[str]:
+        reviewer_ids = cls._coerce_text_list(payload.get("reviewer_ids"))
+        reviewer_id = str(payload.get("reviewer_id") or "").strip()
+        if reviewer_id and reviewer_id not in reviewer_ids:
+            reviewer_ids.insert(0, reviewer_id)
+        if not reviewer_ids:
+            raise ValueError("Reviewer action 必须显式指定 reviewer_id。")
+        return reviewer_ids
+
+    def _review_target_from_payload(
+        self,
+        context: JobContext,
+        *,
+        payload: Mapping[str, Any],
+        target_type: str,
+    ) -> ReviewTarget:
+        artifact_path = self._reviewer_artifact_path(payload)
+        document_ids = self._coerce_text_list(payload.get("document_ids"))
+        text = str(payload.get("text") or payload.get("target_text") or "").strip()
+        target_id = str(
+            payload.get("target_id")
+            or payload.get("artifact_id")
+            or payload.get("draft_id")
+            or (Path(artifact_path).name if artifact_path else "")
+            or context.job_id
+        ).strip()
+        if not text and not document_ids and not artifact_path:
+            raise ValueError("Reviewer action 缺少可评审正文：需要 text、document_ids 或 artifact_path。")
+        return ReviewTarget(
+            target_id=target_id,
+            target_type=target_type,
+            text=text,
+            document_ids=document_ids,
+            artifact_id=str(payload.get("artifact_id") or ""),
+            artifact_path=artifact_path,
+            chapter_id=str(payload.get("chapter_id") or ""),
+            metadata={
+                "run_id": str(payload.get("run_id") or ""),
+                "review_id": str(payload.get("review_id") or ""),
+                "draft_id": str(payload.get("draft_id") or ""),
+                "artifact_kind": str(payload.get("artifact_kind") or ""),
+            },
+        )
+
+    def _reviewer_artifact_path(self, payload: Mapping[str, Any]) -> str:
+        raw_path = str(payload.get("artifact_path") or payload.get("draft_path") or "").strip()
+        if not raw_path:
+            artifact_id = str(payload.get("artifact_id") or "").strip()
+            if artifact_id:
+                try:
+                    descriptor = decode_artifact_id(artifact_id)
+                    raw_path = str(descriptor.get("path") or "")
+                except Exception:
+                    raw_path = ""
+        if not raw_path:
+            return ""
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = self.session_service.repo_root / path
+        return str(path.resolve())
+
+    @staticmethod
+    def _review_budget_from_payload(
+        *,
+        registry: ReviewerRegistry,
+        reviewer_ids: list[str],
+        payload: Mapping[str, Any],
+    ) -> ReviewBudget:
+        raw_budget = payload.get("budget")
+        if isinstance(raw_budget, Mapping):
+            return ReviewBudget.from_dict(dict(raw_budget))
+        if len(reviewer_ids) == 1:
+            manifest = registry.get(reviewer_ids[0]).manifest()
+            return ReviewBudget.from_dict(manifest.default_budget)
+        return ReviewBudget()
+
+    @classmethod
+    def _reviewer_model_settings(cls, *, api_key: str, payload: Mapping[str, Any]) -> ModelSettings:
+        return ModelSettings(
+            model_type=str(payload.get("model_type") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_MODEL_TYPE") or "OpenAIModel"),
+            model_name=str(payload.get("model_name") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_MODEL") or "deepseek-chat"),
+            provider=str(payload.get("provider") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_PROVIDER") or "openai_compatible"),
+            base_url=str(
+                payload.get("base_url")
+                or os.getenv("NOVEL_AGENT_WEB_REVIEWER_BASE_URL")
+                or os.getenv("DEEPSEEK_BASE_URL")
+                or "https://api.deepseek.com"
+            ),
+            api_key=api_key,
+            api_key_env="DEEPSEEK_API_KEY",
+            temperature=float(payload.get("temperature") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_TEMPERATURE") or 0.2),
+            max_output_tokens=int(payload.get("max_output_tokens") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_MAX_OUTPUT_TOKENS") or 8192),
+            timeout_seconds=int(payload.get("timeout_seconds") or os.getenv("NOVEL_AGENT_WEB_REVIEWER_TIMEOUT_SECONDS") or 180),
+            request_retry_attempts=int(payload.get("request_retry_attempts") or 3),
+            retry_without_thinking_on_failure=True,
+            dry_run=False,
+        )
+
+    @staticmethod
+    def _reviewer_report_message(*, label: str, report: Mapping[str, Any]) -> str:
+        reviewer_reports = [item for item in report.get("reviewer_reports") or [] if isinstance(item, Mapping)]
+        score = report.get("overall_score")
+        if score is None and len(reviewer_reports) == 1:
+            score = reviewer_reports[0].get("score")
+        score_text = f"{score}/100" if score is not None else "未产生评分"
+        summary = str(report.get("summary_zh") or "").strip()
+        if not summary and reviewer_reports:
+            summary = str(reviewer_reports[0].get("summary_zh") or "").strip()
+        findings = [item for item in report.get("top_findings") or [] if isinstance(item, Mapping)]
+        if not findings and reviewer_reports:
+            findings = [item for item in reviewer_reports[0].get("findings") or [] if isinstance(item, Mapping)]
+        finding_texts: list[str] = []
+        for index, finding in enumerate(findings[:3], start=1):
+            message = str(finding.get("message_zh") or "").strip()
+            suggestion = str(finding.get("suggestion_zh") or "").strip()
+            if message and suggestion:
+                finding_texts.append(f"{index}. {message} 建议：{suggestion}")
+            elif message:
+                finding_texts.append(f"{index}. {message}")
+        details = f" 主要意见：{' '.join(finding_texts)}" if finding_texts else ""
+        summary_text = f" {summary}" if summary else ""
+        return f"{label} 已完成。参考评分：{score_text}。{summary_text}{details}".strip()
 
     @staticmethod
     def _writer_dry_run_requested(payload: Mapping[str, Any]) -> bool:
@@ -737,7 +982,7 @@ class WebActionService:
         )
 
     def _defer_chapter_acceptance(self, *, task_id: str, payload: dict[str, Any]) -> WebActionResult:
-        message = "已保留当前章节验收点，稍后可以继续处理。"
+        message = "已保留当前章节草稿决策点，稍后可以继续处理。"
         self.session_service.append_message(task_id, role="assistant", content=message, payload={"reason": payload.get("reason", "")})
         return WebActionResult(
             action="defer_chapter_acceptance",
@@ -844,7 +1089,7 @@ class WebActionService:
                 or ""
             ).strip()
             if action in {"rewrite_chapter", "replan_chapter"} and not feedback_text:
-                raise ValueError("请先输入你的草稿验收反馈。")
+                    raise ValueError("请先输入你的草稿调整反馈。")
             normalized["feedback_text"] = feedback_text
             normalized["source_message_id"] = str(payload.get("source_message_id") or "")
             normalized["chapter_id"] = str(payload.get("chapter_id") or payload.get("current_chapter_id") or "")
@@ -924,7 +1169,7 @@ class WebActionService:
             "apply_scoped_artifact_revision": "已准备应用候选修改。",
             "discard_scoped_artifact_revision": "已准备放弃候选修改。",
             "reject_scoped_artifact_revision": "已准备放弃候选修改。",
-            "accept_chapter": "已准备接受本章并进入写回确认。",
+            "accept_chapter": "已接受本章草稿，接下来进入写回确认。",
             "rewrite_chapter": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "revise_chapter_length": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "replan_chapter": "已提交章节梗概调整请求，Writer 会回到章节规划。",
@@ -944,7 +1189,7 @@ class WebActionService:
             "apply_scoped_artifact_revision": "正在应用受控修订候选。",
             "discard_scoped_artifact_revision": "正在放弃受控修订候选。",
             "reject_scoped_artifact_revision": "正在放弃受控修订候选。",
-            "accept_chapter": "正在处理章节验收。",
+            "accept_chapter": "正在处理章节草稿决策。",
             "rewrite_chapter": "正在根据反馈重写当前章。",
             "revise_chapter_length": "正在根据反馈重写当前章。",
             "replan_chapter": "正在返回章节梗概调整。",
@@ -1005,7 +1250,7 @@ class WebActionService:
                 DecisionCard(
                     card_id=f"{task_id}:chapter-acceptance",
                     title=status.step,
-                    body=status.message or "当前章节草稿已经生成，请选择验收方式。",
+                    body=status.message or "当前章节草稿已经生成，请选择处理方式。",
                     actions=[
                         {
                             "action": "rewrite_chapter" if item.workflow_action == "revise_chapter_length" else item.workflow_action,

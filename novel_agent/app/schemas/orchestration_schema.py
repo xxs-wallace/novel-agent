@@ -1427,8 +1427,7 @@ class WorldExpansionPack:
 class BatchPlan:
     batch_id: str
     book_id: str
-    scope_start: str
-    scope_end: str
+    chapters: list[str]
     batch_goal: str
     emotional_arc: str = ""
     conflict_arc: str = ""
@@ -1446,8 +1445,7 @@ class BatchPlan:
     def __post_init__(self) -> None:
         self.batch_id = _normalize_text(self.batch_id)
         self.book_id = _normalize_text(self.book_id)
-        self.scope_start = _normalize_text(self.scope_start)
-        self.scope_end = _normalize_text(self.scope_end)
+        self.chapters = _normalize_string_list(self.chapters)
         self.batch_goal = _normalize_text(self.batch_goal)
         self.emotional_arc = _normalize_text(self.emotional_arc)
         self.conflict_arc = _normalize_text(self.conflict_arc)
@@ -1456,6 +1454,8 @@ class BatchPlan:
         self.planned_character_beats = _normalize_string_list(self.planned_character_beats)
         self.exit_hook = _normalize_text(self.exit_hook)
         self.target_chapter_count = max(0, int(self.target_chapter_count or 0))
+        if self.chapters:
+            self.target_chapter_count = len(self.chapters)
         self.target_total_chars = max(0, int(self.target_total_chars or 0))
         self.default_chapter_target_chars = max(0, int(self.default_chapter_target_chars or 0))
         self.chapter_outline_slots = [dict(item) for item in self.chapter_outline_slots if isinstance(item, dict)]
@@ -1464,8 +1464,7 @@ class BatchPlan:
         return {
             "batch_id": self.batch_id,
             "book_id": self.book_id,
-            "scope_start": self.scope_start,
-            "scope_end": self.scope_end,
+            "chapters": list(self.chapters),
             "batch_goal": self.batch_goal,
             "emotional_arc": self.emotional_arc,
             "conflict_arc": self.conflict_arc,

@@ -558,8 +558,7 @@ def test_chapter_package_is_constrained_to_batch_boundaries(tmp_path: Path) -> N
     batch_plan = BatchPlan(
         batch_id="batch-01",
         book_id="book-1",
-        scope_start="chapter-1",
-        scope_end="chapter-2",
+        chapters=["chapter-1", "chapter-2"],
         batch_goal="主角确认邀请并离开旧环境。",
         must_resolve=["主角确认邀请", "主角离开旧环境"],
         must_not_consume=["不得提前进入学院正课"],
@@ -1275,7 +1274,43 @@ def test_restricted_writer_executor_blocks_illegal_relationship_progression(tmp_
     assert "missing_relationship_bridge" in issue_types
 
 
-def test_execute_current_chapter_still_registers_draft_review_when_continuity_blocks(tmp_path: Path) -> None:
+def test_executor_writeback_allows_user_acceptance_when_continuity_has_risk(tmp_path: Path) -> None:
+    db, orchestrator = _prepare_freeze_c_chain(tmp_path)
+    chapter_package_path = orchestrator.run_writer.layout.run_dir("run-1") / "chapter_package.json"
+    chapter_package_doc = json.loads(chapter_package_path.read_text(encoding="utf-8"))
+    chapter_id = str(chapter_package_doc["data"]["chapters"][0]["chapter_id"])
+    chapter_package_doc["data"]["chapters"][0]["relationship_targets"][0]["required_bridge"] = ["共同危机", "公开站队"]
+    chapter_package_path.write_text(json.dumps(chapter_package_doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    orchestrator.confirm_chapter_package(run_id="run-1")
+    _write_accepted_review_decision(orchestrator, run_id="run-1", chapter_id=chapter_id)
+
+    executor = RestrictedWriterExecutor(
+        repo_root=orchestrator.repo_root,
+        run_writer=orchestrator.run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    with db.connect() as conn:
+        executor.prepare_execution_input(conn, run_id="run-1", book_id="book-1", chapter_id=chapter_id)
+        executor.confirm_freeze_d(run_id="run-1")
+        result = executor.execute_frozen_chapter(
+            conn,
+            run_id="run-1",
+            book_id="book-1",
+            commit_writeback=True,
+            auto_freeze_e=False,
+        )
+        conn.commit()
+
+    assert result["canon_ready"] is False
+    assert result["accepted_for_writeback"] is True
+    assert result["writeback_committed"] is True
+    assert result["continuity_report"]["writeback_blocked_reason"] == ""
+    assert "continuity_risk" in result["continuity_report"]["summary"]
+    memory_writeback_path = orchestrator.run_writer.layout.run_dir("run-1") / "memory_writeback.json"
+    assert memory_writeback_path.exists()
+
+
+def test_execute_current_chapter_registers_draft_decision_when_continuity_has_risk(tmp_path: Path) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
     chapter_package_path = planner_orchestrator.run_writer.layout.run_dir("run-1") / "chapter_package.json"
     chapter_package_doc = json.loads(chapter_package_path.read_text(encoding="utf-8"))
@@ -1425,7 +1460,7 @@ def test_executor_requires_accepted_review_decision_before_auto_writeback(tmp_pa
     assert result["review_decision_status"] == ""
     assert result["memory_writeback"] == {}
     assert result["continuity_report"]["accepted_for_writeback"] is False
-    assert result["continuity_report"]["writeback_blocked_reason"] == "review_not_accepted"
+    assert result["continuity_report"]["writeback_blocked_reason"] == "user_decision_not_accepted"
     memory_writeback_path = orchestrator.run_writer.layout.run_dir("run-1") / "memory_writeback.json"
     assert not memory_writeback_path.exists()
     registry_path = orchestrator.run_writer.layout.run_dir("run-1") / "planned_character_registry.json"
@@ -1490,7 +1525,7 @@ def test_executor_writeback_promotes_planned_character_to_formal_memory_after_ac
     assert freeze_e.status == "frozen"
 
 
-def test_batch_workflow_execute_current_chapter_freezes_e_and_persists_memory_writeback_after_acceptance(
+def test_batch_workflow_execute_current_chapter_routes_accepted_draft_to_writeback_review_without_auto_commit(
     tmp_path: Path,
 ) -> None:
     db, planner_orchestrator = _prepare_freeze_c_chain(tmp_path)
@@ -1532,19 +1567,22 @@ def test_batch_workflow_execute_current_chapter_freezes_e_and_persists_memory_wr
     assert result["canon_ready"] is True
     assert result["accepted_for_writeback"] is True
     assert result["review_decision_status"] == "accepted"
-    assert result["writeback_committed"] is True
-    assert "顾迟" in result["memory_writeback"]["activated_planned_characters"]
+    assert result["writeback_committed"] is False
+    assert result["memory_writeback"] == {}
     run_dir = workflow.run_writer.layout.run_dir("run-1")
-    assert (run_dir / "memory_writeback.json").exists()
+    assert not (run_dir / "memory_writeback.json").exists()
     freeze_e = workflow.run_writer.get_freeze_record("run-1", "freeze_e")
-    assert freeze_e is not None
-    assert freeze_e.status == "frozen"
+    assert freeze_e is None
+    state = workflow.load_workflow_state(run_id="run-1")
+    assert state is not None
+    assert state["current_stage"] == "writeback_review"
+    assert state["pending_checkpoint"]["stage"] == "writeback_review"
     draft_index_doc = json.loads((run_dir / "draft_retention_index.json").read_text(encoding="utf-8"))
     draft_record = draft_index_doc["data"]["drafts"]["draft-001"]
     assert draft_record["retention_status"] == "accepted"
     assert draft_record["eligible_for_writeback"] is True
     assert draft_record["eligible_for_canon"] is True
-    assert draft_record["memory_writeback_source_path"].endswith("memory_writeback.json")
+    assert draft_record["memory_writeback_source_path"] == ""
 
 
 def _prepare_batch_execution_workflow(

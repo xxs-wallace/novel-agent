@@ -11,6 +11,7 @@ from ...repos.db import NovelAgentDB
 from ...run_interactive import resolve_writer_memory_db_path
 from ..schemas import ArtifactCard, ArtifactSection, ArtifactTable, ArtifactView
 from .artifact_ids import decode_artifact_id
+from .reviewer_action_specs import artifact_reviewer_actions, reviewer_specs_for_writer_kind
 
 
 class ArtifactViewService:
@@ -130,7 +131,7 @@ class ArtifactViewService:
                 sections=[
                     ArtifactSection(title="当前状态", body=status.step),
                     ArtifactSection(title="待确认步骤", body=status.next_action),
-                    ArtifactSection(title="产物浏览", body="请在 Writer 目录树中查看规划、草稿、验收与写回摘要。"),
+                    ArtifactSection(title="产物浏览", body="请在 Writer 目录树中查看规划、草稿、草稿决策与写回摘要。"),
                     ArtifactSection(title="下一步", body=status.next_action or "等待你选择下一步"),
                 ],
                 technical_available=bool(path and path.exists()),
@@ -160,12 +161,13 @@ class ArtifactViewService:
             return self._planning_notebook_view(artifact_id, path)
         if kind == "research_trace":
             return self._research_trace_view(artifact_id, path)
+        run_id = str(descriptor.get("run_id") or "")
         if kind == "book_plan":
-            return self._book_plan_view(artifact_id, path)
+            return self._book_plan_view(artifact_id, path, task_id=task_id, run_id=run_id)
         if kind == "batch_plan":
-            return self._batch_plan_view(artifact_id, path)
+            return self._batch_plan_view(artifact_id, path, task_id=task_id, run_id=run_id)
         if kind == "chapter_package":
-            return self._chapter_package_view(artifact_id, path)
+            return self._chapter_package_view(artifact_id, path, task_id=task_id, run_id=run_id)
         if kind == "length_plan":
             return self._length_plan_view(artifact_id, path)
         if kind == "execution_input":
@@ -173,7 +175,7 @@ class ArtifactViewService:
         if kind == "writing_guidance":
             return self._writing_guidance_view(artifact_id, path)
         if kind == "draft":
-            return self._draft_view(artifact_id, path)
+            return self._draft_view(artifact_id, path, task_id=task_id, run_id=run_id)
         if kind == "generation_review":
             return self._generation_review_view(artifact_id, path)
         if kind == "writeback":
@@ -527,13 +529,20 @@ class ArtifactViewService:
             technical_available=True,
         )
 
-    def _book_plan_view(self, artifact_id: str, path: Path) -> ArtifactView:
+    def _book_plan_view(self, artifact_id: str, path: Path, *, task_id: str = "", run_id: str = "") -> ArtifactView:
         payload = self._load_json(path)
         climax = payload.get("climax_plan") if isinstance(payload.get("climax_plan"), Mapping) else {}
         return ArtifactView(
             artifact_id=artifact_id,
             title="全书续写规划",
             kind="writer_book_plan",
+            actions=self._reviewer_actions(
+                writer_kind="book_plan",
+                task_id=task_id,
+                run_id=run_id,
+                artifact_id=artifact_id,
+                artifact_path=path,
+            ),
             sections=[
                 ArtifactSection(title="续写目标", body=self._first_text(payload, "continuation_goal", "goal")),
                 ArtifactSection(title="故事规模", body=self._book_scale_text(payload)),
@@ -547,24 +556,44 @@ class ArtifactViewService:
             technical_available=True,
         )
 
-    def _batch_plan_view(self, artifact_id: str, path: Path) -> ArtifactView:
+    def _batch_plan_view(self, artifact_id: str, path: Path, *, task_id: str = "", run_id: str = "") -> ArtifactView:
         payload = self._load_json(path)
         return ArtifactView(
             artifact_id=artifact_id,
             title="本批剧情大纲",
             kind="writer_batch_plan",
+            actions=self._reviewer_actions(
+                writer_kind="batch_plan",
+                task_id=task_id,
+                run_id=run_id,
+                artifact_id=artifact_id,
+                artifact_path=path,
+            ),
             sections=[
-                ArtifactSection(title="起点状态", body=self._first_text(payload, "start_state", "entry_state")),
+                ArtifactSection(title="本批章节", body=self._list_or_mapping_text(payload.get("chapters"))),
                 ArtifactSection(title="阶段目标", body=self._first_text(payload, "stage_goal", "goal", "batch_goal")),
-                ArtifactSection(title="主要冲突", body=self._first_text(payload, "main_conflict", "central_conflict", "conflict")),
-                ArtifactSection(title="情绪节奏", body=self._first_text(payload, "emotional_pacing", "pacing_notes", "mood")),
+                ArtifactSection(
+                    title="主要冲突",
+                    body=self._first_text(payload, "main_conflict", "central_conflict", "conflict", "conflict_arc"),
+                ),
+                ArtifactSection(
+                    title="情绪节奏",
+                    body=self._first_text(payload, "emotional_pacing", "pacing_notes", "mood", "emotional_arc"),
+                ),
                 ArtifactSection(title="出口钩子", body=self._first_text(payload, "exit_hook", "expected_closure", "exit_state", "ending_state")),
-                ArtifactSection(title="禁止提前消费项", body=self._list_or_mapping_text(payload.get("forbidden_early_consumption") or payload.get("forbidden_items"))),
+                ArtifactSection(
+                    title="禁止提前消费项",
+                    body=self._list_or_mapping_text(
+                        payload.get("must_not_consume")
+                        or payload.get("forbidden_early_consumption")
+                        or payload.get("forbidden_items")
+                    ),
+                ),
             ],
             technical_available=True,
         )
 
-    def _chapter_package_view(self, artifact_id: str, path: Path) -> ArtifactView:
+    def _chapter_package_view(self, artifact_id: str, path: Path, *, task_id: str = "", run_id: str = "") -> ArtifactView:
         payload = self._load_json(path)
         chapters = [item for item in payload.get("chapters", []) if isinstance(item, Mapping)]
         rows = [
@@ -582,6 +611,13 @@ class ArtifactViewService:
             artifact_id=artifact_id,
             title="章节标题与梗概",
             kind="writer_chapter_package",
+            actions=self._reviewer_actions(
+                writer_kind="chapter_package",
+                task_id=task_id,
+                run_id=run_id,
+                artifact_id=artifact_id,
+                artifact_path=path,
+            ),
             tables=[ArtifactTable(title="章节梗概", columns=["章节", "目标", "场景节拍", "人物行动", "关系推进", "必须出现/禁止项"], rows=rows)],
             sections=[
                 ArtifactSection(title="待确认问题", body=self._list_or_mapping_text(payload.get("open_questions") or payload.get("review_notes"))),
@@ -649,12 +685,19 @@ class ArtifactViewService:
             technical_available=True,
         )
 
-    def _draft_view(self, artifact_id: str, path: Path) -> ArtifactView:
+    def _draft_view(self, artifact_id: str, path: Path, *, task_id: str = "", run_id: str = "") -> ArtifactView:
         text = path.read_text(encoding="utf-8", errors="replace")
         return ArtifactView(
             artifact_id=artifact_id,
             title="正文草稿",
             kind="writer_draft",
+            actions=self._reviewer_actions(
+                writer_kind="draft",
+                task_id=task_id,
+                run_id=run_id,
+                artifact_id=artifact_id,
+                artifact_path=path,
+            ),
             sections=[
                 ArtifactSection(title="字数", body=str(len(text))),
                 ArtifactSection(title="开头预览", body=text[:300]),
@@ -662,6 +705,25 @@ class ArtifactViewService:
             ],
             markdown=text,
             technical_available=True,
+        )
+
+    def _reviewer_actions(
+        self,
+        *,
+        writer_kind: str,
+        task_id: str,
+        run_id: str,
+        artifact_id: str,
+        artifact_path: Path,
+    ):
+        return artifact_reviewer_actions(
+            reviewer_specs_for_writer_kind(writer_kind),
+            task_id=task_id,
+            run_id=run_id,
+            target_id=artifact_id,
+            artifact_id=artifact_id,
+            artifact_kind=writer_kind,
+            artifact_path=str(artifact_path),
         )
 
     def _generation_review_view(self, artifact_id: str, path: Path) -> ArtifactView:
@@ -674,13 +736,13 @@ class ArtifactViewService:
         }.get(str(payload.get("status") or ""), str(payload.get("status") or "待决定"))
         return ArtifactView(
             artifact_id=artifact_id,
-            title="验收决策",
+            title="草稿决策",
             kind="writer_generation_review",
             sections=[
                 ArtifactSection(title="当前决定", body=status_label),
                 ArtifactSection(title="反馈原文", body=str(payload.get("feedback_text") or "")),
                 ArtifactSection(title="下一步", body=self._generation_next_action_text(str(payload.get("next_action") or ""))),
-                ArtifactSection(title="写回边界", body="只有接受本章才会进入写回摘要审阅；其它分支不会写入 Memory 或 Creative KB。"),
+                ArtifactSection(title="写回边界", body="只有用户接受本章才会进入写回摘要审阅；Reviewer 与连续性报告只提供参考，不会自动写入 Memory 或 Creative KB。"),
             ],
             technical_available=True,
         )
@@ -1303,7 +1365,7 @@ class ArtifactViewService:
             "execution_input": "本章写作材料",
             "writing_guidance": "章节写作指导",
             "draft": "正文草稿",
-            "generation_review": "验收决策",
+            "generation_review": "草稿决策",
             "writeback": "写回摘要",
         }.get(kind, "Writer 产物")
 

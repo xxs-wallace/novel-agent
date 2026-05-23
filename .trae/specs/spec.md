@@ -13,6 +13,7 @@
 - 创作知识库与桥段检索：[`creative-knowledge-base/spec.md`](creative-knowledge-base/spec.md)，作为 Narrative Indexer 下的创作参考索引族
 - Writer 分层生成：[`writer-agent-layered-generation/spec.md`](writer-agent-layered-generation/spec.md)
 - Outline Analyzer 只读剧情分析：[`outline-analyzer/spec.md`](outline-analyzer/spec.md)
+- Reviewer 独立评审：[`reviewer-agent/spec.md`](reviewer-agent/spec.md)
 - 评测与 benchmark：[`agentic-benchmark/spec.md`](agentic-benchmark/spec.md)
 
 ## Product Principle
@@ -245,7 +246,7 @@
 - “正文草稿已生成”
 - “发现需要确认的问题”
 
-### 9. 验收当前章节
+### 9. 决定当前章节草稿
 
 目标：让用户决定草稿是否进入正式结果。
 
@@ -259,7 +260,7 @@
 
 用户可见状态 SHOULD 使用：
 
-- “请验收当前章节”
+- “请决定当前章节草稿”
 - “本章已接受，等待确认写回”
 - “将返回长度计划调整”
 - “将返回章节梗概调整”
@@ -303,7 +304,7 @@
 | `freeze_d_review` | 请确认本章写作材料 |
 | `freeze_d` | 本章写作材料已确认 |
 | `execute_current_chapter` | 正在生成正文草稿 |
-| `wait_chapter_acceptance` | 请验收当前章节 |
+| `wait_chapter_acceptance` | 请决定当前章节草稿 |
 | `writeback_review` | 请确认写回 |
 | `freeze_e` | 本章已完成 |
 | `artifact saved` | 已保存你的修改 |
@@ -398,7 +399,7 @@ GUI SHALL NOT 只把 subprocess stdout 当作唯一界面。日志可以存在�
 
 ### Writer 层
 
-负责全书规划、世界观补充、人物补充、批次规划、章节梗概、正文生成、章节验收与写回。
+负责全书规划、世界观补充、人物补充、批次规划、章节梗概、正文生成、用户草稿决策与写回。
 
 详见 [`writer-agent-layered-generation/spec.md`](writer-agent-layered-generation/spec.md)。
 

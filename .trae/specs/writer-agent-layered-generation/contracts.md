@@ -2,14 +2,14 @@
 
 ## 1. 目的
 
-本文件用于稳定 Writer Agent 的 artifact 审阅、章节验收、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
+本文件用于稳定 Writer Agent 的 artifact 审阅、用户草稿决策、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
 
 - [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
 - [design.md](.trae/specs/writer-agent-layered-generation/design.md)
 - [../web-interface/spec.md](.trae/specs/web-interface/spec.md)
 - [../web-interface/design.md](.trae/specs/web-interface/design.md)
 
-本 contract 只定义模块间如何传递“artifact 审阅决策”“章节验收决策”“大纲研究补充问题与回答”，不替代各层内部实现。
+本 contract 只定义模块间如何传递“artifact 审阅决策”“用户草稿决策”“大纲研究补充问题与回答”，不替代各层内部实现。
 
 ## 2. Design Principles
 
@@ -25,14 +25,14 @@
 ### 3.1 命名约定
 
 - `review_id`: 一次 artifact 审阅决策的唯一标识
-- `decision_id`: 一次章节草稿验收决策的唯一标识
+- `decision_id`: 一次章节草稿用户决策的唯一标识
 - `run_id`: 一次生成运行的标识
 - `artifact_kind`: 被审阅 artifact 的类型
 - `artifact_id`: 被审阅 artifact 的稳定标识
 - `artifact_path`: 被审阅 artifact 的落盘路径
 - `chapter_id`: 当前章节的稳定标识
 - `draft_id`: 当前待审草稿版本标识
-- `reviewer_type`: 发起决策的主体类型
+- `reviewer_type`: 发起决策的主体类型；对 `GenerationReviewDecision` 而言通常为 `user` 或显式测试脚本来源，不表示独立 Reviewer 模块
 - `question_set_id`: 一组待用户回答问题的稳定标识
 - `question_id`: 问题集内单个问题的稳定标识
 - `source_message_id`: 触发结构化 action 的聊天消息标识
@@ -68,6 +68,8 @@
 - `chapter_package`
 - `chapter_brief`
 - `writeback_summary`
+
+`batch_plan` 中的 `chapters` 字段由后端根据 Writer Memory `document_title_index` 计算并注入，形如 `["chapter-5", "chapter-6"]`。模型和 scoped artifact revision 不得自行推导、重排或改写该章节列表。
 
 ### 4.2 Frozen Fields
 
@@ -134,8 +136,8 @@
 
 ### 5.1 用途
 
-- 表达一次章节草稿验收的结构化结果
-- 驱动验收后的 Agent Loop 分支
+- 表达一次章节草稿用户决策的结构化结果
+- 驱动用户决策后的 Agent Loop 分支
 - 决定当前草稿是否可进入正式写回候选
 
 ### 5.2 Frozen Fields
@@ -216,7 +218,7 @@
 
 ### 5.7 Boundary Notes
 
-- `GenerationReviewDecision` 是草稿验收对象，不是正文对象
+- `GenerationReviewDecision` 是用户草稿决策对象，不是正文对象，也不是 Reviewer 评分对象
 - 字数、风格和节奏问题都可以通过 `feedback_text` 表达，由 Agent 判断是基于同一 brief 重写，还是回到章节梗概修订
 - 不再要求单独的长度计划更新对象作为正式分支
 

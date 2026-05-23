@@ -37,7 +37,7 @@ class ArtifactTreeService:
         ("章节标题与梗概", "writer_artifact", "chapter_package", "chapter_package.json"),
         ("章节写作指导", "writer_artifact", "writing_guidance", "chapter_writing_guidance.json"),
         ("正文草稿", "draft", "draft", "draft.md"),
-        ("验收决策", "writer_artifact", "generation_review", "generation_review_decision.json"),
+        ("草稿决策", "writer_artifact", "generation_review", "generation_review_decision.json"),
         ("写回摘要", "writeback", "writeback", "memory_writeback.json"),
     )
 
@@ -385,7 +385,7 @@ class ArtifactTreeService:
     def _writer_run_badge(self, state: Mapping[str, Any]) -> str:
         active_stage = self._active_writer_stage(state)
         if active_stage == "wait_chapter_acceptance":
-            return "待验收"
+            return "待决策"
         if active_stage in {"freeze_a_review", "batch_review", "chapter_review", "wait_chapter_review", "writeback_review"}:
             return "待审阅"
         if active_stage in {"completed", "writeback_committed"}:

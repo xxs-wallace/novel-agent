@@ -4,7 +4,7 @@
 
 ## Reading Rules
 
-- 涉及 Writer 问题集、artifact review、章节验收或回答提交时，必须先读 [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md)。
+- 涉及 Writer 问题集、artifact review、章节草稿决策或回答提交时，必须先读 [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md)。
 - 涉及 Writer 状态、review gate、用户补充信息进入 prompt 或章节草稿分支时，必须先读 [`../writer-agent-layered-generation/spec.md`](../writer-agent-layered-generation/spec.md)、[`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md) 和 [`../writer-agent-layered-generation/specs/runtime-boundaries.spec.md`](../writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
 - Web 普通 UI 不得把 checkpoint id、artifact path、workflow stage/action 名当作主状态展示；这些只能进入 technical drawer、日志或 debug payload。
 - 本任务文件不勾选实现状态，除非明确执行对应 QA / 验收。
@@ -84,7 +84,7 @@
 
 ## Group C: Chapter Draft Review Loop
 
-- [ ] Task W8: 更新章节草稿验收后端 action
+- [ ] Task W8: 更新章节草稿决策后端 action
   - `来源`: [`../writer-agent-layered-generation/contracts.md`](../writer-agent-layered-generation/contracts.md) 的 `GenerationReviewDecision`
   - `依赖`: Writer Task 67
   - `建议关注代码`: `novel_agent/app/web/services/web_action_service.py`, `novel_agent/app/cli/decisions.py`, `novel_agent/tests/test_web_action_service.py`
@@ -92,10 +92,10 @@
   - [ ] `rewrite_chapter` 映射为 `GenerationReviewDecision.status = rewrite_requested`，保留 `feedback_text` 原文
   - [ ] `replan_chapter` 映射为 `GenerationReviewDecision.status = replan_requested`，保留 `feedback_text` 原文，并回到章节梗概 review gate
   - [ ] `discard_chapter` 映射为 `discarded`
-  - [ ] `defer_chapter_acceptance` 不写正式 decision，只保留待验收状态
+  - [ ] `defer_chapter_acceptance` 不写正式 decision，只保留待决策状态
   - [ ] 后端测试覆盖非 accepted 分支不得触发 Memory / KB 写回
 
-- [ ] Task W9: 前端更新章节草稿验收卡
+- [ ] Task W9: 前端更新章节草稿决策卡
   - `来源`: [`spec.md`](spec.md), [`design.md`](design.md)
   - `依赖`: Task W8
   - `建议关注代码`: `web/src/components/conversation/`, `web/src/components/result/`
@@ -110,7 +110,7 @@
 - [ ] Task W10: 更新 Writer artifact tree 到 Agent Loop 结构
   - `来源`: [`spec.md`](spec.md), [`design.md`](design.md), [`../writer-agent-layered-generation/design.md`](../writer-agent-layered-generation/design.md)
   - `建议关注代码`: `novel_agent/app/web/services/artifact_tree_service.py`, `novel_agent/app/web/services/artifact_view_service.py`, `web/src/components/result/`
-  - [ ] Writer 树增加大纲研究、问题集、planning notebook、trace、全书规划、批次计划、章节梗概、写作指导、正文草稿、验收决策和写回摘要节点
+  - [ ] Writer 树增加大纲研究、问题集、planning notebook、trace、全书规划、批次计划、章节梗概、写作指导、正文草稿、草稿决策和写回摘要节点
   - [ ] 移除“章节长度计划”作为普通用户必须审阅的主节点；可在写作指导或 technical drawer 中展示派生长度预算
   - [ ] 普通视图展示用户能理解的摘要、证据、缺口、风险和下一步建议，不展示裸 JSON
   - [ ] technical drawer 可查看 artifact path、raw contract 和 debug trace
@@ -123,7 +123,7 @@
   - [ ] `BatchPlan` 展示阶段目标、主要冲突、情绪节奏、出口钩子和禁止提前消费项
   - [ ] `ChapterPackage` / `ChapterBrief` 展示标题、梗概、scene beats、人物行动、关系推进、必须出现和禁止项
   - [ ] `ChapterWritingGuidance` 展示用户补充原文、派生长度预算、风格节奏和重点展开要求
-  - [ ] `draft.md` 展示短预览、完整正文入口、连续性检查和验收状态
+  - [ ] `draft.md` 展示短预览、完整正文入口、连续性风险提示和草稿决策状态
   - [ ] 增加 snapshot 测试确认普通视图不泄露 raw JSON
 
 ## Group E: Writer Start And Conversation Shell
@@ -140,7 +140,7 @@
   - `来源`: [`design.md`](design.md) 的 ConversationPane
   - `依赖`: Task W4, Task W6, Task W9
   - `建议关注代码`: `web/src/components/conversation/ConversationPane.tsx`, `web/src/components/conversation/MessageList.tsx`, `web/src/api/`
-  - [ ] 同一个输入框支持普通聊天、问题回答、artifact 通过补充、artifact 修订反馈和草稿验收反馈五种上下文
+  - [ ] 同一个输入框支持普通聊天、问题回答、artifact 通过补充、artifact 修订反馈和草稿决策反馈五种上下文
   - [ ] 输入框清楚显示当前上下文，并允许取消回到普通聊天
   - [ ] 普通聊天发送只写 message，不自动推进 Writer workflow
   - [ ] 结构化按钮负责调用 `/actions`，并把最近 user message 作为 `source_message_id`
@@ -153,7 +153,7 @@
   - `依赖`: Task W1-W13, Writer Task 60-74
   - [ ] 后端测试覆盖 Writer 问题消息生成、回答提交、稍后继续、artifact approve/revision/defer、普通聊天不推进 workflow
   - [ ] 后端测试覆盖章节草稿 accepted-only writeback 和 rewrite/replan/discard/defer 分支
-  - [ ] 前端测试覆盖 Writer intent wizard、WriterQuestionCard、WriterArtifactReviewCard、章节验收卡、artifact tree
+  - [ ] 前端测试覆盖 Writer intent wizard、WriterQuestionCard、WriterArtifactReviewCard、章节草稿决策卡、artifact tree
   - [ ] Playwright 覆盖“开始续写 -> 大纲研究提问 -> 聊天框回答 -> 按钮继续 -> 全书规划审阅 -> 通过并补充 -> 章节梗概审阅”
   - [ ] 验收确认普通用户界面不把内部状态、checkpoint 或 artifact id 当作主状态展示
 

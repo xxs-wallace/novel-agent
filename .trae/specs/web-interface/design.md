@@ -114,7 +114,7 @@ Web 端的主交互不是 slash command。网页上的按钮、列表点击、�
 
 - 当前任务高亮。
 - 每个任务使用 compact progress：粗读、精读、KB、Writer 四段。
-- 阻塞任务显示 badge，例如“待审阅”“待验收”“建模缺失”。
+- 阻塞任务显示 badge，例如“待审阅”“待决策”“建模缺失”。
 
 交互：
 
@@ -318,11 +318,11 @@ Writer 审阅相关 action 必须继续复用 Writer workflow / facade。Web 层
 | `approve_writer_artifact` | artifact review 消息“通过并继续” | `run_id`, `review_id`, `artifact_kind`, 可选 `artifact_id`, `supplement_text`, `source_message_id` | `ArtifactReviewDecision.decision = approved` |
 | `request_writer_artifact_revision` | artifact review 消息“不通过并调整” | `run_id`, `review_id`, `artifact_kind`, 可选 `artifact_id`, `revision_feedback`, `source_message_id` | `ArtifactReviewDecision.decision = revision_requested` |
 | `defer_writer_artifact_review` | artifact review 消息“稍后继续” | `run_id`, `review_id`, 可选备注 | `ArtifactReviewDecision.decision = deferred` |
-| `accept_chapter` | 章节验收卡“接受本章” | `run_id`, `chapter_id`, `draft_id`, 可选 `feedback_text` | `GenerationReviewDecision.status = accepted` |
-| `rewrite_chapter` | 章节验收卡“基于反馈重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = rewrite_requested` |
-| `replan_chapter` | 章节验收卡“修改章节梗概后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = replan_requested` |
-| `discard_chapter` | 章节验收卡“作废本次草稿” | `run_id`, `chapter_id`, `draft_id`, `reason` 或 `feedback_text` | `GenerationReviewDecision.status = discarded` |
-| `defer_chapter_acceptance` | 章节验收卡“稍后再决定” | `run_id`, `chapter_id`, `draft_id`, 可选备注 | 不写正式 `GenerationReviewDecision`，保留待验收 review gate |
+| `accept_chapter` | 草稿决策卡“接受本章” | `run_id`, `chapter_id`, `draft_id`, 可选 `feedback_text` | `GenerationReviewDecision.status = accepted` |
+| `rewrite_chapter` | 草稿决策卡“基于反馈重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = rewrite_requested` |
+| `replan_chapter` | 草稿决策卡“修改章节梗概后重写” | `run_id`, `chapter_id`, `draft_id`, `feedback_text`, 可选 `reason_code` | `GenerationReviewDecision.status = replan_requested` |
+| `discard_chapter` | 草稿决策卡“作废本次草稿” | `run_id`, `chapter_id`, `draft_id`, `reason` 或 `feedback_text` | `GenerationReviewDecision.status = discarded` |
+| `defer_chapter_acceptance` | 草稿决策卡“稍后再决定” | `run_id`, `chapter_id`, `draft_id`, 可选备注 | 不写正式 `GenerationReviewDecision`，保留待决策 review gate |
 
 用户可见响应必须使用 `StatusPresenter` / `WriterStatusPresenter` 的中文状态。`target_stage`、checkpoint id、workflow action 名、原始 `GenerationReviewDecision` JSON 等只能放进 technical/debug 响应。
 
@@ -401,7 +401,7 @@ Action API 返回：
 
 - `WebActionResult`
 - 可选 `JobSummary`，用于长任务或 LLM 修订。
-- 可选 `DecisionCard[]`，用于下一步确认、修订、章节验收或写回确认。
+- 可选 `DecisionCard[]`，用于下一步确认、修订、草稿决策或写回确认。
 - 可选 `ArtifactView` / artifact id，供前端刷新右侧结果。
 - 可选 `technical_details`，仅供 debug drawer 展示。
 
@@ -424,13 +424,13 @@ Outline Research 用户补充问题的 action 语义：
 - 若用户只提交一段自然语言 `answer_text`，后端必须保留原文并进行最小映射；不得为了推进流程伪造未回答问题。
 - 普通聊天消息不得自动越过 `needs_user_input` 等待态；继续流程必须来自问题卡按钮或等价结构化 action。
 
-章节验收 action 语义：
+章节草稿决策 action 语义：
 
 - `accept_chapter` 是唯一允许进入写回摘要审阅或正式写回候选的分支。
 - `rewrite_chapter` 基于当前已通过的章节 brief、写作输入和用户反馈重写本章；不得触发正式写回。
 - `replan_chapter` 以用户反馈驱动 Writer 修订 `ChapterPackage` / `ChapterBrief`，并回到章节梗概 review gate；不得触发正式写回。
 - `discard_chapter` 只保留运行产物，不进入 Memory / KB。
-- `defer_chapter_acceptance` 不写正式验收 decision，保持当前待验收状态。
+- `defer_chapter_acceptance` 不写正式草稿决策，保持当前待决策状态。
 
 ### Job API
 
@@ -508,7 +508,7 @@ Outline Research 用户补充问题的 action 语义：
 8. 后端将决策交给 Writer workflow；修订完成后右侧刷新新版 artifact，中间回到同一 review gate。
 9. 用户选择“稍后继续”时，只保留当前 review gate 和会话消息。
 
-### Flow D: 章节验收
+### Flow D: 章节草稿决策
 
 1. 右侧展示正文草稿、字数、连续性摘要。
 2. 中间决策卡展示：
@@ -521,7 +521,7 @@ Outline Research 用户补充问题的 action 语义：
 4. 用户选择“基于反馈重写本章”时，前端发送 `rewrite_chapter`，payload 携带反馈原文；后端基于当前已通过 brief 和写作输入重写正文。
 5. 用户选择“修改章节梗概后重写”时，前端发送 `replan_chapter`，payload 携带反馈原文；后端回到章节梗概 review gate。
 6. 用户选择“作废本次草稿”时，前端发送 `discard_chapter`，后端只保留 runs 产物并暂停流程。
-7. 用户选择“稍后再决定”时，前端发送 `defer_chapter_acceptance` 或只关闭决策卡；后端不得写正式验收 decision。
+7. 用户选择“稍后再决定”时，前端发送 `defer_chapter_acceptance` 或只关闭决策卡；后端不得写正式草稿决策。
 8. 用户选择后，Web 只提交用户决策语义，不暴露内部 workflow action 或 stage。
 
 ## 9. Testing Strategy

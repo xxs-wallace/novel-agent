@@ -134,6 +134,23 @@ export function setWriterArtifactReviewAfterJobReplay(taskId = "task-alpha", job
     detail_artifact_id: "writer-book-plan",
     actions: [
       {
+        action: "run_reviewer",
+        label: "Reviewer：大纲合理性",
+        payload: {
+          run_id: "run-2",
+          review_id: "artifact-review-run-2-freeze-a",
+          artifact_kind: "book_continuation_plan",
+          artifact_id: "writer-book-plan",
+          reviewer_id: "outline_plot_development",
+          reviewer_ids: ["outline_plot_development"],
+          target_type: "outline"
+        },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      },
+      {
         action: "approve_writer_artifact",
         label: "通过并继续",
         payload: { run_id: "run-2", review_id: "artifact-review-run-2-freeze-a", artifact_kind: "book_continuation_plan" },
@@ -226,6 +243,23 @@ export function setWriterArtifactReviewMessage(taskId = "task-alpha") {
     detail_artifact_id: "writer-batch-plan",
     actions: [
       {
+        action: "run_reviewer",
+        label: "Reviewer：大纲合理性",
+        payload: {
+          run_id: "run-1",
+          review_id: "artifact-review-run-1-batch",
+          artifact_kind: "batch_plan",
+          artifact_id: "writer-batch-plan",
+          reviewer_id: "outline_plot_development",
+          reviewer_ids: ["outline_plot_development"],
+          target_type: "outline"
+        },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      },
+      {
         action: "approve_writer_artifact",
         label: "通过并继续",
         payload: { run_id: "run-1", review_id: "artifact-review-run-1-batch", artifact_kind: "batch_plan" },
@@ -278,13 +312,68 @@ export function setWriterDraftReviewMessage(taskId = "task-alpha") {
     review_id: "draft-review-run-1-ch-1-draft-1",
     chapter_id: "ch-1",
     draft_id: "draft-1",
-    title: "章节草稿验收",
+    title: "章节草稿决策",
     preview: "雨落下来，巷口的灯忽明忽暗。",
     word_count: 3200,
     target_word_count: 3000,
     continuity_summary: "人物动机保持一致。",
     detail_artifact_id: "writer-draft",
-    actions: [],
+    actions: [
+      {
+        action: "run_reviewer",
+        label: "Reviewer：局部连续性",
+        payload: {
+          run_id: "run-1",
+          review_id: "draft-review-run-1-ch-1-draft-1",
+          chapter_id: "ch-1",
+          draft_id: "draft-1",
+          artifact_id: "writer-draft",
+          reviewer_id: "local_draft_continuity",
+          reviewer_ids: ["local_draft_continuity"],
+          target_type: "draft"
+        },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      },
+      {
+        action: "run_reviewer",
+        label: "Reviewer：历史一致性",
+        payload: {
+          run_id: "run-1",
+          review_id: "draft-review-run-1-ch-1-draft-1",
+          chapter_id: "ch-1",
+          draft_id: "draft-1",
+          artifact_id: "writer-draft",
+          reviewer_id: "memory_draft_consistency",
+          reviewer_ids: ["memory_draft_consistency"],
+          target_type: "draft"
+        },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      },
+      {
+        action: "run_reviewer",
+        label: "Reviewer：文风氛围",
+        payload: {
+          run_id: "run-1",
+          review_id: "draft-review-run-1-ch-1-draft-1",
+          chapter_id: "ch-1",
+          draft_id: "draft-1",
+          artifact_id: "writer-draft",
+          reviewer_id: "kb_draft_style_atmosphere",
+          reviewer_ids: ["kb_draft_style_atmosphere"],
+          target_type: "draft"
+        },
+        description: "",
+        variant: "secondary",
+        requires_input: false,
+        input_role: ""
+      }
+    ],
     technical_available: true,
     technical_details: {}
   };
@@ -294,7 +383,7 @@ export function setWriterDraftReviewMessage(taskId = "task-alpha") {
       message_id: "assistant-draft-review",
       task_id: taskId,
       role: "assistant",
-      content: "请验收当前章节草稿。",
+      content: "请决定当前章节草稿。",
       payload: { channel: "writer_draft_review", run_id: review.run_id, review_id: review.review_id },
       writer_draft_review: review,
       decision_cards: [],
@@ -328,7 +417,7 @@ const closeReadTree: ArtifactTreeNode[] = [
 
 const writerTree: ArtifactTreeNode[] = [
   {
-    ...node("writer-run-history-1", "第一章 雨夜接应", "writer_run_group", "writer", "待验收"),
+    ...node("writer-run-history-1", "第一章 雨夜接应", "writer_run_group", "writer", "待决策"),
     children: [
       node("writer-run", "续写概览", "writer_run", "writer", "已生成"),
       node("writer-research", "大纲研究", "writer_stage", "writer", "已生成"),
@@ -340,7 +429,7 @@ const writerTree: ArtifactTreeNode[] = [
       node("writer-chapter-package", "章节标题与梗概", "writer_artifact", "writer"),
       node("writer-guidance", "章节写作指导", "writer_artifact", "writer"),
       node("writer-draft", "正文草稿", "draft", "writer"),
-      node("writer-generation-review", "验收决策", "writer_artifact", "writer"),
+      node("writer-generation-review", "草稿决策", "writer_artifact", "writer"),
       node("writer-writeback", "写回摘要", "writeback", "writer")
     ]
   },
@@ -377,6 +466,7 @@ function artifactView(artifactId: string): ArtifactView {
         { title: "禁止误写点", body: "不要突然告白。" },
         { title: "最近变化", body: "第 12 章开始主动调查。" }
       ],
+      actions: [],
       cards: [],
       tables: [],
       markdown: "",
@@ -392,6 +482,18 @@ function artifactView(artifactId: string): ArtifactView {
         { title: "字数", body: "3200" },
         { title: "连续性检查", body: "人物动机保持一致。" }
       ],
+      actions: [
+        {
+          action: "run_reviewer",
+          label: "Reviewer：局部连续性",
+          payload: {
+            artifact_id: artifactId,
+            reviewer_id: "local_draft_continuity",
+            reviewer_ids: ["local_draft_continuity"],
+            target_type: "draft"
+          }
+        }
+      ],
       cards: [],
       tables: [],
       markdown: "第一段正文。",
@@ -406,6 +508,7 @@ function artifactView(artifactId: string): ArtifactView {
       { title: "建模准备度", body: "人物=已完成；世界观=待补齐" },
       { title: "下一步", body: "查看人物百科或开始阅读。" }
     ],
+    actions: [],
     cards: [],
     tables: [],
     markdown: "",
@@ -419,11 +522,12 @@ function actionResult(taskId: string, body: WebActionRequest): WebActionResult {
     body.action === "start_close_read" ||
     body.action === "build_narrative_scene_index" ||
     body.action === "build_creative_kb" ||
-    body.action === "start_writer"
+    body.action === "start_writer" ||
+    body.action === "run_reviewer"
       ? {
           job_id: `job-${body.action}`,
           task_id: taskId,
-          type: String(body.action),
+          type: body.action === "run_reviewer" ? "reviewer" : String(body.action),
           status: "queued" as const,
           message: "已加入后台队列",
           cancel_requested: false,

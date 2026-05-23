@@ -38,10 +38,10 @@ Web 工作台 SHALL NOT：
 
 Web 工作台 SHALL 在 Writer 审阅流程中提供结构化 action：
 
-- 使用聊天式结构化消息承接 Writer 提问、artifact review 和章节验收。消息可以像普通 Agent 消息一样出现在会话流中，用户也可以使用同一个聊天输入框回答；但消息和回答必须绑定 `run_id`、问题 id 或 review id、artifact 引用与后端 action，不能退化为无语义的普通聊天记录。
+- 使用聊天式结构化消息承接 Writer 提问、artifact review 和章节草稿决策。消息可以像普通 Agent 消息一样出现在会话流中，用户也可以使用同一个聊天输入框回答；但消息和回答必须绑定 `run_id`、问题 id 或 review id、artifact 引用与后端 action，不能退化为无语义的普通聊天记录。
 - 使用 `ArtifactReviewDecision` 支持用户“通过并补充 prompt 信息”或“不通过并给出调整反馈”；Web 只提交用户决策语义，Writer workflow 负责 prompt 组装和 artifact 修订。
-- 使用章节验收决策卡支持接受、基于反馈重写、退回章节梗概重规划、作废和稍后决定。
-- 所有修订、验收与回写动作 SHALL 调用 `WorkflowFacade` / Writer workflow / 共享 action adapter，不得由 Web 后端直接拼 prompt、写 Memory 或改 workflow state。
+- 使用章节草稿决策卡支持接受、基于反馈重写、退回章节梗概重规划、作废和稍后决定。
+- 所有修订、草稿决策与回写动作 SHALL 调用 `WorkflowFacade` / Writer workflow / 共享 action adapter，不得由 Web 后端直接拼 prompt、写 Memory 或改 workflow state。
 
 ## Technology Direction
 
@@ -84,7 +84,7 @@ Web 工作台 SHALL 在 Writer 审阅流程中提供结构化 action：
 - 粗读进度：documents 数、checkpoint、是否完成。
 - 精读进度：已精读章节 / documents、是否落后于粗读。
 - Creative KB 状态。
-- Writer 状态：未开始、规划中、待审阅、正文生成中、待验收、已完成。
+- Writer 状态：未开始、规划中、待审阅、正文生成中、待决策、已完成。
 - 当前阻塞点，例如“请审阅本批剧情大纲”。
 
 用户 SHALL 能在左侧：
@@ -253,7 +253,7 @@ Writer 审阅卡片 SHALL 支持：
 - “不通过并调整”：提交 `ArtifactReviewDecision.decision = revision_requested`，必须携带原始 `revision_feedback`，由 Writer workflow 驱动模型修订当前 artifact 并回到同一 review gate。
 - “稍后继续”：提交 `ArtifactReviewDecision.decision = deferred` 或等价 action，保留当前可恢复状态。
 
-正文草稿验收卡片 SHALL 支持：
+正文草稿决策卡片 SHALL 支持：
 
 - 接受本章。
 - 基于反馈重写本章。
@@ -261,7 +261,7 @@ Writer 审阅卡片 SHALL 支持：
 - 作废本次草稿。
 - 稍后再决定。
 
-除“接受本章”外，其它验收分支 SHALL NOT 触发 Memory writeback 或 Creative KB 写回。
+除“接受本章”外，其它草稿决策分支 SHALL NOT 触发 Memory writeback 或 Creative KB 写回。`continuity_report.canon_ready` 与 Reviewer 报告只作为风险提示，不作为是否显示接受按钮或写回确认的硬 gate。
 
 ## Web Actions And CLI Command Parity
 
@@ -299,11 +299,11 @@ Writer Web-only actions:
 | 通过当前 review artifact | “通过并继续”按钮 + 可选补充输入 | `approve_writer_artifact` |
 | 调整当前 review artifact | “不通过并调整”按钮 + 反馈输入 | `request_writer_artifact_revision` |
 | 稍后审阅当前 artifact | “稍后继续”按钮 | `defer_writer_artifact_review` |
-| 章节验收接受 | 章节验收卡“接受本章” | `accept_chapter` |
-| 基于反馈重写本章 | 章节验收卡“基于反馈重写” | `rewrite_chapter` |
-| 修改章节梗概后重写 | 章节验收卡“修改章节梗概后重写” | `replan_chapter` |
-| 作废当前草稿 | 章节验收卡“作废本次草稿” | `discard_chapter` |
-| 稍后再决定 | 章节验收卡“稍后再决定” | `defer_chapter_acceptance` |
+| 章节草稿接受 | 草稿决策卡“接受本章” | `accept_chapter` |
+| 基于反馈重写本章 | 草稿决策卡“基于反馈重写” | `rewrite_chapter` |
+| 修改章节梗概后重写 | 草稿决策卡“修改章节梗概后重写” | `replan_chapter` |
+| 作废当前草稿 | 草稿决策卡“作废本次草稿” | `discard_chapter` |
+| 稍后再决定 | 草稿决策卡“稍后再决定” | `defer_chapter_acceptance` |
 
 Web 高级命令入口 MAY 兼容以下 slash command：
 
@@ -520,5 +520,5 @@ Web 端被认为达到 TUI parity 的条件：
 - 后端 API 复用 `WorkflowFacade`、`StatusPresenter`、`ArtifactPresenter` 等共享语义。
 - SSE 能实时回流 read、close-read、KB、Writer 与 benchmark 进度。
 - Artifact review 能通过 Web action 表达通过并补充、请求调整、稍后继续；补充和反馈原文均能进入 Writer 结构化决策。
-- 章节验收能通过 Web action 表达接受、基于反馈重写、重做章节规划、作废和稍后决定；非接受分支不得回写 Memory / KB。
+- 章节草稿决策能通过 Web action 表达接受、基于反馈重写、重做章节规划、作废和稍后决定；非接受分支不得回写 Memory / KB。
 - 测试覆盖 API contract、view model 转换、三栏布局、目录树、会话与 SSE。

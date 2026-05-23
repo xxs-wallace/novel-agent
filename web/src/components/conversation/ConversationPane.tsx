@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpenCheck, Send, WandSparkles } from "lucide-react";
+import { BookOpenCheck, ClipboardCheck, Send, WandSparkles } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { postCommand } from "../../api/actions";
@@ -12,7 +12,8 @@ import type {
   TaskSummary,
   WriterArtifactReview,
   WriterDraftReview,
-  WriterQuestionSet
+  WriterQuestionSet,
+  WriterReviewAction
 } from "../../api/types";
 import { publicDecisionLabel } from "./DecisionCard";
 import { MessageList } from "./MessageList";
@@ -489,6 +490,10 @@ export function ConversationPane({
     await onAction("defer_writer_artifact_review", reviewActionPayload(review, "defer_writer_artifact_review"));
   }
 
+  async function runArtifactReviewer(review: WriterArtifactReview, reviewerAction: WriterReviewAction) {
+    await onAction("run_reviewer", reviewReviewerActionPayload(review, reviewerAction));
+  }
+
   function useDraftInput(review: WriterDraftReview, action: string) {
     setAnalyzerMode(false);
     setActiveQuestionSetId("");
@@ -537,6 +542,10 @@ export function ConversationPane({
       feedback_text: stored?.text ?? "",
       source_message_id: stored?.messageId ?? ""
     });
+  }
+
+  async function runDraftReviewer(review: WriterDraftReview, reviewerAction: WriterReviewAction) {
+    await onAction("run_reviewer", draftReviewerActionPayload(review, reviewerAction));
   }
 
   async function submitDraftComposerDecision(review: WriterDraftReview, action: string) {
@@ -743,7 +752,7 @@ export function ConversationPane({
                 : activeArtifactContext || composerArtifactReview
                   ? "输入通过补充或调整反馈，然后点击右侧分支按钮。"
                   : activeDraftContext || composerDraftReview
-                    ? "输入草稿验收反馈，然后点击右侧分支按钮。"
+                    ? "输入草稿调整反馈，然后点击右侧分支按钮。"
                     : activeDecisionAction
                       ? "输入本次分支需要的反馈，然后点击右侧分支按钮。"
               : "输入自然语言方向。只有明确以 / 开头时才进入高级命令兼容路径。"
@@ -791,6 +800,19 @@ export function ConversationPane({
                 查看详情
               </button>
             ) : null}
+            {reviewerActions(composerArtifactReview.actions).map((reviewerAction) => (
+              <button
+                key={`${reviewerAction.action}:${reviewerAction.label}:${String(reviewerAction.payload?.reviewer_id ?? "")}`}
+                type="button"
+                className="secondary-button"
+                disabled={!selectedTask || actionPending || submitMutation.isPending}
+                title={reviewerAction.description}
+                onClick={() => void runArtifactReviewer(composerArtifactReview, reviewerAction)}
+              >
+                <ClipboardCheck size={15} aria-hidden="true" />
+                {reviewerAction.label}
+              </button>
+            ))}
             <button
               type="button"
               className="primary-button"
@@ -842,6 +864,19 @@ export function ConversationPane({
                 查看完整正文
               </button>
             ) : null}
+            {reviewerActions(composerDraftReview.actions).map((reviewerAction) => (
+              <button
+                key={`${reviewerAction.action}:${reviewerAction.label}:${String(reviewerAction.payload?.reviewer_id ?? "")}`}
+                type="button"
+                className="secondary-button"
+                disabled={!selectedTask || actionPending || submitMutation.isPending}
+                title={reviewerAction.description}
+                onClick={() => void runDraftReviewer(composerDraftReview, reviewerAction)}
+              >
+                <ClipboardCheck size={15} aria-hidden="true" />
+                {reviewerAction.label}
+              </button>
+            ))}
             <button
               type="button"
               className="primary-button"
@@ -1037,6 +1072,30 @@ function draftActionPayload(review: WriterDraftReview, action: string): Record<s
   };
 }
 
+function reviewerActions(actions: WriterReviewAction[]): WriterReviewAction[] {
+  return actions.filter((item) => item.action === "run_reviewer");
+}
+
+function reviewReviewerActionPayload(review: WriterArtifactReview, reviewerAction: WriterReviewAction): Record<string, unknown> {
+  return {
+    run_id: review.run_id,
+    review_id: review.review_id,
+    artifact_kind: review.artifact_kind,
+    artifact_id: review.artifact_id,
+    ...(reviewerAction.payload ?? {})
+  };
+}
+
+function draftReviewerActionPayload(review: WriterDraftReview, reviewerAction: WriterReviewAction): Record<string, unknown> {
+  return {
+    run_id: review.run_id,
+    review_id: review.review_id,
+    chapter_id: review.chapter_id,
+    draft_id: review.draft_id,
+    ...(reviewerAction.payload ?? {})
+  };
+}
+
 function draftContextLabel(action: string) {
   if (action === "rewrite_chapter") {
     return "正在写本章重写反馈";
@@ -1047,7 +1106,7 @@ function draftContextLabel(action: string) {
   if (action === "discard_chapter") {
     return "正在写作废说明";
   }
-  return "正在写草稿验收反馈";
+  return "正在写草稿调整反馈";
 }
 
 function decisionActionNeedsInput(action: DecisionAction): boolean {

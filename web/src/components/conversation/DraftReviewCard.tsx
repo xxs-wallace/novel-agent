@@ -1,6 +1,6 @@
-import { CheckCircle2, MessageSquareText, PauseCircle, RotateCcw, Trash2 } from "lucide-react";
+import { CheckCircle2, ClipboardCheck, MessageSquareText, PauseCircle, RotateCcw, Trash2 } from "lucide-react";
 
-import type { WriterDraftReview } from "../../api/types";
+import type { WriterDraftReview, WriterReviewAction } from "../../api/types";
 
 interface DraftReviewCardProps {
   review: WriterDraftReview;
@@ -10,6 +10,7 @@ interface DraftReviewCardProps {
   hideActions?: boolean;
   onUseInput: (review: WriterDraftReview, action: string) => void;
   onAction: (review: WriterDraftReview, action: string) => void;
+  onReviewerAction?: (review: WriterDraftReview, action: WriterReviewAction) => void;
   onOpenDetail?: (artifactId: string) => void;
 }
 
@@ -21,16 +22,18 @@ export function DraftReviewCard({
   hideActions = false,
   onUseInput,
   onAction,
+  onReviewerAction,
   onOpenDetail
 }: DraftReviewCardProps) {
   const rewriteFeedback = feedbackByAction.rewrite_chapter ?? "";
   const replanFeedback = feedbackByAction.replan_chapter ?? "";
   const discardReason = feedbackByAction.discard_chapter ?? "";
+  const reviewerActions = review.actions.filter((action) => action.action === "run_reviewer");
 
   return (
     <article className="writer-review-card draft-review-card">
       <div className="writer-review-card-header">
-        <span>章节验收</span>
+        <span>草稿决策</span>
         <h3>{review.title}</h3>
       </div>
       <div className="draft-review-stats">
@@ -48,6 +51,19 @@ export function DraftReviewCard({
             查看完整正文
           </button>
         ) : null}
+        {reviewerActions.map((action) => (
+          <button
+            key={`${action.action}:${action.label}:${String(action.payload?.reviewer_id ?? "")}`}
+            type="button"
+            className="secondary-button"
+            disabled={pending}
+            title={action.description}
+            onClick={() => onReviewerAction?.(review, action)}
+          >
+            <ClipboardCheck size={15} aria-hidden="true" />
+            {action.label}
+          </button>
+        ))}
         <button type="button" className="primary-button" disabled={pending} onClick={() => onAction(review, "accept_chapter")}>
           <CheckCircle2 size={15} aria-hidden="true" />
           接受本章

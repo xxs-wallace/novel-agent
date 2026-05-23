@@ -10,9 +10,11 @@ import { ArtifactTree } from "./ArtifactTree";
 interface ResultExplorerProps {
   selectedTaskId: string;
   focusedArtifactId?: string;
+  actionPending?: boolean;
+  onAction?: (action: string, payload?: Record<string, unknown>) => Promise<unknown> | void;
 }
 
-export function ResultExplorer({ selectedTaskId, focusedArtifactId = "" }: ResultExplorerProps) {
+export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionPending = false, onAction }: ResultExplorerProps) {
   const [surface, setSurface] = useState<ArtifactSurface>("close-read");
   const [selectedNode, setSelectedNode] = useState<ArtifactTreeNode | null>(null);
 
@@ -98,7 +100,7 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "" }: Resul
             <ArtifactTree nodes={nodes} selectedId={selectedNode?.id} onSelect={setSelectedNode} />
           </div>
           <div className="detail-shell">
-            <ArtifactDetail view={detailQuery.data} isLoading={detailQuery.isLoading} />
+            <ArtifactDetail view={detailQuery.data} isLoading={detailQuery.isLoading} actionPending={actionPending} onAction={onAction} />
           </div>
         </div>
       )}

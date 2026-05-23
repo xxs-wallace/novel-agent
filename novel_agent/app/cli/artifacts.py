@@ -79,7 +79,7 @@ class ArtifactPresenter:
         if isinstance(payload, dict) and "budgets" in payload and not isinstance(payload["budgets"], list):
             return "章节长度计划里的 budgets 必须是列表。"
         if isinstance(payload, dict) and "chapters" in payload and not isinstance(payload["chapters"], list):
-            return "章节梗概里的 chapters 必须是列表。"
+            return "artifact 里的 chapters 必须是列表。"
         return ""
 
     def save_text(self, path: Path | str, text: str) -> ArtifactSaveResult:
@@ -174,8 +174,8 @@ class ArtifactPresenter:
             return "\n".join(
                 [
                     "# 字段化编辑：本批剧情大纲",
+                    f"本批章节: {self._join_list(payload.get('chapters'))}",
                     f"本批目标: {payload.get('batch_goal') or payload.get('stage_goal') or ''}",
-                    f"入口: {payload.get('scope_start') or payload.get('entry_hook') or ''}",
                     f"冲突: {payload.get('conflict_arc') or payload.get('main_conflict') or payload.get('central_conflict') or ''}",
                     f"中点: {payload.get('midpoint') or payload.get('turning_point') or ''}",
                     f"出口钩子: {payload.get('exit_hook') or payload.get('expected_closure') or ''}",
@@ -268,7 +268,6 @@ class ArtifactPresenter:
             return updated
         if "batch_plan" in name:
             self._set_text(updated, values, "本批目标", "batch_goal")
-            self._set_text(updated, values, "入口", "entry_hook")
             self._set_text(updated, values, "冲突", "conflict_arc")
             self._set_text(updated, values, "中点", "midpoint")
             self._set_text(updated, values, "出口钩子", "exit_hook")
@@ -374,7 +373,7 @@ class ArtifactPresenter:
                 path=path,
                 title="连续性检查摘要",
                 sections=[
-                    ("连续性", "通过" if payload.get("canon_ready") else "需要检查"),
+                    ("连续性风险", "低风险" if payload.get("canon_ready") else "需要关注"),
                     ("问题", self._join_list(payload.get("issues") or payload.get("blocking_issues"))),
                     ("写回提示", self._join_list(payload.get("writeback_notes"))),
                 ],
@@ -618,7 +617,7 @@ class ArtifactPresenter:
             sections=sections,
             preview=preview,
             collapsed=len(text) > self.LARGE_PREVIEW_CHARS,
-            next_action="请验收当前章节" if "draft" in path.name else "",
+            next_action="请决定当前章节草稿" if "draft" in path.name else "",
             technical_details={"stage": stage},
         )
 

@@ -297,7 +297,7 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
         "章节标题与梗概",
         "章节写作指导",
         "正文草稿",
-        "验收决策",
+        "草稿决策",
         "写回摘要",
     ]
     assert "章节长度计划" not in labels
