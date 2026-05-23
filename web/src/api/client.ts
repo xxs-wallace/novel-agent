@@ -2,6 +2,11 @@ import type { ApiError } from "./types";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
+interface ApiFetchInit extends RequestInit {
+  timeoutMs?: number;
+  timeoutMessage?: string;
+}
+
 export function apiUrl(path: string): string {
   if (/^https?:\/\//.test(path)) {
     return path;
@@ -9,17 +14,52 @@ export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
-export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type") && init.body) {
+export async function apiFetch<T>(path: string, init: ApiFetchInit = {}): Promise<T> {
+  const { timeoutMs, timeoutMessage, signal: callerSignal, ...fetchInit } = init;
+  const headers = new Headers(fetchInit.headers);
+  if (!headers.has("Content-Type") && fetchInit.body) {
     headers.set("Content-Type", "application/json");
   }
   headers.set("Accept", "application/json");
 
-  const response = await fetch(apiUrl(path), {
-    ...init,
-    headers
-  });
+  const controller = timeoutMs ? new AbortController() : null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  const abortFromCaller = () => controller?.abort(callerSignal?.reason);
+  if (controller && callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort(callerSignal.reason);
+    } else {
+      callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+    }
+  }
+  if (controller && timeoutMs) {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException("Request timed out", "TimeoutError"));
+    }, timeoutMs);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), {
+      ...fetchInit,
+      headers,
+      signal: controller?.signal ?? callerSignal
+    });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(timeoutMessage || "请求超时，请稍后重试。");
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (controller && callerSignal) {
+      callerSignal.removeEventListener("abort", abortFromCaller);
+    }
+  }
 
   if (!response.ok) {
     let message = response.statusText;

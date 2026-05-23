@@ -109,6 +109,8 @@ class TuiApp:
             )
         if invocation.handler_name == "query_close_read":
             return self._dispatch_close_read_query(invocation.args)
+        if invocation.handler_name == "analyze_outline":
+            return self._dispatch_analyzer_chat(invocation.args)
         if invocation.handler_name == "run_smoke_benchmark":
             return self._dispatch_smoke_benchmark(invocation.args)
         if invocation.handler_name == "run_creative_kb_benchmark":
@@ -249,6 +251,23 @@ class TuiApp:
             )
         except FileNotFoundError as exc:
             return str(exc)
+
+    def _dispatch_analyzer_chat(self, args: tuple[str, ...]) -> str:
+        if not self.config.book_id:
+            return "请先选择 task id。使用 /tasks 查看任务，或 /task <task_id> 进入任务。"
+        question = " ".join(args).strip()
+        if not question:
+            return "用法：/analyze <你想讨论的大纲问题>，例如 /analyze 当前未解之谜里哪条最适合下一阶段回收？"
+        try:
+            result = self.facade.analyze_outline(book_id=self.config.book_id, question=question)
+        except FileNotFoundError as exc:
+            return str(exc)
+        sources = result.get("sources") if isinstance(result.get("sources"), list) else []
+        source_text = ""
+        if sources:
+            labels = [str(item.get("label") or item.get("source_type") or "") for item in sources if isinstance(item, dict)]
+            source_text = "\n\n参考来源：" + "、".join(label for label in labels if label)
+        return str(result.get("answer") or "") + source_text
 
     def _dispatch_smoke_benchmark(self, args: tuple[str, ...]) -> str:
         options: dict[str, object] = {

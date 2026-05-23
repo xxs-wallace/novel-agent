@@ -277,7 +277,10 @@ class ArtifactTreeService:
         ]
 
     def _writer_generated_chapter_rows(self, *, task_id: str, run_id: str) -> list[dict[str, Any]]:
-        db_path = resolve_writer_memory_db_path(repo_root=self.repo_root, book_id=task_id, reset=False)
+        try:
+            db_path = resolve_writer_memory_db_path(repo_root=self.repo_root, book_id=task_id, reset=False)
+        except FileNotFoundError:
+            return []
         if not db_path.exists():
             return []
         db = NovelAgentDB(db_path)

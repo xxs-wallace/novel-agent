@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Send, WandSparkles } from "lucide-react";
+import { BookOpenCheck, Send, WandSparkles } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { postCommand } from "../../api/actions";
-import { getMessages, postMessage } from "../../api/messages";
+import { ANALYZER_MESSAGE_TIMEOUT_MS, getMessages, postMessage } from "../../api/messages";
 import type {
   ConversationMessage,
   DecisionAction,
@@ -40,6 +40,7 @@ export function ConversationPane({
   const queryClient = useQueryClient();
   const [input, setInput] = useState("");
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [analyzerMode, setAnalyzerMode] = useState(false);
   const [activeQuestionSetId, setActiveQuestionSetId] = useState("");
   const [activeArtifactReview, setActiveArtifactReview] = useState<{
     reviewId: string;
@@ -57,6 +58,8 @@ export function ConversationPane({
     Record<string, Record<string, { messageId: string; text: string }>>
   >({});
   const [dismissedActionMessageIds, setDismissedActionMessageIds] = useState<Set<string>>(() => new Set());
+  const [pendingAnalyzerQuestion, setPendingAnalyzerQuestion] = useState("");
+  const [analyzerError, setAnalyzerError] = useState("");
   const taskId = selectedTask?.task_id ?? "";
 
   const messagesQuery = useQuery({
@@ -69,6 +72,18 @@ export function ConversationPane({
     mutationFn: async (content: string) => {
       if (!taskId) {
         throw new Error("请先选择任务。");
+      }
+      if (analyzerMode) {
+        return postMessage(taskId, {
+          content,
+          payload: {
+            channel: "outline_analyzer",
+            question: content
+          }
+        }, {
+          timeoutMs: ANALYZER_MESSAGE_TIMEOUT_MS,
+          timeoutMessage: "Analyzer 分析超时，请稍后重试；本次问题没有推进 Writer 流程。"
+        });
       }
       if (content.trim().startsWith("/")) {
         return postCommand(taskId, { command: content.trim() });
@@ -154,11 +169,24 @@ export function ConversationPane({
           }
         }));
       }
+      setPendingAnalyzerQuestion("");
+      setAnalyzerError("");
       void queryClient.invalidateQueries({ queryKey: ["messages", taskId] });
     }
   });
 
   const messages = messagesQuery.data ?? [];
+  const displayMessages = useMemo(
+    () => [
+      ...messages,
+      ...localAnalyzerMessages({
+        taskId,
+        pendingQuestion: pendingAnalyzerQuestion,
+        error: analyzerError
+      })
+    ],
+    [analyzerError, messages, pendingAnalyzerQuestion, taskId]
+  );
   const questionSets = useMemo(
     () => messages.map((message) => message.writer_question_set).filter(Boolean) as WriterQuestionSet[],
     [messages]
@@ -232,11 +260,20 @@ export function ConversationPane({
 
   useEffect(() => {
     if (writerWizardSignal > 0 && selectedTask) {
+      setAnalyzerMode(false);
       setWizardOpen(true);
     }
   }, [selectedTask, writerWizardSignal]);
 
   useEffect(() => {
+    setAnalyzerMode(false);
+  }, [taskId]);
+
+  useEffect(() => {
+    if (analyzerMode) {
+      setActiveQuestionSetId("");
+      return;
+    }
     if (!questionSets.length) {
       setActiveQuestionSetId("");
       return;
@@ -249,7 +286,7 @@ export function ConversationPane({
       setActiveArtifactReview(null);
       setActiveDraftReview(null);
     }
-  }, [activeArtifactReview, activeDraftReview, activeQuestionSetId, questionSets]);
+  }, [activeArtifactReview, activeDraftReview, activeQuestionSetId, analyzerMode, questionSets]);
 
   const latestActionMessage = useMemo(
     () => {
@@ -262,11 +299,11 @@ export function ConversationPane({
     },
     [dismissedActionMessageIds, messages]
   );
-  const composerQuestionSet = latestActionMessage?.writer_question_set ?? null;
-  const composerArtifactReview = activeArtifactContext ?? latestActionMessage?.writer_artifact_review ?? null;
-  const composerDraftReview = activeDraftContext ?? latestActionMessage?.writer_draft_review ?? null;
+  const composerQuestionSet = analyzerMode ? null : latestActionMessage?.writer_question_set ?? null;
+  const composerArtifactReview = analyzerMode ? null : activeArtifactContext ?? latestActionMessage?.writer_artifact_review ?? null;
+  const composerDraftReview = analyzerMode ? null : activeDraftContext ?? latestActionMessage?.writer_draft_review ?? null;
   const composerDecisionCards = useMemo(() => {
-    if (!latestActionMessage) {
+    if (analyzerMode || !latestActionMessage) {
       return [];
     }
     const latestMessageCards = latestActionMessage?.decision_cards ?? [];
@@ -276,7 +313,7 @@ export function ConversationPane({
       deduped.set(card.card_id, card);
     }
     return [...deduped.values()];
-  }, [decisionCards, latestActionMessage]);
+  }, [analyzerMode, decisionCards, latestActionMessage]);
 
   const latestNaturalGoal = useMemo(() => {
     const latest = [...messages].reverse().find((message) => message.role === "user" && !message.content.trim().startsWith("/"));
@@ -289,8 +326,23 @@ export function ConversationPane({
     if (!content) {
       return;
     }
+    const wasAnalyzerMode = analyzerMode;
     setInput("");
-    await submitMutation.mutateAsync(content);
+    if (wasAnalyzerMode) {
+      setPendingAnalyzerQuestion(content);
+      setAnalyzerError("");
+    }
+    try {
+      await submitMutation.mutateAsync(content);
+    } catch (error) {
+      if (wasAnalyzerMode) {
+        setPendingAnalyzerQuestion("");
+        setAnalyzerError(error instanceof Error ? error.message : "Analyzer 暂时无法完成分析，请稍后重试。");
+        setInput(content);
+        return;
+      }
+      throw error;
+    }
   }
 
   async function submitWriterIntent(payload: Record<string, unknown>) {
@@ -317,6 +369,7 @@ export function ConversationPane({
   }
 
   function useQuestionInput(questionSet: WriterQuestionSet) {
+    setAnalyzerMode(false);
     setActiveQuestionSetId(questionSet.question_set_id);
     setActiveArtifactReview(null);
     setActiveDraftReview(null);
@@ -370,6 +423,7 @@ export function ConversationPane({
   }
 
   function useArtifactInput(review: WriterArtifactReview, mode: "supplement" | "revision") {
+    setAnalyzerMode(false);
     setActiveQuestionSetId("");
     setActiveArtifactReview({ reviewId: review.review_id, mode });
     setActiveDraftReview(null);
@@ -436,6 +490,7 @@ export function ConversationPane({
   }
 
   function useDraftInput(review: WriterDraftReview, action: string) {
+    setAnalyzerMode(false);
     setActiveQuestionSetId("");
     setActiveArtifactReview(null);
     setActiveDraftReview({ reviewId: review.review_id, action });
@@ -498,6 +553,7 @@ export function ConversationPane({
   }
 
   function clearComposerContext() {
+    setAnalyzerMode(false);
     setActiveQuestionSetId("");
     setActiveArtifactReview(null);
     setActiveDraftReview(null);
@@ -579,24 +635,28 @@ export function ConversationPane({
     setDismissedActionMessageIds((current) => new Set(current).add(latestActionMessage.message_id));
   }
 
-  const composerContextLabel = activeQuestionSet
-    ? "正在回答大纲研究问题"
-    : activeArtifactContext || composerArtifactReview
-      ? `正在审阅：${(activeArtifactContext ?? composerArtifactReview)?.title ?? ""}`
-      : (activeDraftContext || composerDraftReview) && activeDraftReview
-        ? draftContextLabel(activeDraftReview.action)
-        : activeDecisionAction
-          ? `正在准备：${publicDecisionLabel(activeDecisionAction.action.label)}`
-        : "";
-  const composerMode = composerDraftReview
-    ? "draft"
-    : composerArtifactReview
-      ? "artifact"
-      : composerQuestionSet
-        ? "question"
-        : composerDecisionCards.length
-          ? "decision"
-          : "plain";
+  const composerContextLabel = analyzerMode
+    ? "正在和小说专家讨论剧情"
+    : activeQuestionSet
+      ? "正在回答大纲研究问题"
+      : activeArtifactContext || composerArtifactReview
+        ? `正在审阅：${(activeArtifactContext ?? composerArtifactReview)?.title ?? ""}`
+        : (activeDraftContext || composerDraftReview) && activeDraftReview
+          ? draftContextLabel(activeDraftReview.action)
+          : activeDecisionAction
+            ? `正在准备：${publicDecisionLabel(activeDecisionAction.action.label)}`
+            : "";
+  const composerMode = analyzerMode
+    ? "analyzer"
+    : composerDraftReview
+      ? "draft"
+      : composerArtifactReview
+        ? "artifact"
+        : composerQuestionSet
+          ? "question"
+          : composerDecisionCards.length
+            ? "decision"
+            : "plain";
 
   return (
     <div className="conversation-pane">
@@ -605,14 +665,39 @@ export function ConversationPane({
           <h2>会话</h2>
           <p>{selectedTask ? `任务 ${selectedTask.task_id}` : "请选择左侧任务"}</p>
         </div>
-        <button type="button" className="primary-button" disabled={!selectedTask || actionPending} onClick={() => setWizardOpen(true)}>
-          <WandSparkles size={16} aria-hidden="true" />
-          开始续写
-        </button>
+        <div className="pane-title-actions">
+          <button
+            type="button"
+            className={analyzerMode ? "primary-button" : "secondary-button"}
+            disabled={!selectedTask || submitMutation.isPending}
+            onClick={() => {
+              setAnalyzerMode((current) => !current);
+              setActiveQuestionSetId("");
+              setActiveArtifactReview(null);
+              setActiveDraftReview(null);
+              setActiveDecisionAction(null);
+            }}
+          >
+            <BookOpenCheck size={16} aria-hidden="true" />
+            {analyzerMode ? "退出专家意见" : "小说专家意见"}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!selectedTask || actionPending}
+            onClick={() => {
+              setAnalyzerMode(false);
+              setWizardOpen(true);
+            }}
+          >
+            <WandSparkles size={16} aria-hidden="true" />
+            开始续写
+          </button>
+        </div>
       </div>
 
       <MessageList
-        messages={messages}
+        messages={displayMessages}
         jobEvents={jobEvents}
         pending={actionPending}
         activeQuestionSetId={activeQuestionSetId}
@@ -651,10 +736,12 @@ export function ConversationPane({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           placeholder={
-            activeQuestionSet || composerQuestionSet
-              ? "回答当前大纲研究问题，然后点击右侧分支按钮继续。"
-              : activeArtifactContext || composerArtifactReview
-                ? "输入通过补充或调整反馈，然后点击右侧分支按钮。"
+            analyzerMode
+              ? "向小说专家提问，例如：当前未解之谜哪条最适合下一阶段回收？"
+              : activeQuestionSet || composerQuestionSet
+                ? "回答当前大纲研究问题，然后点击右侧分支按钮继续。"
+                : activeArtifactContext || composerArtifactReview
+                  ? "输入通过补充或调整反馈，然后点击右侧分支按钮。"
                   : activeDraftContext || composerDraftReview
                     ? "输入草稿验收反馈，然后点击右侧分支按钮。"
                     : activeDecisionAction
@@ -840,6 +927,57 @@ export function ConversationPane({
       />
     </div>
   );
+}
+
+function localAnalyzerMessages({
+  taskId,
+  pendingQuestion,
+  error
+}: {
+  taskId: string;
+  pendingQuestion: string;
+  error: string;
+}): ConversationMessage[] {
+  if (!taskId) {
+    return [];
+  }
+  const createdAt = new Date().toISOString();
+  if (error) {
+    return [
+      {
+        message_id: "local-analyzer-error",
+        task_id: taskId,
+        role: "error",
+        content: error,
+        payload: { channel: "outline_analyzer", status: "error" },
+        decision_cards: [],
+        created_at: createdAt
+      }
+    ];
+  }
+  if (!pendingQuestion) {
+    return [];
+  }
+  return [
+    {
+      message_id: "local-analyzer-user",
+      task_id: taskId,
+      role: "user",
+      content: pendingQuestion,
+      payload: { channel: "outline_analyzer", status: "pending" },
+      decision_cards: [],
+      created_at: createdAt
+    },
+    {
+      message_id: "local-analyzer-pending",
+      task_id: taskId,
+      role: "assistant",
+      content: "Analyzer 正在阅读当前小说记忆并分析剧情，请稍等。",
+      payload: { channel: "outline_analyzer", status: "pending" },
+      decision_cards: [],
+      created_at: createdAt
+    }
+  ];
 }
 
 function isConversationMessage(value: unknown): value is ConversationMessage {

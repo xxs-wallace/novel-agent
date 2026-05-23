@@ -12,16 +12,19 @@ from typing import Any, Callable, Mapping
 from ...schemas import RunConfig
 from ..bootstrap import resolve_db_path
 from ..constants import DEFAULT_CLOSE_READING_STAGE, DEFAULT_SEGMENTATION_STAGE
+from ..llm import JsonModelClient, ModelSettings
 from ..query_close_read import CloseReadQueryService
 from ..repos.creative_kb_storage import init_creative_kb_schema
 from ..repos.db import NovelAgentDB
-from ..services.paragraph_benchmark_service import ParagraphBenchmarkService
-from ..services.smoke_benchmark_service import AgenticSmokeBenchmarkService
 from ..runner.creative_kb_benchmark_runner import (
     CreativeKBBenchmarkRunConfig,
     CreativeKBBenchmarkRunner,
     CreativeKBBenchmarkSummaryPresenter,
 )
+from ..services.narrative_scene_indexer_service import NarrativeSceneIndexerService
+from ..services.outline_analyzer_service import OutlineAnalyzerService
+from ..services.paragraph_benchmark_service import ParagraphBenchmarkService
+from ..services.smoke_benchmark_service import AgenticSmokeBenchmarkService
 from .events import RunEventStream
 
 
@@ -312,6 +315,60 @@ class WorkflowFacade:
         )
         return result.rendered
 
+    def analyze_outline(
+        self,
+        *,
+        book_id: str,
+        question: str,
+        conversation_history: list[Mapping[str, str]] | None = None,
+        api_key: str | None = None,
+    ) -> dict[str, Any]:
+        db_path = self.db_path_for_book(book_id)
+        if not db_path.exists():
+            raise FileNotFoundError(f"close-read sqlite not found: {db_path}")
+        model_client = self._build_outline_analyzer_model(api_key=api_key)
+        service = OutlineAnalyzerService(repo_root=self.repo_root, model_client=model_client)
+        db = NovelAgentDB(db_path)
+        with db.connect() as conn:
+            result = service.chat(
+                conn,
+                book_id=book_id,
+                question=question,
+                conversation_history=conversation_history or [],
+            )
+        payload = result.to_dict()
+        self.event_stream.emit(
+            "Analyzer",
+            "Outline Analyzer 已完成只读分析" if payload["status"] == "ok" else "Outline Analyzer 需要可用模型",
+            payload={"book_id": book_id, "status": payload["status"]},
+        )
+        return payload
+
+    def _build_outline_analyzer_model(self, *, api_key: str | None = None) -> JsonModelClient | None:
+        resolved_api_key = str(api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
+        if not resolved_api_key:
+            return None
+        return JsonModelClient(
+            ModelSettings(
+                model_type="OpenAIModel",
+                model_name=_env_optional_text("NOVEL_AGENT_ANALYZER_MODEL_NAME")
+                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME")
+                or "deepseek-v4-pro",
+                provider="openai_compatible",
+                base_url=_env_optional_text("NOVEL_AGENT_ANALYZER_BASE_URL") or "https://api.deepseek.com",
+                api_key=resolved_api_key,
+                api_key_env="DEEPSEEK_API_KEY",
+                retry_without_thinking_on_failure=True,
+                thinking=_env_optional_text("NOVEL_AGENT_ANALYZER_THINKING") or "enabled",
+                reasoning_effort=_env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT") or "high",
+                include_reasoning_content=bool(
+                    _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING")
+                    or _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT")
+                ),
+                dry_run=False,
+            )
+        )
+
     def start_read_pipeline(
         self,
         *,
@@ -367,6 +424,89 @@ class WorkflowFacade:
         payload = result.to_dict()
         self.event_stream.emit("系统", "Creative KB 已可用", payload=payload)
         return payload
+
+    def build_narrative_scene_index(
+        self,
+        *,
+        db_path: Path,
+        book_id: str,
+        api_key: str | None = None,
+        dry_run: bool = False,
+        window_chars_budget: int | None = None,
+        overlap_docs: int | None = None,
+    ) -> dict[str, object]:
+        if not db_path.exists():
+            raise FileNotFoundError(f"close-read sqlite not found: {db_path}")
+        model_client = self._build_narrative_scene_indexer_model(api_key=api_key, dry_run=dry_run)
+        db = NovelAgentDB(db_path)
+        self.event_stream.emit(
+            "系统",
+            "开始构建叙事场景索引",
+            payload={"book_id": book_id, "dry_run": dry_run},
+        )
+        with db.connect() as conn:
+            db.init_schema(conn)
+            service = NarrativeSceneIndexerService(
+                repo_root=self.repo_root,
+                window_chars_budget=window_chars_budget
+                or int(os.getenv("NOVEL_AGENT_SCENE_INDEX_WINDOW_CHARS", "16000")),
+                overlap_docs=overlap_docs
+                if overlap_docs is not None
+                else int(os.getenv("NOVEL_AGENT_SCENE_INDEX_OVERLAP_DOCS", "1")),
+            )
+            cards = service.build_scene_cards(
+                conn,
+                book_id=book_id,
+                model_client=model_client,
+                persist=True,
+            )
+            conn.commit()
+            artifact_path = service.artifact_path(book_id)
+        payload = {
+            "book_id": book_id,
+            "scene_card_count": len(cards),
+            "artifact_path": str(artifact_path),
+            "dry_run": dry_run,
+            "fallback_count": sum(1 for card in cards if card.status == "fallback"),
+        }
+        self.event_stream.emit("系统", "叙事场景索引已构建", payload=payload)
+        return payload
+
+    def _build_narrative_scene_indexer_model(self, *, api_key: str | None = None, dry_run: bool = False) -> JsonModelClient:
+        resolved_api_key = str(api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
+        if not dry_run and not resolved_api_key:
+            raise RuntimeError("Narrative Scene Indexer requires DEEPSEEK_API_KEY or explicit api_key")
+        return JsonModelClient(
+            ModelSettings(
+                model_type="OpenAIModel",
+                model_name=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_MODEL_NAME")
+                or _env_optional_text("NOVEL_AGENT_ANALYZER_MODEL_NAME")
+                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME")
+                or "deepseek-v4-pro",
+                provider="openai_compatible",
+                base_url=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_BASE_URL")
+                or _env_optional_text("NOVEL_AGENT_ANALYZER_BASE_URL")
+                or "https://api.deepseek.com",
+                api_key=resolved_api_key if not dry_run else None,
+                api_key_env="DEEPSEEK_API_KEY",
+                max_output_tokens=int(os.getenv("NOVEL_AGENT_SCENE_INDEX_MAX_OUTPUT_TOKENS", "8192")),
+                timeout_seconds=int(os.getenv("NOVEL_AGENT_SCENE_INDEX_TIMEOUT_SECONDS", "300")),
+                retry_without_thinking_on_failure=True,
+                thinking=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_THINKING")
+                or _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING")
+                or "enabled",
+                reasoning_effort=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_REASONING_EFFORT")
+                or _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT")
+                or "high",
+                include_reasoning_content=bool(
+                    _env_optional_text("NOVEL_AGENT_SCENE_INDEX_THINKING")
+                    or _env_optional_text("NOVEL_AGENT_SCENE_INDEX_REASONING_EFFORT")
+                    or _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING")
+                    or _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT")
+                ),
+                dry_run=dry_run,
+            )
+        )
 
     def start_writer(
         self,
@@ -765,6 +905,8 @@ class WorkflowFacade:
             self.repo_root / ".memory" / "worlds" / f"{book_id}.world.md",
             self.repo_root / ".memory" / "outlines" / f"{book_id}.md",
             self.repo_root / ".memory" / "outlines" / f"{book_id}.outline.md",
+            self.repo_root / ".memory" / "outlines" / f"{book_id}.outline_segments.json",
+            self.repo_root / ".memory" / "outlines" / f"{book_id}.event_summaries.json",
             self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.json",
             self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.md",
         ]

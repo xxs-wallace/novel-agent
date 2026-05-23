@@ -9,8 +9,10 @@
 - 总编排与本地入库：[`novel-continuation-mvp/spec.md`](novel-continuation-mvp/spec.md)
 - 统一 CLI / TUI 交互设计：[`cli-interface/design.md`](cli-interface/design.md)，开发任务：[`cli-interface/tasks.md`](cli-interface/tasks.md)
 - 事实型 Memory 与上下文：[`narrative-memory-context/spec.md`](narrative-memory-context/spec.md)
-- 创作知识库与桥段检索：[`creative-knowledge-base/spec.md`](creative-knowledge-base/spec.md)
+- 统一叙事索引框架：[`narrative-indexer/spec.md`](narrative-indexer/spec.md)
+- 创作知识库与桥段检索：[`creative-knowledge-base/spec.md`](creative-knowledge-base/spec.md)，作为 Narrative Indexer 下的创作参考索引族
 - Writer 分层生成：[`writer-agent-layered-generation/spec.md`](writer-agent-layered-generation/spec.md)
+- Outline Analyzer 只读剧情分析：[`outline-analyzer/spec.md`](outline-analyzer/spec.md)
 - 评测与 benchmark：[`agentic-benchmark/spec.md`](agentic-benchmark/spec.md)
 
 ## Product Principle
@@ -65,6 +67,7 @@
 
 - 原文导入与 `documents` 基线构建
 - 精读、人物档案、世界观、故事大纲与源作品篇章地图
+- Narrative Indexer 多维索引卡片
 - 创作知识库、桥段卡片、结构模式与桥段参考检索
 - Writer 分层生成：全书规划、设定补全、人物补充、批次规划、章节梗概、长度计划、正文执行、验收与写回
 - 运行产物保存、检查点恢复、用户修改后的继续执行

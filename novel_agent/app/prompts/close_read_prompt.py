@@ -29,7 +29,7 @@ def build_close_read_prompt(prompt_input: dict[str, Any]) -> tuple[str, str]:
         "10. 如果某字段无更新，请返回空数组、空字符串或 should_update=false，而不是胡乱补全；作者信息、扉页、目录、版权/出版信息、广告等非小说正文不要编造成剧情。\n"
         "11. world_update.changes[].section 只能使用这 6 个固定分区：世界类型、时代背景、能力体系、超自然要素、阵营势力、核心禁忌与规则。\n"
         "12. outline_update.chapter_line 优先概括主线推进、不可逆事件和关键转折；纯气氛或弱支线不要写得比主线更长。\n"
-        "13. outline_update.timeline_events 只保留关键时间节点；同一事件不要换个说法重复写，label 要尽量稳定。\n"
+        "13. outline_update 只返回章节级一句话大纲，不要返回事件数组、事件列表或内部索引字段。\n"
         "14. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
@@ -43,7 +43,7 @@ def build_close_read_prompt(prompt_input: dict[str, Any]) -> tuple[str, str]:
         '  "document_character_mentions": [{"doc_id": 1, "character_keywords": ["角色甲", "角色乙"], "character_evidence": {"角色甲": ["...角色甲..."], "角色乙": ["...角色乙..."]}}],\n'
         '  "world_update": {"should_update": false, "changes": [{"section": "能力体系", "summary": "新增/修正内容", "evidence": "证据"}]},\n'
         '  "character_updates": [{"canonical_name": "角色甲", "aliases": [], "personality": [], "occupations": [], "age_update": null, "abilities": [], "recent_activity": "", "relationships": []}],\n'
-        '  "outline_update": {"chapter_line": "[12] 章节名: 本章发生了什么", "timeline_events": [{"label": "事件名", "participants": ["角色甲"], "summary": "事件概括"}]}\n'
+        '  "outline_update": {"chapter_line": "[12] 章节名: 本章发生了什么"}\n'
         "}\n\n"
         "输入数据如下，请严格按 JSON 返回，不要附加解释。\n\n"
         + json.dumps(prompt_input, ensure_ascii=False, indent=2)

@@ -197,6 +197,34 @@ class WebSessionService:
         return list(self._messages.get(task_id, []))
 
     def append_user_message(self, task_id: str, content: str, *, payload: Mapping[str, Any] | None = None) -> ConversationMessage:
+        payload = dict(payload or {})
+        analyzer_question = self._outline_analyzer_question(content=content, payload=payload)
+        if analyzer_question:
+            message = self.append_message(task_id, role="user", content=content, payload=payload)
+            try:
+                result = self.facade.analyze_outline(
+                    book_id=task_id,
+                    question=analyzer_question,
+                    conversation_history=self._conversation_history_for_analyzer(task_id),
+                )
+                self.append_message(
+                    task_id,
+                    role="assistant",
+                    content=str(result.get("answer") or ""),
+                    payload={
+                        "channel": "outline_analyzer",
+                        "status": str(result.get("status") or ""),
+                        "sources": result.get("sources") or [],
+                    },
+                )
+            except Exception as exc:
+                self.append_message(
+                    task_id,
+                    role="error",
+                    content=f"Analyzer 暂时无法完成分析：{exc}",
+                    payload={"channel": "outline_analyzer", "status": "error"},
+                )
+            return message
         message = self.append_message(task_id, role="user", content=content, payload=payload)
         self.append_message(
             task_id,
@@ -205,6 +233,25 @@ class WebSessionService:
             payload={"input_message_id": message.message_id},
         )
         return message
+
+    def _outline_analyzer_question(self, *, content: str, payload: Mapping[str, Any]) -> str:
+        if str(payload.get("channel") or "") == "outline_analyzer":
+            return str(payload.get("question") or content).strip()
+        text = content.strip()
+        for prefix in ("/analyze", "/analyzer", "/outline-analyzer"):
+            if text == prefix:
+                return ""
+            if text.startswith(prefix + " "):
+                return text[len(prefix):].strip()
+        return ""
+
+    def _conversation_history_for_analyzer(self, task_id: str) -> list[dict[str, str]]:
+        history: list[dict[str, str]] = []
+        for message in self._messages.get(task_id, [])[-12:]:
+            if message.payload.get("channel") != "outline_analyzer":
+                continue
+            history.append({"role": message.role, "content": message.content})
+        return history
 
     def append_message(
         self,

@@ -233,6 +233,14 @@ button:disabled {
   gap: 8px;
 }
 
+.pane-title-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 h1,
 h2,
 h3,
@@ -815,7 +823,7 @@ textarea {
 .composer {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -828,7 +836,7 @@ textarea {
 }
 
 .composer-draft {
-  grid-template-columns: minmax(180px, 1fr) minmax(300px, 42%);
+  grid-template-columns: minmax(0, 1fr) 216px;
   align-items: stretch;
   gap: 8px 12px;
   padding: 10px 12px;
@@ -851,6 +859,8 @@ textarea {
 }
 
 .composer textarea {
+  min-width: 0;
+  width: 100%;
   min-height: 86px;
   border: 0;
   border-radius: 16px;
@@ -873,23 +883,53 @@ textarea {
 .composer-actions {
   display: grid;
   gap: 8px;
-  min-width: 138px;
+  width: 128px;
+  min-width: 128px;
+  max-width: 128px;
+}
+
+.composer-actions button:not(.send-button) {
+  width: 128px;
+  min-width: 128px;
+  max-width: 128px;
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .composer-decision-actions {
-  grid-template-columns: repeat(2, minmax(132px, 1fr));
-  min-width: min(420px, 42vw);
+  grid-template-columns: repeat(2, 104px);
+  width: 216px;
+  min-width: 216px;
+  max-width: 216px;
+}
+
+.composer-decision-actions button:not(.send-button) {
+  width: 104px;
+  min-width: 104px;
+  max-width: 104px;
+  font-size: 10.5px;
 }
 
 .composer-draft .composer-decision-actions {
-  grid-template-columns: repeat(auto-fit, minmax(124px, 1fr));
-  min-width: 0;
+  grid-template-columns: repeat(2, 104px);
+  width: 216px;
+  min-width: 216px;
+  max-width: 216px;
   gap: 6px;
 }
 
 .composer-draft .composer-decision-actions button {
+  width: 104px;
+  min-width: 104px;
+  max-width: 104px;
   min-height: 32px;
   padding: 6px 9px;
+  font-size: 11px;
   line-height: 1.2;
   text-align: center;
   white-space: normal;
@@ -1219,10 +1259,28 @@ th {
 
   .composer-actions {
     grid-template-columns: 1fr;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .composer-actions button:not(.send-button) {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
   }
 
   .composer-draft .composer-decision-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .composer-draft .composer-decision-actions button {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
   }
 
   .message-bubble {

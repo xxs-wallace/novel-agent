@@ -33,10 +33,11 @@ class WebActionService:
         "start_read": "read",
         "start_close_read": "close_read",
         "build_creative_kb": "kb",
+        "build_narrative_scene_index": "narrative_scene_index",
         "start_writer": "writer",
         "resume": "writer_resume",
     }
-    _EXCLUSIVE_TASK_JOB_TYPES = {"read", "close_read", "kb", "writer", "writer_resume"}
+    _EXCLUSIVE_TASK_JOB_TYPES = {"read", "close_read", "kb", "narrative_scene_index", "writer", "writer_resume"}
 
     _WRITER_REVIEW_ACTIONS = {
         "confirm_current_step",
@@ -79,6 +80,7 @@ class WebActionService:
         "start_read",
         "start_close_read",
         "build_creative_kb",
+        "build_narrative_scene_index",
         "start_writer",
         "resume",
         "confirm_current_step",
@@ -248,6 +250,7 @@ class WebActionService:
                 "start_read": "已准备开始导入原文，进度会通过后台事件更新。",
                 "start_close_read": "已准备开始阅读，进度会通过后台事件更新。",
                 "build_creative_kb": "已准备构建 Creative KB，进度会通过后台事件更新。",
+                "build_narrative_scene_index": "已准备构建叙事场景索引，进度会通过后台事件更新。",
                 "start_writer": "已收到续写意图，Writer 正在生成下一条可审阅内容；需要你回答、审阅或验收时会继续发到会话里。",
                 "resume": "已准备恢复最近一次未完成流程。",
             }[action]
@@ -268,6 +271,8 @@ class WebActionService:
             return await self._run_read_pipeline(context, read_only=False)
         if context.job_type == "kb":
             return await self._run_creative_kb(context)
+        if context.job_type == "narrative_scene_index":
+            return await self._run_narrative_scene_index(context)
         if context.job_type == "writer":
             return await self._run_writer(context)
         if context.job_type == "writer_resume":
@@ -340,8 +345,40 @@ class WebActionService:
                 should_stop=context.should_cancel,
             ),
         )
+        result_payload = dict(result)
+        if not _truthy(payload.get("skip_scene_index")) and hasattr(self.session_service.facade, "build_narrative_scene_index"):
+            context.emit("progress", "阅读完成，开始构建叙事场景索引。")
+            try:
+                scene_result = await self._call_facade_with_events(
+                    context,
+                    lambda: self.session_service.facade.build_narrative_scene_index(
+                        db_path=db_path,
+                        book_id=context.task_id,
+                        api_key=api_key,
+                        dry_run=_truthy(payload.get("scene_index_dry_run")),
+                        window_chars_budget=self._optional_int(
+                            payload,
+                            "scene_index_window_chars",
+                            default=self._env_optional_int("NOVEL_AGENT_WEB_SCENE_INDEX_WINDOW_CHARS"),
+                        ),
+                        overlap_docs=self._optional_int(
+                            payload,
+                            "scene_index_overlap_docs",
+                            default=self._env_optional_int("NOVEL_AGENT_WEB_SCENE_INDEX_OVERLAP_DOCS"),
+                        ),
+                    ),
+                )
+                result_payload["narrative_scene_index"] = dict(scene_result)
+                context.emit("progress", "叙事场景索引已完成，右侧结果浏览器会刷新。", payload=self._progress_payload(context.task_id))
+            except Exception as exc:
+                result_payload["narrative_scene_index_error"] = str(exc)
+                context.emit(
+                    "log",
+                    "叙事场景索引构建失败；阅读结果已保留，可稍后单独重试。",
+                    payload={"error": str(exc)},
+                )
         context.emit("progress", "阅读本轮已完成，右侧结果浏览器会刷新。", payload=self._progress_payload(context.task_id))
-        return dict(result)
+        return result_payload
 
     async def _run_creative_kb(self, context: JobContext) -> dict[str, Any]:
         api_key = self._require_api_key()
@@ -359,6 +396,37 @@ class WebActionService:
             ),
         )
         context.emit("progress", "Creative KB 构建完成。", payload=self._progress_payload(context.task_id))
+        return dict(result)
+
+    async def _run_narrative_scene_index(self, context: JobContext) -> dict[str, Any]:
+        payload = context.payload
+        dry_run = _truthy(payload.get("dry_run"))
+        api_key = "" if dry_run else self._require_api_key()
+        snapshot = self.session_service.facade.task_snapshot(book_id=context.task_id)
+        db_path = snapshot.db_path or self.session_service.facade.db_path_for_book(context.task_id)
+        if not db_path.exists():
+            raise FileNotFoundError("还没有任务索引，请先导入原文并完成阅读。")
+        context.emit("progress", "开始构建叙事场景索引。")
+        result = await self._call_facade_with_events(
+            context,
+            lambda: self.session_service.facade.build_narrative_scene_index(
+                db_path=db_path,
+                book_id=context.task_id,
+                api_key=api_key,
+                dry_run=dry_run,
+                window_chars_budget=self._optional_int(
+                    payload,
+                    "window_chars",
+                    default=self._env_optional_int("NOVEL_AGENT_WEB_SCENE_INDEX_WINDOW_CHARS"),
+                ),
+                overlap_docs=self._optional_int(
+                    payload,
+                    "overlap_docs",
+                    default=self._env_optional_int("NOVEL_AGENT_WEB_SCENE_INDEX_OVERLAP_DOCS"),
+                ),
+            ),
+        )
+        context.emit("progress", "叙事场景索引构建完成。", payload=self._progress_payload(context.task_id))
         return dict(result)
 
     async def _run_writer(self, context: JobContext) -> dict[str, Any]:
@@ -971,7 +1039,6 @@ class WebActionService:
                 )
             ]
 
-        workflow_action = actions[0].workflow_action
         return [
             DecisionCard(
                 card_id=f"{task_id}:writer-review:{active_stage}",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -16,7 +17,7 @@ from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
-from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget
+from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget, MemoryQueryState
 from novel_agent.app.schemas.orchestration_schema import (
     ExtractedCharacterMention,
     ExtractedCharacterMentions,
@@ -32,6 +33,7 @@ from novel_agent.app.services.narrative_memory_query_service import NarrativeMem
 from novel_agent.app.services.outline_research_service import (
     CharacterMentionExtractor,
     CharacterMentionResolver,
+    ModelOutlineResearchModelAdapter,
     OutlineResearchContextBroker,
     OutlineResearchLoopController,
     OutlineResearchModelAdapter,
@@ -135,6 +137,50 @@ def _seed_chapter(
     )
 
 
+def _write_scene_cards(repo_root: Path, *, book_id: str) -> Path:
+    path = repo_root / ".memory" / "index_cards" / f"{book_id}.scene_cards.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "book_id": book_id,
+                "scene_cards": [
+                    {
+                        "card_id": f"narrative-scene:{book_id}:trust-conflict",
+                        "card_type": "narrative_scene",
+                        "book_id": book_id,
+                        "summary": "沈青和顾迟因为旧案证据来源爆发最近一次信任冲突，冲突后只保持有限合作。",
+                        "source_doc_ids": ["1"],
+                        "source_title_indexes": [11],
+                        "source_doc_range": "1",
+                        "query_facets": ["信任冲突", "旧案证据", "有限合作"],
+                        "importance_facets": ["relationship_turning_point"],
+                        "consumer_hints": ["outline_research", "writer", "analyzer"],
+                        "summary_sufficiency": "needs_raw_for_emotional_texture",
+                        "raw_read_reason": "如果要写现场对白和羞辱细节，需要回读原文质感。",
+                        "status": "committed",
+                        "confidence": 0.91,
+                        "payload": {
+                            "scene_type": "relationship_turning_point",
+                            "label": "旧案证据信任冲突",
+                            "participants": ["沈青", "顾迟"],
+                            "trigger": "旧案证据来源被质疑。",
+                            "turning_point": "两人的信任从默认协作转为有限合作。",
+                            "outcome": "冲突结束后两人暂时保留合作，但关系降温。",
+                            "relationship_movements": ["沈青与顾迟由互信转向有限合作"],
+                            "future_consequence": "后续大纲不宜直接安排无条件信任配合。",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 class _ScriptedResearchAdapter:
     def __init__(
         self,
@@ -200,6 +246,19 @@ class _AnswerAwareAdapter(_ScriptedResearchAdapter):
         )
 
 
+class _PromptLengthModelClient:
+    model = "prompt-length-test-model"
+
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self.payload = dict(payload)
+        self.calls: list[dict[str, str]] = []
+
+    def generate_json(self, *, system_prompt: str, user_prompt: str, fallback_factory: Any, use_fallback_on_error: bool = False) -> tuple[dict[str, Any], str]:
+        _ = fallback_factory, use_fallback_on_error
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+        return dict(self.payload), ""
+
+
 def test_outline_research_schema_serialization_and_validation(tmp_path: Path) -> None:
     source = TraceableSource(type="story_outline", path=str(tmp_path / "outline.md"), evidence_level="structured_state")
     packet = OutlineSeedPacket(
@@ -249,6 +308,54 @@ def test_outline_research_schema_serialization_and_validation(tmp_path: Path) ->
         SufficiencyDecision(decision_id="bad", status="maybe")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="user_questions"):
         SufficiencyDecision(decision_id="bad", status="needs_user_input")
+
+
+def test_outline_research_model_adapter_logs_prompt_lengths_for_broker_selection(caplog: Any) -> None:
+    model_client = _PromptLengthModelClient(
+        {
+            "need_drill_down": False,
+            "selected_ids": ["summary-1"],
+            "query_suffix": "旧案线索",
+            "reason": "候选摘要命中旧案线索",
+            "confidence": 0.8,
+            "need_sibling_scan": False,
+        }
+    )
+    adapter = ModelOutlineResearchModelAdapter(model_client=model_client)
+    state = MemoryQueryState(
+        original_query="旧案线索下一步如何回收",
+        current_level="event_summary",
+        current_candidates=[
+            {
+                "id": "summary-1",
+                "summary": "旧案线索仍未回收。",
+                "page_type": "event_summary",
+            }
+        ],
+    )
+    request = ResearchRequest(
+        request_id="req-log",
+        request_type="story_detail",
+        query="旧案线索下一步如何回收",
+        purpose="确认 NarrativeInquiryBroker 候选选择 prompt 长度日志",
+        priority="high",
+    )
+
+    caplog.set_level(logging.INFO, logger="novel_agent.app.services.outline_research_service")
+    selection = adapter.select_memory_candidates(state=state, request=request)
+
+    assert selection.selected_ids == ["summary-1"]
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "outline_research.model_prompt_stats" in record.getMessage()
+    ]
+    assert len(messages) == 1
+    assert "stage=select_memory_candidates:event_summary" in messages[0]
+    assert "system_chars=" in messages[0]
+    assert "user_chars=" in messages[0]
+    assert "total_bytes=" in messages[0]
+    assert "旧案线索下一步如何回收" not in messages[0]
 
 
 def test_character_mentions_resolve_existing_alias_ambiguous_missing_and_reject_new(tmp_path: Path) -> None:
@@ -430,6 +537,59 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
     assert source_result.results[0]["source_doc_ids"] == [1]
     assert source_result.results[0]["source_doc_range"] == "1"
     assert outcome_result.results[0]["outcome"]
+
+
+def test_outline_research_story_detail_uses_narrative_scene_cards_first(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-scene-cards"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_chapter(
+            conn,
+            book_id=book_id,
+            index=11,
+            title="第十一章 信任裂缝",
+            summary="沈青和顾迟因为旧案证据来源爆发最近一次信任冲突，结束后只保持有限合作。",
+            mentioned=["沈青", "顾迟"],
+        )
+        _write_scene_cards(orchestrator.repo_root, book_id=book_id)
+        conn.commit()
+
+        broker = OutlineResearchContextBroker(repo_root=orchestrator.repo_root)
+        results = broker.resolve_requests(
+            conn,
+            book_id=book_id,
+            requests=[
+                ResearchRequest(
+                    request_id="story-scene",
+                    request_type="story_detail",
+                    query="最近一次信任冲突的经过和结果",
+                    priority="high",
+                    facets_needed=["relationship_state", "outcome"],
+                )
+            ],
+            budget=ResearchBudget(max_total_requests=1, max_return_tokens_per_request=1000),
+        )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.request_type == "story_detail"
+    assert result.results[0]["event_summary_level"] == "narrative_scene"
+    assert result.results[0]["memory_query_protocol"] == "narrative_scene_card_search"
+    assert result.results[0]["turning_point"] == "两人的信任从默认协作转为有限合作。"
+    assert result.results[0]["relationship_movements"] == ["沈青与顾迟由互信转向有限合作"]
+    assert result.results[0]["summary_sufficiency"] == "needs_raw_for_emotional_texture"
+    assert "raw_read_recommended" in result.missing_facets
+    scene_trace = [
+        item
+        for item in result.results[0]["memory_query_trace"]
+        if item.get("operation") == "narrative_index_search"
+    ]
+    assert scene_trace
+    assert scene_trace[0]["consumer"] == "outline_research"
+    assert scene_trace[0]["target_card_types"] == ["narrative_scene"]
 
 
 def test_narrative_memory_query_btree_drills_to_documents_and_trace(tmp_path: Path) -> None:

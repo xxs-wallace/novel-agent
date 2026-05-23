@@ -3,7 +3,7 @@
 ## Source Of Truth
 
 - 产品级核心流程、UI 交互、用户可见状态文案，以 [`../spec.md`](../spec.md) 为准。
-- 本 spec 只定义事实型 Memory 与上下文装配：人物、世界观、章节摘要、故事大纲、源作品篇章地图与精读进度。
+- 本 spec 只定义事实型 Memory 与上下文装配：人物、世界观、章节摘要、故事大纲、原文回源索引与精读进度。
 - 本 spec 的输出会进入核心流程中的“建模准备”“本章写作材料”“确认写回”等阶段，但不直接定义用户界面。
 
 ## Why
@@ -26,6 +26,7 @@
 
 - `../spec.md`：产品级核心流程与 UI 交互 Source of Truth
 - `novel-continuation-mvp/spec.md`：总编排层
+- `narrative-indexer/spec.md`：统一叙事索引框架，负责把 Memory 与 KB 派生信息整理为多类可检索 card
 - `creative-knowledge-base/spec.md`：桥段知识库与检索层
 - 本 spec：事实型上下文与长期 Memory 层
 
@@ -37,9 +38,9 @@
   - 世界观文档
   - 章节摘要
   - 故事大纲
-  - 源作品篇章地图
   - 精读进度
   - 上下文装配
+  - 为 Narrative Indexer 提供事实型派生来源，包括 documents、outline segment、chapter summary、character experience、world concept 和原文回源索引
 - 本 spec 不负责：
   - 桥段去重
   - 代表片段选择
@@ -52,14 +53,15 @@
 - 所有 Memory 更新都应尽量基于章节级精读结果，而不是零散的单段猜测。
 - 续写主 Agent 读取 Memory 时优先取结构化结果，不直接回读全书原文。
 - Memory 的目标是“持续一致”，不是“文学代表性”。
+- Memory 输出 SHOULD 能被 Narrative Indexer 派生成事实型 `IndexCard`；close-read 不应只产出给人阅读的摘要，还应产出可检索、可回源、可判断摘要充分性的索引素材。
 - Chapter Summary Agent 的处理粒度 SHALL 保持章节级，即继续围绕 `document_title_index` 或超长章节拆批生成章节摘要。
 - 粗读入库阶段 SHALL 在构造 segmentation prompt 前识别章节边界候选；本地规则只产生候选与置信度，不应把少数硬编码格式当作唯一章节切分真相。
 - 高置信章节边界 SHALL 作为 segment hard boundary，粗读模型不得把它吞入上一章节 document；中低置信边界 SHOULD 作为模型判定参考，而不是强制切分。
 - Character Evidence Agent 的处理粒度 MAY 独立于章节摘要，将多个 `documents` 拼接为一个 evidence batch，用于降低人物抽取与人物性判断的 prompt/JSON 维度。
 - Character Evidence Agent 的目标是为 Memory Candidate Agent 提供人物抽取、发言判断、行动状态与关系变化线索；它不是原文 offset 标注或可审计语料回源系统。
-- Source Arc Mapping SHOULD 在 close-read 完成后执行，而不是在顺序精读过程中即时决定；该阶段基于完整章节摘要、故事大纲、人物线和世界观，从全局视角记录源作品中相对独立的故事篇章、转折点与功能段落。
-- Memory 层保存的 `SourceArcMap` 是源作品事实型篇章地图，不是 Writer 直接套用的新书规划模板；可迁移的谋篇布局、节奏模式和人物登场/关系推进模式 SHOULD 由创作知识库层进一步沉淀为 `NarrativeStructurePattern` 或 `ArcPatternCard`。
-- 章节摘要和故事大纲中依赖后文判断的内容 SHOULD 区分 `provisional` 与 `committed` 状态；顺序 close-read 产生的即时判断默认是暂定结果，只有在结合后续窗口或全局篇章地图复核后才可标记为已定稿。
+- Narrative Scene Indexer / SourceArcMapBuilder 属于 `narrative-indexer` 层；Memory 层只提供其所需的 documents、章节摘要、outline segment、人物/世界概要和回源索引。
+- `SourceArcMap` 是由 Narrative Indexer 基于 SceneCards 聚合出的派生结构视图，不是 Memory 层的 source of truth，也不应反向覆盖人物、世界观或章节事实 Memory。
+- 章节摘要和故事大纲中依赖后文判断的内容 SHOULD 区分 `provisional` 与 `committed` 状态；顺序 close-read 产生的即时判断默认是暂定结果，只有在结合后续窗口、SceneCards 或人工复核后才可标记为已定稿。
 
 ## Memory Layers
 
@@ -122,8 +124,8 @@
   - `boundary_status`
   - `source_start_offset`
   - `source_end_offset`
-- **AND** Chapter Summary、Story Outline、SourceArcMap 与 BTree Page SHOULD 优先使用已校验的章节边界元数据
-- **AND** 如果后续 close-read 或 SourceArcMap 发现边界错误，系统 SHOULD 能标记并重建受影响的 document/chapter Memory，而不是只在章节摘要层修补标题
+- **AND** Chapter Summary、Story Outline、Narrative Indexer 与 BTree Page SHOULD 优先使用已校验的章节边界元数据
+- **AND** 如果后续 close-read、Narrative Scene Indexer 或人工复核发现边界错误，系统 SHOULD 能标记并重建受影响的 document/chapter Memory，而不是只在章节摘要层修补标题
 
 ### Requirement: BTree-like Narrative Memory
 close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分层 Page 数据结构，而不是一组彼此孤立的摘要文件。
@@ -133,42 +135,41 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **THEN** 每一层 Memory Page 节点 SHALL 保存：
   - `page_id`
   - `page_type`
-  - `child_refs`：指向下一层 Page 或原始 document/event 的索引
+  - `child_refs`：指向下一层 Page、章节摘要或原始 document 的索引
   - `source_doc_range` 或等价的 `source_doc_ids`
   - `summary`：对下一层节点的压缩概括
   - `status`：例如 `provisional` / `committed`
   - `updated_at`
 - **AND** Page 的 `summary` MUST 只压缩下一层节点已经表达的信息，不应引入未被下层索引支撑的新事实
 - **AND** Page 的 `child_refs` MUST 足以让系统从上层摘要确定性回溯到下一层节点
-- **AND** Page SHOULD 支持多个同层 sibling；对几百万字的超长篇小说，根部以下 MAY 存在多个 event-summary Page，而不是强行压缩成单个全书摘要
+- **AND** Page SHOULD 支持多个同层 sibling；对几百万字的超长篇小说，根部以下 MAY 存在多个 `outline_segment` Page，而不是强行压缩成单个全书摘要
 
 #### Scenario: Memory BTree 层级
 - **WHEN** 系统完成 close-read Memory 写回
 - **THEN** 推荐的事实压缩链路 SHOULD 是：
   - `document` leaf：粗读入库的原始文本片段，保存原文、source offset、`doc_id`
   - `chapter` Page：多个连续 `document` 的章节级摘要
-  - `event` Page：多个 `chapter.summary_md` 的剧情事件概括
-  - `event_summary` Page：多个 `event` 的高层连续摘要
+  - `outline_segment` Page：每 N 个连续 `document` / `chapter` 的连续剧情压缩梗概
+  - `outline_root` Page：多个 `outline_segment` 的根索引，只保存 segment id、范围和极短摘要
 - **AND** 多个 `document` SHOULD 对应一个真实 chapter；如果章节边界识别不可靠，系统 SHOULD 显式标记该 chapter Page 为派生的 `document_title_index` 聚合桶
-- **AND** 多个 chapter summary SHOULD 汇聚为一个 event
-- **AND** 当信息密度较高时，event 覆盖的原始范围 MAY 退化到单个 chapter，甚至单个 document
-- **AND** event summary SHOULD 汇总多个 event，而不是直接跳过 event list 汇总原始 documents
+- **AND** `outline_segment` MUST 直接从连续 chapter summaries / document summaries 压缩生成，不经过 `timeline_events`、`event list` 或等价中间事件数组
+- **AND** 真正用于多维检索的事件索引 SHOULD 由 Narrative Indexer 的 `FactualEventCard` 承担，不属于 Story Outline Memory schema
 
 #### Scenario: BTree 压缩比例
 - **WHEN** 系统生成 chapter 级 `summary_md`
 - **THEN** `summary_md` SHOULD 不超过其覆盖原始文字内容的 1/10
 - **AND** 如果源文本信息密度过高导致摘要超过 1/10，系统 SHOULD 将 chapter Page 拆分为更小的 Page 或标记 `compression_warning`
-- **WHEN** 系统生成 `event_summary` Page
-- **THEN** 单个 `event_summary.summary` SHOULD 不超过约 200 个中文字符
-- **AND** 单个 `event_summary` Page SHOULD 目标覆盖约 10 万到 20 万字原始小说文档
-- **AND** `event_summary` Page SHOULD 只记录其覆盖的 event id 起止范围，例如 `start_event_id`、`end_event_id` 或等价的连续 `event_id_range`
-- **AND** 若 event id 不连续或发生重排，系统 MAY 附加 `event_ids` 列表作为校验索引，但常规 Writer 输入 SHOULD 优先使用起止范围
+- **WHEN** 系统生成 `outline_segment` Page
+- **THEN** 单个 `outline_segment.summary` SHOULD 是连续自然语言梗概，保留剧情顺序、因果、主要人物状态变化、关系推进、设定揭示和未解问题
+- **AND** 单个 `outline_segment` SHOULD 目标覆盖配置指定的连续 N 个 document / chapter，或约 10 万到 20 万字原始小说文档
+- **AND** `outline_segment` MUST 保存其覆盖的 `source_doc_ids`、`source_title_indexes` 或 `source_doc_range`
+- **AND** `outline_root` SHOULD 只保存每个 segment 的 id、source range、极短 summary hint 和 status
 
 #### Scenario: 超长篇多 Page 根结构
 - **WHEN** 小说原始长度达到数百万字
-- **THEN** 系统 SHOULD 允许存在多个 sibling `event_summary` Page
-- **AND** 上层 Writer Context SHOULD 按续写位置、用户意图、人物线和相关 event id 范围选择需要展开的 Page
-- **AND** 系统不应为了得到唯一总摘要而把多个 event summary 继续压缩到丢失回源能力
+- **THEN** 系统 SHOULD 允许存在多个 sibling `outline_segment` Page
+- **AND** 上层 Writer Context SHOULD 按续写位置、用户意图、人物线和相关 source range 选择需要展开的 Page
+- **AND** 系统不应为了得到唯一总摘要而把多个 outline segment 继续压缩到丢失回源能力
 
 ### Requirement: Character Memory
 系统 SHALL 为重要角色维护持续更新的人物档案。
@@ -200,16 +201,16 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 系统维护人物档案
 - **THEN** 人物档案 SHOULD 分为至少两层：
   - 基础属性层：姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、基础人际关系、能力和特长
-  - 人物剧情时间线层：以该人物为维度过滤出的 `story_events`
+  - 人物剧情时间线层：以该人物为维度过滤出的 `key_experiences`
 - **AND** 基础属性层 SHOULD 足够压缩，服务于 Writer 快速理解人物稳定状态
 - **AND** 人物剧情时间线层 SHOULD 保留关键事件、关系推进、状态转折与行动结果
-- **AND** 每个 `story_event` MUST 带有可回源索引，例如 `event_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
+- **AND** 每条 `key_experience` MUST 带有可回源索引，例如 `experience_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
 - **AND** `mentioned_doc_ids` / `speaking_doc_ids` 仍可作为底层索引保存，但不应作为模型筛选人物过往的唯一入口
 
-#### Scenario: Character Event List 与原文回源
+#### Scenario: Character Experience List 与原文回源
 - **WHEN** 模型需要确认某人物的过往经历
 - **THEN** 系统 SHOULD 先返回该人物的人物剧情时间线，而不是直接返回庞大的 mentioned doc id 列表
-- **AND** 模型 MAY 选择其中一个或多个 `event_id` / `source_doc_ids` 请求进一步展开原文证据
+- **AND** 模型 MAY 选择其中一个或多个 `experience_id` / `source_doc_ids` 请求进一步展开原文证据
 - **AND** 系统 SHOULD 通过该事件携带的 `source_doc_ids` 或 `source_doc_range` 返回对应原始 `documents` 的摘录或全文片段
 
 ### Requirement: Character Evidence Batch
@@ -254,6 +255,29 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **THEN** Character Evidence Agent MAY 将这些候选作为提示
 - **AND** Character Evidence Agent 不应完全依赖本地候选名服务
 - **AND** Character Evidence Agent 仍应发现本地候选名服务漏掉的真实角色
+
+### Requirement: Character Profile Update Batch
+系统 SHALL 将人物证据抽取与人物档案归并拆成两个可独立调参的 batch。
+
+#### Scenario: Evidence Batch 与 Profile Update Batch 分工
+- **WHEN** close-read 需要更新人物档案
+- **THEN** Character Evidence Agent SHOULD 先按连续 `documents` 组装 evidence batch，目标是抽取当前原文窗口涉及哪些人物、发言、行动状态与关系变化
+- **AND** Profile Update / Character Reduce Agent SHOULD 再按人物维度读取既有人物档案与 ordered evidence，输出可写回的人物档案增量
+- **AND** Evidence Batch 的 document 预算和 Profile Update Batch 的档案预算 SHOULD 分开配置
+
+#### Scenario: Profile Update Batch 预算
+- **WHEN** 系统组装 Profile Update / Character Reduce Agent 输入
+- **THEN** 初始建议把连续 document 原文或 evidence 摘要控制在约 16KB 以内
+- **AND** 同一条 profile update prompt 中最多包含 4 个候选人物档案
+- **AND** 这些人物既有档案合计 SHOULD 控制在约 8KB 以内
+- **AND** 上述阈值 MUST 可配置，并应通过 benchmark 调整，而不是写死到 prompt 语义中
+- **AND** 如果人物之间关系高度耦合，系统 MAY 将相关人物放入同一 update batch；如果档案过长、关系冲突复杂或模型低置信，系统 SHOULD 退回单人物 reduce
+
+#### Scenario: Profile Update Batch 输出边界
+- **WHEN** Profile Update / Character Reduce Agent 返回结果
+- **THEN** 输出 MUST 按 `character_id` 或 canonical identity 分离每个人物的更新
+- **AND** 不得把 A 人物的经历写入 B 人物档案
+- **AND** 不得使用本地 heuristic 伪装模型完成了人物性、关系或经历归并
 
 ### Requirement: World Memory
 系统 SHALL 为每部小说维护唯一的详细世界观文档与压缩世界观概要。
@@ -304,7 +328,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 系统已经读取到足够后续章节，可以用一个连续上下文窗口复核目标章节
 - **THEN** 系统 MAY 使用 `evidence_window` 记录本次复核参考的 `start_document_title_index` 与 `end_document_title_index`
 - **AND** 系统 MAY 使用 `target_range` 记录本次定稿覆盖的章节范围
-- **AND** 只有被后续窗口或 `SourceArcMap` 复核过的章节摘要才能标记为 `summary_status = committed`
+- **AND** 只有被后续窗口、Narrative Scene Indexer 或人工复核过的章节摘要才能标记为 `summary_status = committed`
 - **AND** 对同一章节，后续 `committed` 摘要 SHOULD 覆盖或优先于较早的 `provisional` 摘要
 
 ### Requirement: Story Outline Memory
@@ -325,49 +349,29 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 
 #### Scenario: Story Outline 四层结构
 - **WHEN** 系统完成 close-read Memory 写回
-- **THEN** 叙事事实链 SHOULD 形成四层结构：
+- **THEN** 叙事事实链 SHOULD 形成分段压缩结构：
   - `document`：粗读入库的原始文档片段，保存原文与 source offset
   - `chapter summary`：close-read 后的章节 Page 概要，压缩多个 document
-  - `event list`：从多个 chapter summary 中抽取的结构化关键事件 Page 列表
-  - `event summary`：对多个 event Page 的连续自然语言压缩
-- **AND** 上层不应丢失下层索引；`summary`、`event list` 和 `event summary` SHOULD 能回到其覆盖的 `source_doc_ids` 或 `source_doc_range`
-- **AND** 该四层结构 SHOULD 满足 BTree-like Memory Page 的不变量：每一层 Page 都保存对下一层节点的索引与压缩概括
+  - `outline segment`：每 N 个连续 document / chapter 的连续剧情压缩梗概
+  - `outline root`：多个 outline segment 的上层索引
+- **AND** 上层不应丢失下层索引；`chapter summary`、`outline segment` 和 `outline root` SHOULD 能回到其覆盖的 `source_doc_ids` 或 `source_doc_range`
+- **AND** Story Outline Memory schema SHALL NOT 输出 `timeline_events`、`event list` 或等价事件数组，避免模型被旧 schema 诱导
+- **AND** 多维事件检索应由 Narrative Indexer 的 `FactualEventCard` 实现，而不是由 Story Outline Memory 的 outline schema 实现
 
-#### Scenario: Outline Event List 字段
-- **WHEN** 系统保存 close-read 产生的大纲事件
-- **THEN** 每个事件 SHOULD 至少包含：
-  - `event_id`
-  - `label`
-  - `summary`
-  - `document_title_index`
-  - `participants`
-  - `source_title_indexes`
-  - `source_doc_ids`
-  - `source_doc_start_id`
-  - `source_doc_end_id`
-  - `source_doc_range`
-  - `event_summary_level`
-- **AND** `event_id` SHOULD 在同一书籍内稳定，可用于后续模型请求精确展开该事件
-- **AND** `summary` SHOULD 是多个 document/chapter 剧情的浓缩概括，而不是逐段复述
-- **AND** `participants` SHOULD 支持反向构建人物维度 event list
-
-#### Scenario: Event Summary
+#### Scenario: Outline Segment
 - **WHEN** 系统维护整书或章节范围的大纲
-- **THEN** 系统 SHOULD 保存 `event_summary` 或等价字段，作为 event list 的自然语言连续摘要
-- **AND** `event_summary` SHOULD 保留事件顺序、因果衔接和主要人物状态变化
-- **AND** `event_summary` SHOULD 同样携带或继承覆盖范围的 `source_doc_ids` / `source_doc_range`
-- **AND** 单个 `event_summary` SHOULD 是面向 Writer 快速定位历史上下文的 Page 摘要，不超过约 200 个中文字符
-- **AND** 单个 `event_summary` SHOULD 目标覆盖约 10 万到 20 万字原始小说文档
-- **AND** 常规情况下 `event_summary` 只需要记录对应 event id 的起止范围；系统通过 event id 范围再展开到 event list、chapter summary 和 document
+- **THEN** 系统 SHOULD 保存 `outline_segment`，作为连续自然语言剧情压缩摘要
+- **AND** `outline_segment` SHOULD 保留事件顺序、因果衔接、主要人物状态/关系变化、设定揭示、未解问题和结果
+- **AND** `outline_segment` MUST 携带覆盖范围的 `source_doc_ids` / `source_doc_range`
+- **AND** 单个 `outline_segment` SHOULD 是面向 Analyzer / Writer 快速定位历史上下文的 Page 摘要
 
-#### Scenario: Event Summary 滚动压缩
-- **GIVEN** close-read 已积累 N 个尚未被上层摘要覆盖的 outline events
+#### Scenario: Outline Segment 滚动压缩
+- **GIVEN** close-read 已积累 N 个尚未被上层摘要覆盖的 chapter summaries
 - **WHEN** N 达到压缩阈值
-- **THEN** Agent SHOULD 把这些未压缩 events 按时间顺序发送给模型
-- **AND** 模型 SHOULD 判断前部哪些 events 关联性足够强，可以压缩为一个连续 `event_summary`
-- **AND** 模型 MUST 返回尾部不相关、太新或需要等待后续上下文的 `event` index
-- **AND** Agent MUST 只把非尾部 events 标记为已压缩，尾部 events 继续保留为 pending
-- **AND** 任何 `event_summary` MUST 保存其覆盖的 `event_ids`、`source_doc_ids`、`source_doc_range`，以便从摘要回源到 event list 和原始 document
+- **THEN** Agent SHOULD 把这些 chapter summaries 按时间顺序发送给模型
+- **AND** 模型 SHOULD 直接压缩为一个连续 `outline_segment.summary`
+- **AND** Agent MUST 保存该 segment 覆盖的 source doc/title range
+- **AND** 输出 schema 中不得包含 `timeline_events`、`event_ids`、`pending_event_ids` 或等价事件数组
 
 #### Scenario: Outline 长度约束
 - **WHEN** 大纲超过约 10KB
@@ -385,62 +389,26 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** 该片段复核完成后可标记为 `outline_status = committed`
 - **AND** 对同一 `target_range`，`committed` 大纲片段 SHOULD 覆盖或优先于较早的 `provisional` 片段
 
-### Requirement: Source Arc Map Memory
-系统 SHALL 在 close-read 形成完整或足够完整的章节摘要与故事大纲后，支持生成源作品事实型篇章地图 `SourceArcMap`。
+### Requirement: Narrative Indexer Handoff
+系统 SHALL 在 close-read 形成 documents、章节摘要、outline segment、人物档案与世界观概要后，为 Narrative Indexer 提供稳定、可回源的派生输入。
 
-#### Scenario: SourceArcMap 生成时机
-- **WHEN** 精读阶段已经覆盖当前已入库正文，且章节摘要、故事大纲、人物档案与世界观概要可用
-- **THEN** 系统 SHOULD 运行 post-close-read 的源作品篇章地图生成
-- **AND** 不应要求 Reading Agent 在顺序 close-read 过程中承担最终源作品篇章边界判断职责
-- **AND** `SourceArcMap` 产出的篇章功能和节奏判断 SHOULD 视为 `committed` 级结构信息
+#### Scenario: Scene Indexer 输入来源
+- **WHEN** Narrative Scene Indexer 需要判断连续场景与结构功能
+- **THEN** Memory 层 SHOULD 提供：
+  - 已入库 `documents` 的有序原文与 source offset
+  - chapter summaries
+  - outline segments 与 outline roots
+  - 相关人物档案概要
+  - 世界观概要与世界观文档定位
+  - 每一层 Page 到 document 的回源索引
+- **AND** Memory 层不负责直接输出 SceneCards、SourceArcMap 或 ArcPatternCard
+- **AND** Memory 层不得用本地 heuristic 生成结构场景判断来伪装模型已完成阅读
 
-#### Scenario: SourceArcMap 输入来源
-- **WHEN** 系统生成 `SourceArcMap`
-- **THEN** 常规输入 SHOULD 是全书 document/chapter 级故事梗概、故事大纲、人物档案概要、世界观概要、章节重要性与关联信息
-- **AND** 不应把整本原文作为常规输入
-- **AND** 当 document/chapter 级梗概总量低于约 12KB 或配置的 `source_arc_summary_compression_threshold` 时，系统 SHOULD 直接把这些梗概发送给 Source Arc Mapping Agent，从整体上总结剧情节奏与篇章功能
-- **AND** 对超长篇，系统 MUST 在输入超过模型安全预算时先通过模型生成可控压缩的剧情概要单元，再基于这些单元生成 `SourceArcMap`
-
-#### Scenario: 超长故事梗概的重叠窗口压缩
-- **WHEN** document/chapter 级故事梗概总量超过约 12KB 或配置的 `source_arc_summary_compression_threshold`
-- **THEN** 系统 SHOULD 将连续 document 梗概按默认 8 个 document 一个窗口发送给模型压缩为独立 `plot_summary_unit`
-- **AND** 相邻窗口 SHOULD 携带尾部重叠 document 以保留剧情衔接，默认窗口为 `0-7`、`6-13`、`12-19` 这种 8 document window / 2 document overlap / 6 document stride
-- **AND** 每个 `plot_summary_unit` SHOULD 保留 `source_doc_ids`、`overlap_doc_ids`、`unit_summary`、`continuity_hooks`、`boundary_events` 与 `uncertainty_notes`
-- **AND** 压缩幅度不应过大；压缩输出必须保留主线事件、人物状态变化、关系推进、设定揭示、伏笔与转折边界
-- **AND** 测试环境 MAY 使用约 8KB 的阈值触发同一流程，以便进行冒烟测试
-
-#### Scenario: SourceArcMap 字段
-- **WHEN** 系统生成或更新 `SourceArcMap`
-- **THEN** 至少应包含：
-  - `book_id`
-  - `source_arc_id`
-  - `source_arc_title`
-  - `start_document_title_index`
-  - `end_document_title_index`
-  - `source_arc_role`
-  - `core_events`
-  - `main_character_threads`
-  - `world_or_rule_reveals`
-  - `transition_from_previous`
-  - `setup_for_next`
-  - `pacing_notes`
-  - `chapter_role_map`
-  - `status`
-  - `evidence_window`
-- **AND** `source_arc_role` SHOULD 能区分主线推进、过渡缓冲、日常关系、设定揭示、高潮、收束等源作品中的事实功能
-- **AND** `chapter_role_map` SHOULD 记录每个 document/chapter 在源作品中的结构功能，例如日常铺垫、新人物登场、关系升温、冲突升级、设定揭示、转场或回收
-- **AND** `SourceArcMap` 不应把这些事实功能直接表述成“续写必须照搬”的模板
-
-#### Scenario: 过渡与缓冲篇章
-- **WHEN** 某些章节主要承担日常对话、人物内心、关系缓慢推进、生活状态或情绪缓冲
-- **THEN** `SourceArcMap` SHOULD 明确标注其过渡或缓冲功能
-- **AND** 不应因为缺乏强冲突就将其视为低价值内容
-
-#### Scenario: 向创作知识库沉淀结构模式
-- **WHEN** `SourceArcMap` 已可用，且系统需要为 Writer 提供可迁移的全书结构参考
-- **THEN** 创作知识库层 SHOULD 基于 `SourceArcMap`、章节摘要和故事大纲沉淀 `NarrativeStructurePattern` 或 `ArcPatternCard`
-- **AND** 这些 pattern SHOULD 强调剧情结构特征，例如若干 document/chapters 用于日常与感情生活、新人物登场、配角支线展开、冲突升级、设定揭示、篇章切换或收束
-- **AND** Writer SHOULD 优先消费这些结构模式作为谋篇布局参考，而不是直接把源作品的 `SourceArcMap` 当作续写计划
+#### Scenario: SourceArcMap 所属边界
+- **WHEN** 系统需要源作品篇章地图
+- **THEN** SHOULD 由 Narrative Indexer 的 `NarrativeSceneCard -> SourceArcMapBuilder` 生成
+- **AND** `SourceArcMap` MAY 作为 Context Assembly 的可选定位上下文，但它不是人物档案、世界观文档、章节摘要或 Story Outline Memory 的 source of truth
+- **AND** 如果旧数据只存在 Memory 层 `SourceArcMap` 文件，系统 MAY 兼容读取，但应标注为 legacy / provisional，不应作为新流程的标准生成路径
 
 ## Progress Memory
 
@@ -475,7 +443,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 续写主 Agent 组装上下文
 - **THEN** 应优先使用：
   - 已 `committed` 的章节摘要
-  - 源作品篇章地图片段（仅在需要定位源作品结构或当前续写位置时）
+  - Narrative Indexer 生成的相关 SceneCards / SourceArcMap 片段（仅在需要定位源作品结构或当前续写位置时）
   - 世界观概要
   - 相关人物档案
   - 已 `committed` 的故事大纲
@@ -494,9 +462,9 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 #### Scenario: 查询层级下降
 - **WHEN** Writer 或 Outline Research Loop 发起故事细节查询
 - **THEN** 系统 SHOULD 按如下顺序执行 BTree descent：
-  1. `event_summary` root Page：定位剧情大范围
-  2. `event list`：展开被选中 event summary 覆盖的 event range
-  3. `chapter summary`：展开被选中 event 覆盖的 chapter range
+  1. `outline_root`：定位候选剧情段范围
+  2. `outline_segment`：展开被选中的连续剧情段
+  3. `chapter summary`：展开被选中 segment 覆盖的 chapter range
   4. `document`：展开被选中 chapter 覆盖的 document range 或摘录
 - **AND** 每一层都 SHOULD 返回当前层候选节点的完整必要信息，例如 id、summary、范围、人物、状态和下层索引
 - **AND** 每一层模型决策 MUST 使用结构化输出，至少包含 `need_drill_down`、`selected_ids`、`query_suffix`、`reason` 和 `confidence`
@@ -530,7 +498,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
   - `current_candidates`
   - `selection_task`
   - `output_schema`
-- **AND** `current_candidates` MUST 使用稳定 id，例如 `event_summary_id`、`event_id`、`chapter_id` 或 `doc_id`
+- **AND** `current_candidates` MUST 使用稳定 id，例如 `outline_root_id`、`outline_segment_id`、`chapter_id` 或 `doc_id`
 - **AND** 模型输出 MUST 可以被 Agent 直接用于下一层确定性查询，不应只返回自然语言描述
 
 #### Scenario: 低置信与相邻 sibling 回退
@@ -552,9 +520,9 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 #### Scenario: Memory 层接口边界
 - **WHEN** Writer 或 benchmark 需要查询历史剧情事实
 - **THEN** Memory 层 SHOULD 提供稳定接口或等价 facade：
-  - `root_scan(query)`：返回 `event_summary` root Page 候选
+  - `root_scan(query)`：返回 `outline_root` / `outline_segment` Page 候选
   - `drill_down(state, selected_ids)`：从当前层展开到下一层候选
-  - `resolve_event_ids(event_ids)`：确定性展开 event 到 chapter / document refs
+  - `resolve_outline_segment_refs(segment_ids)`：确定性展开 outline segment 到 chapter / document refs
   - `resolve_chapter_refs(chapter_refs)`：确定性展开 chapter summary 与 document refs
   - `resolve_document_refs(doc_ids, excerpt_budget)`：返回 document 原文或裁剪摘录
 - **AND** Memory 层 SHALL 负责预算裁剪、状态标注、回源索引和泄漏边界
@@ -590,12 +558,11 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - 输出：人物更新候选、世界观更新候选、默认 `provisional` 的大纲更新候选
 - 职责：把抽取结果转化为可写入长期 Memory 的候选事实
 
-### Source Arc Mapping Agent / Service
-- 输入：document/chapter 级故事梗概或压缩后的 `plot_summary_unit`、故事大纲、人物档案概要、世界观概要、章节重要性与关联信息
-- 输出：`SourceArcMap`，包括源作品篇章边界、篇章功能、核心事件、人物线、设定揭示、过渡说明、后续铺垫与章节功能映射
-- 职责：在 close-read 之后基于全局视野记录源作品事实型篇章结构，为创作知识库的结构模式沉淀提供输入
-- 约束：不读取全书原文作为常规输入，不替代 Chapter Summary Agent，不直接生成续写正文，不生成可迁移剧情结构 pattern
-- 约束：其篇章功能和节奏判断可作为 `committed` 级结构信息，供章节摘要和故事大纲定稿流程使用
+### Narrative Indexer Handoff Service
+- 输入：documents、chapter summaries、outline segments、人物档案概要、世界观概要和回源索引
+- 输出：供 Narrative Indexer 消费的只读 evidence bundle
+- 职责：按预算提供 Scene Indexer 所需的连续原文窗口与窗口前后压缩梗概
+- 约束：不直接生成 SceneCards、SourceArcMap、ArcPatternCard 或可迁移剧情结构 pattern
 
 ### Memory Update Agent
 - 输入：Memory Candidate Agent 输出的更新候选
@@ -604,7 +571,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 
 ### Context Assembly Agent / Service
 - 输入：续写目标、章节位置、相关角色
-- 输出：续写主 Agent 所需的长期上下文包，可在必要时包含相关 `SourceArcMap` 片段
+- 输出：续写主 Agent 所需的长期上下文包，可在必要时包含 Narrative Indexer 生成的相关 SceneCards / SourceArcMap 片段
 - 职责：裁剪并组装事实型上下文
 
 ## Out of Scope

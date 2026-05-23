@@ -3,7 +3,7 @@
 ## Source Of Truth
 
 - 产品级核心流程、UI 交互、用户可见状态文案，以 [`../spec.md`](../spec.md) 为准。
-- 本 spec 只定义创作知识库层：桥段卡片、桥段聚类、结构模式参考、在线检索与 rerank。
+- 本 spec 只定义创作知识库层：桥段卡片、桥段聚类、结构模式参考、在线检索与 rerank。该层在 Narrative Indexer 架构下属于 `CreativeReferenceCard` 索引族。
 - 本 spec 的输出会进入核心流程中的“本章写作材料”和“正文生成”阶段，但不直接定义用户界面。
 
 ## Why
@@ -19,13 +19,16 @@
 
 其目标不是保存“小说事实”，而是保存“如何写这类桥段”的可复用知识。
 
+在 Narrative Indexer 架构下，Creative KB SHALL 被视为一种特殊索引：`CreativeReferenceCard`。现有 `fragment_card` 是该 card family 的兼容实现形态。它可以为 Writer 提供桥段、情绪机制、风格和结构迁移参考，但不得单独作为事实型剧情证据使用。若 Writer 或 Analyzer 需要判断事实、人物状态、世界观规则或伏笔状态，必须查询 Narrative Memory / factual index cards。
+
 ## Positioning
 
 ### 与主 MVP spec 的关系
 
 - `../spec.md`：产品级核心流程与 UI 交互 Source of Truth。
 - `novel-continuation-mvp/spec.md`：总编排层，负责整体运行闭环与模块拼装。
-- 本 spec：创作知识库层，负责桥段库构建、去重、检索、重排。
+- `narrative-indexer/spec.md`：统一叙事索引框架，负责把事实索引、人物索引、世界观索引、伏笔索引、主题索引和创作参考索引归入同一套 card family 思想。
+- 本 spec：创作知识库层，负责 `CreativeReferenceCard` 族的桥段库构建、去重、检索、重排。
 - `narrative-memory-context/spec.md`：上下文与 Memory 层，负责人物档案、世界观、章节摘要、故事大纲。
 
 ### 模块边界
@@ -36,11 +39,13 @@
   - 代表片段优先策略
   - 续写参考桥段检索
   - 小候选高精度 rerank
+  - `creative_reference` card family 的兼容实现
 - 本 spec 不负责：
   - 人物事实档案维护
   - 世界观事实维护
   - 章节摘要与整书大纲维护
   - 正文生成本身
+  - 事实型 `FactualEventCard`、`CharacterStateCard`、`WorldConceptCard` 或 `MysteryForeshadowCard` 的构建
 
 ## Core Principles
 
@@ -49,6 +54,7 @@
 - 在线阶段默认只在小候选集上执行高成本判断。
 - 在线阶段不得重新分析大量原文，重分析工作应尽量前移到离线构建阶段。
 - 同簇重复桥段不得挤占最终 `1-4` 个参考位。
+- Creative KB 结果不得被提升为事实 Memory；它只表达写法参考、桥段机制和可迁移结构。
 
 ## Data Model
 

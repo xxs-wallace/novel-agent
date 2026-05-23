@@ -47,6 +47,13 @@ export function TaskActionMenu({
           <button type="button" role="menuitem" onClick={() => run(() => onAction("start_close_read", { requested_from: "task_menu" }))}>
             开始阅读
           </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => run(() => onAction("build_narrative_scene_index", { requested_from: "task_menu" }))}
+          >
+            构建叙事场景索引
+          </button>
           <button type="button" role="menuitem" onClick={() => run(() => onAction("build_creative_kb", { requested_from: "task_menu" }))}>
             构建 Creative KB
           </button>

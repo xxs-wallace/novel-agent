@@ -70,6 +70,68 @@ def test_web_task_message_action_and_command_contract(tmp_path: Path) -> None:
     assert command.json()["progress"]["task_id"] == "book-one"
 
 
+def test_web_outline_analyzer_message_calls_service_and_does_not_submit_writer_action(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def __init__(self) -> None:
+            self.analyzer_calls: list[dict[str, Any]] = []
+            self.writer_action_calls: list[dict[str, Any]] = []
+
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.analyzer_calls.append(kwargs)
+            return {
+                "status": "ok",
+                "answer": "结论：旧案线索适合局部回收。事实依据：【故事大纲】【章节摘要】。风险：需要用户确认是否延迟幕后身份。",
+                "sources": [{"label": "故事大纲"}, {"label": "章节摘要"}],
+            }
+
+        def start_writer(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.writer_action_calls.append(kwargs)
+            raise AssertionError("Analyzer message must not start Writer")
+
+    app = create_app(repo_root=tmp_path)
+    fake_facade = _FakeFacade()
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)  # type: ignore[arg-type]
+    session.append_writer_question_message(
+        "book-one",
+        {
+            "question_set_id": "outline-research-run-1-needs-answer",
+            "run_id": "run-1",
+            "stage": "outline_research_user_input",
+            "status": "pending",
+            "questions": [{"question_id": "q1", "prompt": "是否新增人物？", "required": True}],
+            "actions": {"submit": "continue_after_outline_research_input"},
+        },
+    )
+    app.state.web_session_service = session
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tasks/book-one/messages",
+        json={
+            "content": "当前未解之谜哪条最适合下一阶段回收？",
+            "payload": {"channel": "outline_analyzer"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["role"] == "user"
+    assert fake_facade.analyzer_calls[0]["book_id"] == "book-one"
+    assert "未解之谜" in fake_facade.analyzer_calls[0]["question"]
+    assert fake_facade.writer_action_calls == []
+    messages = session.messages("book-one")
+    assert messages[-1].role == "assistant"
+    assert messages[-1].payload["channel"] == "outline_analyzer"
+    assert messages[-1].payload["sources"] == [{"label": "故事大纲"}, {"label": "章节摘要"}]
+    rendered = json.dumps(
+        [message.model_dump() if hasattr(message, "model_dump") else message.dict() for message in messages],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert "supplement_text" not in rendered
+    assert "revision_feedback" not in rendered
+    assert "answer_text" not in rendered
+
+
 def test_openapi_exposes_writer_question_contract(tmp_path: Path) -> None:
     client = TestClient(create_app(repo_root=tmp_path))
 
@@ -418,6 +480,7 @@ def test_start_close_read_action_runs_all_remaining_by_default(tmp_path: Path, m
     source_path = tmp_path / "source.txt"
     source_path.write_text("第一章\n\n一个可供阅读的段落。", encoding="utf-8")
     calls: list[dict[str, object]] = []
+    scene_calls: list[dict[str, object]] = []
 
     class _FakeFacade:
         def __init__(self, *, repo_root: Path) -> None:
@@ -450,6 +513,10 @@ def test_start_close_read_action_runs_all_remaining_by_default(tmp_path: Path, m
             calls.append(kwargs)
             return {"close_read_batches": 1}
 
+        def build_narrative_scene_index(self, **kwargs):  # type: ignore[no-untyped-def]
+            scene_calls.append(kwargs)
+            return {"scene_card_count": 2, "artifact_path": str(tmp_path / ".memory" / "index_cards" / "book-one.scene_cards.json")}
+
     source_path_file = source_path
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     fake_facade = _FakeFacade(repo_root=tmp_path)
@@ -477,6 +544,80 @@ def test_start_close_read_action_runs_all_remaining_by_default(tmp_path: Path, m
     assert call["max_read_kb"] == 0
     assert call["max_close_batches"] is None
     assert call["close_document_chars_budget"] == 20000
+    assert scene_calls
+    assert scene_calls[0]["book_id"] == "book-one"
+    assert scene_calls[0]["api_key"] == "test-key"
+    assert scene_calls[0]["dry_run"] is False
+
+
+def test_build_narrative_scene_index_action_runs_explicit_job(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    db_path = tmp_path / ".indexes" / "book-one.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    class _FakeFacade:
+        def __init__(self, *, repo_root: Path) -> None:
+            self.repo_root = repo_root
+            from novel_agent.app.cli.events import RunEventStream
+
+            self.event_stream = RunEventStream()
+
+        def task_snapshot(self, *, book_id: str) -> TuiTaskSnapshot:
+            return TuiTaskSnapshot(book_id=book_id, db_path=db_path)
+
+        def modeling_status(self, *, book_id: str, db_path: Path | None = None) -> ModelingStatusSnapshot:
+            return ModelingStatusSnapshot(
+                book_id=book_id,
+                documents_ready=True,
+                close_read_ready=True,
+                character_profiles_ready=True,
+                world_summary_ready=True,
+                story_outline_ready=True,
+                creative_kb_ready=False,
+                source_arc_map_ready=False,
+                counts={"documents": 1, "chapters": 1, "character_profiles": 1},
+            )
+
+        def build_narrative_scene_index(self, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs)
+            return {"scene_card_count": 3, "artifact_path": str(tmp_path / ".memory" / "index_cards" / "book-one.scene_cards.json")}
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    fake_facade = _FakeFacade(repo_root=tmp_path)
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+    job_manager = JobManager(repo_root=tmp_path)
+    action_service = WebActionService(
+        session_service=session,
+        job_manager=job_manager,
+        artifact_view_service=ArtifactViewService(repo_root=tmp_path, facade=fake_facade),
+    )
+
+    async def run_action() -> None:
+        result = await action_service.execute(
+            task_id="book-one",
+            request=WebActionRequest(
+                action="build_narrative_scene_index",
+                payload={"window_chars": 12000, "overlap_docs": 2},
+            ),
+        )
+        assert result.job is not None
+        assert result.job.type == "narrative_scene_index"
+        summary = await job_manager.wait(result.job.job_id, timeout=2.0)
+        assert summary.status == "succeeded"
+
+    asyncio.run(run_action())
+
+    assert calls == [
+        {
+            "db_path": db_path,
+            "book_id": "book-one",
+            "api_key": "test-key",
+            "dry_run": False,
+            "window_chars_budget": 12000,
+            "overlap_docs": 2,
+        }
+    ]
 
 
 def test_start_writer_action_maps_web_payload_to_writer_contract(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

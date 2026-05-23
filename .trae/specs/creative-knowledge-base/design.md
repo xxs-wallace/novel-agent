@@ -14,6 +14,7 @@
 - 以本地 `SQLite + FTS5 + 结构化卡片` 为主
 - 轻量标签只作辅助，不作主排序依据
 - 在线阶段只在小候选集上做高精度 rerank
+- 在 Narrative Indexer 架构下，Creative KB 是 `creative_reference` card family 的实现，不是与事实 Memory 平行的独立事实库
 
 ## 2. 模块边界
 
@@ -29,6 +30,11 @@
   - `recent_window_summary`
   - `goal`
   - `previous_generated_segment`
+- 可选来自 Narrative Indexer / NarrativeInquiryBroker 的事实型索引结果：
+  - `factual_event` cards
+  - `character_state` cards
+  - `world_concept` cards
+  - `arc_pattern` cards
 
 ### 2.2 输出
 
@@ -37,6 +43,7 @@
 - `SceneBrief`
 - 粗筛结果
 - rerank 结果
+- 可被 `NarrativeIndexFacade` 映射读取的 `CreativeReferenceCard` 兼容对象
 
 ### 2.3 不负责
 
@@ -44,8 +51,26 @@
 - 世界观
 - 章节摘要
 - 正文生成
+- 事实型剧情证据判断
+- 人物状态、世界观规则或伏笔状态的 source of truth
 
-### 2.4 关键概念与身份边界
+### 2.4 与 Narrative Indexer 的关系
+
+Creative KB 的 `fragment_card` SHALL 被视为 `CreativeReferenceCard` 的兼容形态：
+
+- `fragment_id` 对应 `card_id`
+- `content_summary` 对应 card `summary`
+- `preferred_tags`、`narrative_function_text`、`emotion_mechanism_text` 和 `style_profile_text` 参与创作参考检索
+- `doc_id` 和 `document_title_index` 提供回源索引
+- `transferability_score` 和 `context_dependency_level` 只表达创作迁移价值，不表达事实重要度
+
+因此：
+
+- Writer 可以把 Creative KB 输出作为写法参考。
+- Analyzer 可以在讨论文风、情绪表达和桥段机制时读取 Creative KB。
+- 任何事实判断仍必须通过 Narrative Memory 或事实型 index cards 支持。
+
+### 2.5 关键概念与身份边界
 
 #### `SceneBrief`
 

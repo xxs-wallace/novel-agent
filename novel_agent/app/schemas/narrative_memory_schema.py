@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
 
-MEMORY_PAGE_TYPES = {"document", "chapter", "event", "event_summary"}
+MEMORY_PAGE_TYPES = {"document", "chapter", "event", "event_summary", "outline_segment", "outline_root"}
 MEMORY_PAGE_STATUSES = {"provisional", "committed", "mixed"}
 
 
@@ -49,7 +49,7 @@ def _status(value: object) -> str:
 def _page_type(value: object) -> str:
     normalized = _text(value).lower()
     if normalized not in MEMORY_PAGE_TYPES:
-        raise ValueError("page_type must be document, chapter, event, or event_summary")
+        raise ValueError("page_type must be document, chapter, event, event_summary, outline_segment, or outline_root")
     return normalized
 
 

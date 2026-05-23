@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -12,10 +13,9 @@ from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
 from ..repos.documents_repo import DocumentsRepo
 from ..repos.fragment_cards_repo import FragmentCardsRepo
+from ..schemas.narrative_inquiry_schema import AnalyzerBudget, EvidenceBundle, NarrativeInquiryRequest
 from ..schemas.narrative_memory_schema import (
     MemoryCandidateSelection,
-    MemoryEvidenceBundle,
-    MemoryQueryBudget,
     MemoryQueryState,
 )
 from ..schemas.orchestration_schema import (
@@ -38,7 +38,11 @@ from ..schemas.orchestration_schema import (
     TraceableSource,
 )
 from .character_mention_service import CharacterMentionService
+from .narrative_inquiry_broker import NarrativeInquiryBroker
 from .narrative_memory_query_service import NarrativeMemoryQueryService
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_text(value: object) -> str:
@@ -563,6 +567,14 @@ class StoryDetailResolver:
         max_chars: int,
         selection_adapter: object | None = None,
     ) -> ResearchResult:
+        scene_card_result = self._resolve_with_scene_cards(
+            conn,
+            book_id=book_id,
+            request=request,
+            max_chars=max_chars,
+        )
+        if scene_card_result is not None:
+            return scene_card_result
         btree_result = self._resolve_with_memory_query(
             conn,
             book_id=book_id,
@@ -573,6 +585,125 @@ class StoryDetailResolver:
         if btree_result is not None:
             return btree_result
         return self._resolve_legacy(conn, book_id=book_id, request=request, max_chars=max_chars)
+
+    def _resolve_with_scene_cards(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        request: ResearchRequest,
+        max_chars: int,
+    ) -> ResearchResult | None:
+        inquiry_request = NarrativeInquiryRequest(
+            request_id=f"{request.request_id}:narrative_scene",
+            request_type="narrative_scene_card_search",
+            query=request.query,
+            purpose=request.purpose,
+            priority=request.priority,
+            expected_depth="index_card_summary",
+            metadata={
+                "consumer": "outline_research",
+                "facets": list(request.facets_needed),
+            },
+        )
+        inquiry_budget = AnalyzerBudget(
+            max_total_requests=1,
+            max_requests_per_round=1,
+            max_evidence_chars_per_request=max(700, max_chars),
+            max_raw_excerpt_chars_per_request=max_chars,
+        )
+        broker = NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.memory_query_service,
+            character_profiles_repo=self.character_profiles_repo,
+            fragment_cards_repo=FragmentCardsRepo(),
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id=book_id,
+            request=inquiry_request,
+            budget=inquiry_budget,
+        )
+        if bundle.status != "found" or not bundle.evidence_items:
+            return None
+
+        trace = self._memory_query_trace_from_bundle(bundle)
+        matches = [self._scene_card_evidence_to_match(item, trace=trace, max_chars=max_chars) for item in bundle.evidence_items[:5]]
+        matches = [item for item in matches if item.get("summary")]
+        if not matches:
+            return None
+        sources = [
+            TraceableSource(
+                type="narrative_scene_card",
+                path=str(item.get("card_id") or item.get("source_path") or ""),
+                evidence_level="structured_state",
+                snippet=_safe_excerpt(str(item.get("summary") or ""), limit=180),
+            )
+            for item in matches
+        ]
+        return ResearchResult(
+            request_id=request.request_id,
+            request_type="story_detail",
+            query=request.query,
+            results=matches,
+            fact_status="candidate",
+            sources=sources,
+            confidence=max([float(item.get("confidence") or 0.75) for item in matches] or [0.0]),
+            covered_facets=self._covered_facets(matches, request.facets_needed or ["event_summary", "relationship_state", "outcome"]),
+            missing_facets=self._scene_card_missing_facets(matches),
+        )
+
+    def _scene_card_evidence_to_match(
+        self,
+        item: Mapping[str, Any],
+        *,
+        trace: Sequence[Mapping[str, Any]],
+        max_chars: int,
+    ) -> dict[str, Any]:
+        payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
+        payload = dict(payload) if isinstance(payload, Mapping) else {}
+        participants = [str(value) for value in (payload.get("participants") or [])]
+        summary = _safe_excerpt(str(item.get("summary") or ""), limit=max(160, max_chars // 2))
+        outcome = _safe_excerpt(str(payload.get("outcome") or payload.get("turning_point") or summary), limit=max(120, max_chars // 3))
+        return {
+            "event_id": str(item.get("card_id") or ""),
+            "title": str(payload.get("label") or item.get("card_id") or ""),
+            "summary": summary,
+            "outcome": outcome,
+            "characters": participants,
+            "source_doc_ids": [int(value) for value in (item.get("source_doc_ids") or []) if str(value).isdigit()],
+            "source_doc_range": str(item.get("source_doc_range") or ""),
+            "source_path": f"index_card:{item.get('card_id') or ''}",
+            "event_summary_level": "narrative_scene",
+            "status": str(item.get("status") or "provisional"),
+            "card_id": str(item.get("card_id") or ""),
+            "card_type": str(item.get("card_type") or "narrative_scene"),
+            "scene_type": str(payload.get("scene_type") or ""),
+            "trigger": str(payload.get("trigger") or ""),
+            "turning_point": str(payload.get("turning_point") or ""),
+            "relationship_movements": [str(value) for value in (payload.get("relationship_movements") or [])],
+            "world_or_mystery_signals": [str(value) for value in (payload.get("world_or_mystery_signals") or [])],
+            "future_consequence": str(payload.get("future_consequence") or ""),
+            "summary_sufficiency": str(item.get("summary_sufficiency") or "sufficient"),
+            "raw_read_reason": str(item.get("raw_read_reason") or ""),
+            "matched_by": [str(value) for value in (item.get("matched_by") or [])],
+            "confidence": float(item.get("confidence") or item.get("score") or 0.75),
+            "memory_query_trace": [dict(value) for value in trace if isinstance(value, Mapping)],
+            "memory_query_protocol": "narrative_scene_card_search",
+            "final_evidence_ids": {
+                "scene_card_ids": [str(item.get("card_id") or "")],
+                "chapter_refs": [],
+                "source_doc_ids": [int(value) for value in (item.get("source_doc_ids") or []) if str(value).isdigit()],
+            },
+        }
+
+    def _scene_card_missing_facets(self, matches: Sequence[Mapping[str, Any]]) -> list[str]:
+        missing: list[str] = []
+        if any(str(item.get("summary_sufficiency") or "") != "sufficient" for item in matches):
+            missing.append("raw_read_recommended")
+        if not any(item.get("turning_point") for item in matches):
+            missing.append("turning_point")
+        return missing
 
     def _resolve_legacy(
         self,
@@ -637,123 +768,48 @@ class StoryDetailResolver:
         selection_adapter: object | None,
     ) -> ResearchResult | None:
         understood = self.understand_query(conn, book_id=book_id, query=request.query)
-        budget = MemoryQueryBudget(
-            max_root_candidates=8,
-            max_child_candidates=10,
-            max_candidate_chars=max(700, max_chars),
-            excerpt_budget=max_chars,
+        inquiry_request = NarrativeInquiryRequest(
+            request_id=request.request_id,
+            request_type="story_detail",
+            query=request.query,
+            purpose=request.purpose,
+            priority=request.priority,
+            metadata={"facets_needed": list(request.facets_needed)},
         )
-        state = self.memory_query_service.root_scan(conn, book_id=book_id, query=request.query, budget=budget)
-        if not state.current_candidates:
+        inquiry_budget = AnalyzerBudget(
+            max_total_requests=1,
+            max_requests_per_round=1,
+            max_evidence_chars_per_request=max(700, max_chars),
+            max_raw_excerpt_chars_per_request=max_chars,
+        )
+        broker = NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.memory_query_service,
+            character_profiles_repo=self.character_profiles_repo,
+            fragment_cards_repo=FragmentCardsRepo(),
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id=book_id,
+            request=inquiry_request,
+            budget=inquiry_budget,
+            selection_adapter=selection_adapter or self,
+        )
+        if bundle.status != "found" or not bundle.evidence_items:
             return None
-        decision_log: list[dict[str, Any]] = []
-        model_reasoning_debug: list[dict[str, Any]] = []
-        final_state = state
-        evidence_bundle: MemoryEvidenceBundle | None = None
-        levels_to_visit = {"event_summary", "event", "chapter"}
-        while final_state.current_level in levels_to_visit and final_state.current_candidates:
-            selection = self._select_memory_candidates(
-                state=final_state,
-                request=request,
-                selection_adapter=selection_adapter,
-            )
-            decision_payload = {
-                "request_id": request.request_id,
-                "current_level": final_state.current_level,
-                "candidate_ids": [str(item.get("id") or item.get("page_id")) for item in final_state.current_candidates],
-                **selection.to_dict(),
-                "budget_state": dict(final_state.budget_used),
-            }
-            decision_log.append(decision_payload)
-            if selection.model_reasoning_debug:
-                model_reasoning_debug.append(
-                    {
-                        "request_id": request.request_id,
-                        "current_level": final_state.current_level,
-                        **selection.model_reasoning_debug,
-                    }
-                )
-            if not selection.selected_ids:
-                break
-            if final_state.current_level == "event" and not selection.need_drill_down:
-                evidence_bundle = self.memory_query_service.resolve_event_ids(
-                    conn,
-                    book_id=book_id,
-                    event_ids=selection.selected_ids,
-                )
-                break
-            if final_state.current_level == "chapter" and not selection.need_drill_down:
-                evidence_bundle = self.memory_query_service.resolve_chapter_refs(
-                    conn,
-                    book_id=book_id,
-                    chapter_refs=selection.selected_ids,
-                )
-                break
-            final_state = self.memory_query_service.drill_down(
-                conn,
-                book_id=book_id,
-                state=final_state,
-                selected_ids=selection.selected_ids,
-                query_suffix=selection.query_suffix,
-                selection_reason=selection.reason,
-                confidence=selection.confidence,
-                need_sibling_scan=selection.need_sibling_scan,
-            )
-            if final_state.current_level == "document":
-                doc_ids = [
-                    int(item.get("doc_id") or 0)
-                    for item in final_state.current_candidates
-                    if str(item.get("doc_id") or "").isdigit()
-                ]
-                evidence_bundle = self.memory_query_service.resolve_document_refs(
-                    conn,
-                    book_id=book_id,
-                    doc_ids=doc_ids,
-                    excerpt_budget=max_chars,
-                )
-                break
-        if evidence_bundle is None:
-            if final_state.current_level == "event":
-                ids = [str(item.get("event_id") or item.get("id")) for item in final_state.current_candidates[:3]]
-                evidence_bundle = self.memory_query_service.resolve_event_ids(conn, book_id=book_id, event_ids=ids)
-            elif final_state.current_level == "chapter":
-                ids = [str(item.get("chapter_ref") or item.get("id")) for item in final_state.current_candidates[:3]]
-                evidence_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=ids)
-            elif final_state.current_level == "document":
-                doc_ids = [
-                    int(item.get("doc_id") or 0)
-                    for item in final_state.current_candidates[:3]
-                    if str(item.get("doc_id") or "").isdigit()
-                ]
-                evidence_bundle = self.memory_query_service.resolve_document_refs(
-                    conn,
-                    book_id=book_id,
-                    doc_ids=doc_ids,
-                    excerpt_budget=max_chars,
-                )
-        matches = [
-            self._memory_evidence_to_match(item, max_chars=max_chars)
-            for item in evidence_bundle.evidence_items[:5]
-        ] if evidence_bundle is not None else []
+        memory_trace = self._memory_query_trace_from_bundle(bundle)
+        decision_log = self._memory_decision_log_from_bundle(bundle)
+        model_reasoning_debug = self._model_reasoning_debug_from_bundle(bundle)
+        final_evidence_ids = self._final_evidence_ids_from_bundle(bundle)
+        matches = [self._memory_evidence_to_match(item, max_chars=max_chars) for item in bundle.evidence_items[:5]]
         if not matches:
             return None
-        trace = {
-            "protocol": "btree_memory_query",
-            "fallback": False,
-            "memory_query_trace": [*state.trace, *final_state.trace, *((evidence_bundle.trace if evidence_bundle else []))],
-            "memory_query_decision_log": decision_log,
-            "model_reasoning_debug": model_reasoning_debug,
-            "final_evidence_ids": {
-                "event_ids": list(evidence_bundle.event_ids) if evidence_bundle else [],
-                "chapter_refs": list(evidence_bundle.chapter_refs) if evidence_bundle else [],
-                "source_doc_ids": list(evidence_bundle.source_doc_ids) if evidence_bundle else [],
-            },
-        }
         for match in matches:
-            match["memory_query_trace"] = trace["memory_query_trace"]
+            match["memory_query_trace"] = memory_trace
             match["memory_query_decision_log"] = decision_log
             match["model_reasoning_debug"] = model_reasoning_debug
             match["memory_query_protocol"] = "btree"
+            match["final_evidence_ids"] = final_evidence_ids
         sources = [
             TraceableSource(
                 type=str(item.get("type") or "memory"),
@@ -761,7 +817,7 @@ class StoryDetailResolver:
                 evidence_level="structured_state",
                 snippet=_safe_excerpt(str(item), limit=180),
             )
-            for item in (evidence_bundle.sources if evidence_bundle else [])
+            for item in bundle.sources
         ]
         detail = StoryDetailResult(
             request_id=request.request_id,
@@ -772,20 +828,47 @@ class StoryDetailResolver:
                 facet for facet in (request.facets_needed or understood.facets_needed)
                 if facet not in self._covered_facets(matches, request.facets_needed or understood.facets_needed)
             ],
-            fact_status="confirmed" if evidence_bundle and evidence_bundle.status == "committed" else "candidate",
+            fact_status="confirmed" if bundle.fact_status == "confirmed" else "candidate",
             sources=sources,
         )
         result = ResearchResult.from_story_detail(detail, request_type="story_detail", query=request.query)
         result.results.append(
             {
-                "memory_query_trace": trace["memory_query_trace"],
+                "memory_query_trace": memory_trace,
                 "memory_query_decision_log": decision_log,
                 "model_reasoning_debug": model_reasoning_debug,
-                "final_evidence_ids": trace["final_evidence_ids"],
+                "final_evidence_ids": final_evidence_ids,
                 "source_scope": "prefix_memory_only",
             }
         )
         return result
+
+    def _memory_query_trace_from_bundle(self, bundle: EvidenceBundle) -> list[dict[str, Any]]:
+        return [dict(item) for item in bundle.trace if isinstance(item, Mapping)]
+
+    def _memory_decision_log_from_bundle(self, bundle: EvidenceBundle) -> list[dict[str, Any]]:
+        decisions: list[dict[str, Any]] = []
+        for trace_item in bundle.trace:
+            raw = trace_item.get("decision_log") if isinstance(trace_item, Mapping) else None
+            decisions.extend([dict(item) for item in raw or [] if isinstance(item, Mapping)])
+        return decisions
+
+    def _model_reasoning_debug_from_bundle(self, bundle: EvidenceBundle) -> list[dict[str, Any]]:
+        debug: list[dict[str, Any]] = []
+        for trace_item in bundle.trace:
+            raw = trace_item.get("model_reasoning_debug") if isinstance(trace_item, Mapping) else None
+            debug.extend([dict(item) for item in raw or [] if isinstance(item, Mapping)])
+        return debug
+
+    def _final_evidence_ids_from_bundle(self, bundle: EvidenceBundle) -> dict[str, Any]:
+        for trace_item in reversed(bundle.trace):
+            if isinstance(trace_item, Mapping) and isinstance(trace_item.get("final_evidence_ids"), Mapping):
+                return dict(trace_item["final_evidence_ids"])
+        return {
+            "event_ids": [],
+            "chapter_refs": list(bundle.chapter_refs),
+            "source_doc_ids": list(bundle.source_doc_ids),
+        }
 
     def _select_memory_candidates(
         self,
@@ -803,8 +886,13 @@ class StoryDetailResolver:
                 return MemoryCandidateSelection.from_mapping(raw)
         return self._heuristic_memory_selection(state=state, request=request)
 
-    def _heuristic_memory_selection(self, *, state: MemoryQueryState, request: ResearchRequest) -> MemoryCandidateSelection:
-        query_tokens = _tokenize_query(" ".join([request.query, *state.query_suffix_chain]))
+    def select_memory_candidates(self, *, state: MemoryQueryState, request: object) -> MemoryCandidateSelection:
+        """Compatibility selector for dry-run Writer paths without a model adapter."""
+        return self._heuristic_memory_selection(state=state, request=request)
+
+    def _heuristic_memory_selection(self, *, state: MemoryQueryState, request: object) -> MemoryCandidateSelection:
+        query = str(getattr(request, "query", "") or "")
+        query_tokens = _tokenize_query(" ".join([query, *state.query_suffix_chain]))
         scored: list[tuple[str, float]] = []
         for order, candidate in enumerate(state.current_candidates):
             candidate_id = str(candidate.get("id") or candidate.get("page_id") or "")
@@ -819,7 +907,7 @@ class StoryDetailResolver:
         return MemoryCandidateSelection(
             need_drill_down=state.current_level != "chapter",
             selected_ids=selected,
-            query_suffix=_safe_excerpt(request.query, limit=120),
+            query_suffix=_safe_excerpt(query, limit=120),
             reason="heuristic_keyword_selection",
             confidence=0.65 if selected else 0.0,
             need_sibling_scan=False,
@@ -1580,12 +1668,14 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
     def __init__(self, *, model_client: Any) -> None:
         self.model_client = model_client
 
-    def _generate_json(self, *, system_prompt: str, payload: Mapping[str, Any], fallback: Mapping[str, Any]) -> dict[str, Any]:
+    def _generate_json(self, *, stage: str, system_prompt: str, payload: Mapping[str, Any], fallback: Mapping[str, Any]) -> dict[str, Any]:
         if self.model_client is None:
             raise RuntimeError("Outline research model adapter requires an available model_client")
+        user_prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        self._log_model_prompt_stats(stage=stage, system_prompt=system_prompt, user_prompt=user_prompt)
         result, raw = self.model_client.generate_json(
             system_prompt=system_prompt,
-            user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
+            user_prompt=user_prompt,
             fallback_factory=lambda: dict(fallback),
             use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
         )
@@ -1611,6 +1701,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             budget_state=budget_state,
         )]
         payload = self._generate_json(
+            stage="propose_research_requests",
             system_prompt=(
                 "你是大纲研究 Agent。只返回 JSON。基于轻量 seed、notebook 和上一轮结果，"
                 "提出下一轮 research requests。请求类型只能是 story_detail、character_profile、world_concept、structure_pattern。"
@@ -1653,6 +1744,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
     ) -> SufficiencyDecision | Mapping[str, Any]:
         fallback = super().decide_sufficiency(seed_packet=seed_packet, notebook=notebook, budget_state=budget_state).to_dict()
         return self._generate_json(
+            stage="decide_sufficiency",
             system_prompt=(
                 "你是大纲研究 Sufficiency Gate。只返回 JSON。判断现有 evidence 是否足够生成大纲。"
                 "高风险缺口必须 needs_user_input 或 blocked，不得伪造用户答案。"
@@ -1679,6 +1771,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             sufficiency_decision=sufficiency_decision,
         ))
         return self._generate_json(
+            stage="generate_outline",
             system_prompt=(
                 "你是分层 Writer 的全书大纲草案 Agent。只返回 JSON。"
                 "只能使用用户授权概述、prefix Memory research evidence、明确 assumptions。"
@@ -1701,6 +1794,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
     ) -> MemoryCandidateSelection:
         fallback = super().select_memory_candidates(state=state, request=request).to_dict()
         payload = self._generate_json(
+            stage=f"select_memory_candidates:{state.current_level}",
             system_prompt=(
                 "你是 Writer Outline Research 的 Memory candidate selector。只返回 JSON。"
                 "你只能基于当前层候选选择 selected_ids，并给出短 query_suffix、reason、confidence、need_sibling_scan。"
@@ -1725,6 +1819,33 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             fallback=fallback,
         )
         return MemoryCandidateSelection.from_mapping(payload)
+
+    def _log_model_prompt_stats(self, *, stage: str, system_prompt: str, user_prompt: str) -> None:
+        system_chars = len(system_prompt)
+        user_chars = len(user_prompt)
+        system_bytes = len(system_prompt.encode("utf-8"))
+        user_bytes = len(user_prompt.encode("utf-8"))
+        logger.info(
+            "outline_research.model_prompt_stats stage=%s system_chars=%s user_chars=%s "
+            "total_chars=%s system_bytes=%s user_bytes=%s total_bytes=%s model=%s",
+            stage,
+            system_chars,
+            user_chars,
+            system_chars + user_chars,
+            system_bytes,
+            user_bytes,
+            system_bytes + user_bytes,
+            self._model_label(),
+        )
+
+    def _model_label(self) -> str:
+        settings = getattr(self.model_client, "settings", None)
+        for source in (settings, self.model_client):
+            for attr in ("model", "model_id", "model_name"):
+                value = getattr(source, attr, None)
+                if value:
+                    return str(value)
+        return type(self.model_client).__name__
 
 
 @dataclass(slots=True)

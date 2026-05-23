@@ -177,6 +177,42 @@ def test_run_event_stream_shows_creative_kb_document_progress() -> None:
     assert "已处理 3/20" in rendered
 
 
+def test_cli_analyze_routes_to_analyzer_facade_without_writer_action(tmp_path: Path) -> None:
+    class FakeFacade:
+        def __init__(self) -> None:
+            self.analyzer_calls: list[dict[str, str]] = []
+            self.writer_calls = 0
+
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.analyzer_calls.append(kwargs)
+            return {
+                "status": "ok",
+                "answer": "结论：先局部回收旧案线索。事实依据：【章节摘要】。风险：过早揭开幕后身份。",
+                "sources": [{"label": "章节摘要"}],
+            }
+
+        def start_writer(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.writer_calls += 1
+            raise AssertionError("Analyzer command must not start Writer")
+
+    facade = FakeFacade()
+    app = TuiApp(
+        repo_root=tmp_path,
+        config=TuiSessionConfig(book_id="book-one"),
+        facade=facade,  # type: ignore[arg-type]
+    )
+
+    invocation = CommandRouter().parse("/analyze 当前未解之谜哪条最适合下一阶段回收？")
+    output = app.dispatch_command("/analyze 当前未解之谜哪条最适合下一阶段回收？")
+
+    assert invocation.handler_name == "analyze_outline"
+    assert facade.analyzer_calls[0]["book_id"] == "book-one"
+    assert "未解之谜" in facade.analyzer_calls[0]["question"]
+    assert facade.writer_calls == 0
+    assert "局部回收" in output
+    assert "参考来源：章节摘要" in output
+
+
 def test_workflow_facade_streams_creative_kb_progress_without_stdout_buffer(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     facade = WorkflowFacade(repo_root=tmp_path)
 

@@ -11,6 +11,15 @@ from .context_assembly_schema import (
     CharacterProfileContextItem,
     ContextAssemblyPayload,
 )
+from .creative_kb_benchmark_schema import (
+    CreativeKBBenchmarkInput,
+    CreativeKBBenchmarkResult,
+    KBBenchmarkCase,
+    KBClusterReviewReport,
+    KBFragmentCardReviewReport,
+    KBRetrievalReviewReport,
+    KBWriterABReport,
+)
 from .creative_kb_schema import (
     CoarseRetrievalResult,
     FragmentCard,
@@ -20,14 +29,33 @@ from .creative_kb_schema import (
     SceneBrief,
     StyleFeatures,
 )
-from .creative_kb_benchmark_schema import (
-    CreativeKBBenchmarkInput,
-    CreativeKBBenchmarkResult,
-    KBClusterReviewReport,
-    KBFragmentCardReviewReport,
-    KBRetrievalReviewReport,
-    KBWriterABReport,
-    KBBenchmarkCase,
+from .narrative_index_schema import (
+    IndexCard,
+    IndexCardHit,
+    IndexEvidenceBundle,
+    IndexQueryBudget,
+    IndexQueryIntent,
+    IndexQueryResult,
+    NarrativeSceneBoundary,
+    NarrativeSceneCard,
+    NarrativeScenePayload,
+)
+from .narrative_inquiry_schema import (
+    AnalyzerBudget,
+    AnalyzerLoopOutput,
+    AnalyzerNotebook,
+    AnalyzerSeedPacket,
+    ChapterReadPlan,
+    EvidenceBundle,
+    NarrativeInquiryRequest,
+)
+from .narrative_memory_schema import (
+    MemoryCandidateSelection,
+    MemoryEvidenceBundle,
+    MemoryQueryBudget,
+    MemoryQueryPathItem,
+    MemoryQueryState,
+    NarrativeMemoryPage,
 )
 from .orchestration_schema import (
     ArtifactReviewDecision,
@@ -47,14 +75,6 @@ from .orchestration_schema import (
     WriterLoopStep,
     WriterSource,
 )
-from .narrative_memory_schema import (
-    MemoryCandidateSelection,
-    MemoryEvidenceBundle,
-    MemoryQueryBudget,
-    MemoryQueryPathItem,
-    MemoryQueryState,
-    NarrativeMemoryPage,
-)
 from .paragraph_benchmark_schema import (
     ParagraphBenchmarkIssue,
     ParagraphBenchmarkReviewerReport,
@@ -71,6 +91,7 @@ from .smoke_schema import (
     SmokeSampleConfig,
     SmokeTextArtifact,
 )
+
 
 __all__ = [
     "CharacterAbilityItem",
@@ -103,6 +124,22 @@ __all__ = [
     "MemoryQueryPathItem",
     "MemoryQueryState",
     "NarrativeMemoryPage",
+    "IndexCard",
+    "IndexCardHit",
+    "IndexEvidenceBundle",
+    "IndexQueryBudget",
+    "IndexQueryIntent",
+    "IndexQueryResult",
+    "NarrativeSceneBoundary",
+    "NarrativeSceneCard",
+    "NarrativeScenePayload",
+    "AnalyzerBudget",
+    "AnalyzerLoopOutput",
+    "AnalyzerNotebook",
+    "AnalyzerSeedPacket",
+    "ChapterReadPlan",
+    "EvidenceBundle",
+    "NarrativeInquiryRequest",
     "OutlineResearchAnswerSubmission",
     "OutlineResearchQuestion",
     "OutlineResearchQuestionSet",

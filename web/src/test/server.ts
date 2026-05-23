@@ -1,4 +1,4 @@
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 
 import type {
@@ -40,6 +40,7 @@ let messageListCounts: Record<string, number> = {};
 let deferredMessagesByTask: Record<string, ConversationMessage> = {};
 let deferredMessageJobIds: Record<string, string> = {};
 let deferredMessagesReady: Record<string, boolean> = {};
+let messageResponseDelayMs = 0;
 
 function progress(step = "freeze_d_review") {
   return {
@@ -82,6 +83,7 @@ export function resetMockState() {
   deferredMessagesByTask = {};
   deferredMessageJobIds = {};
   deferredMessagesReady = {};
+  messageResponseDelayMs = 0;
   tasks = [makeTask("task-alpha", true), makeTask("task-beta")];
   messagesByTask = {
     "task-alpha": [
@@ -113,6 +115,10 @@ export function resetMockState() {
     ],
     "task-beta": []
   };
+}
+
+export function setMessageResponseDelay(ms: number) {
+  messageResponseDelayMs = Math.max(0, ms);
 }
 
 export function setWriterArtifactReviewAfterJobReplay(taskId = "task-alpha", jobId = "job-existing-start_writer") {
@@ -409,7 +415,11 @@ function artifactView(artifactId: string): ArtifactView {
 
 function actionResult(taskId: string, body: WebActionRequest): WebActionResult {
   const job =
-    body.action === "start_read" || body.action === "start_close_read" || body.action === "build_creative_kb" || body.action === "start_writer"
+    body.action === "start_read" ||
+    body.action === "start_close_read" ||
+    body.action === "build_narrative_scene_index" ||
+    body.action === "build_creative_kb" ||
+    body.action === "start_writer"
       ? {
           job_id: `job-${body.action}`,
           task_id: taskId,
@@ -508,6 +518,9 @@ export const handlers = [
   }),
   http.post("/api/tasks/:taskId/messages", async ({ params, request }) => {
     const body = await request.json();
+    if (messageResponseDelayMs) {
+      await delay(messageResponseDelayMs);
+    }
     calls.messages.push({ taskId: String(params.taskId), body });
     const payload = (body as { payload?: Record<string, unknown> }).payload ?? {};
     const message: ConversationMessage = {

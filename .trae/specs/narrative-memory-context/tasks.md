@@ -17,10 +17,10 @@
 - 世界观与大纲更新链路已落地：`WorldStateService`、`OutlineService` 支持世界观 section 合并、概要重压缩、大纲增量更新与长度裁剪。
 - Character Evidence 链路已落地但当前实现按单 document 运行：`CharacterEvidenceBatchAssemblerService` 保留 batch 输入结构，`CloseReadRunner` 对章节批次内每个 document 单独运行 `character_evidence`，再汇合给 `MemoryCandidateService` 和 character reduce。
 - Memory Candidate / Reduce 链路已落地：`MemoryCandidateService` 汇合章节摘要、人物证据和世界观证据，过滤低置信伪人物，并生成人物/世界观更新候选。
-- 上下文装配已落地：`ContextAssemblyService` 输出章节摘要、世界观概要、相关人物档案、故事大纲、缺失信号，并可按预算加入 `SourceArcMap` 片段。
+- 上下文装配已落地：`ContextAssemblyService` 输出章节摘要、世界观概要、相关人物档案、故事大纲、缺失信号，并可兼容读取旧 `SourceArcMap` 片段。
 - Writer 边界已对齐：Writer 常规输入消费已沉淀的 Memory 资产，不直接消费 Character Evidence 原始输出。
-- `SourceArcMap` 已落地：`SourceArcMappingService`、`PlotSummaryUnitCompressionService`、`build_source_arc_map` 支持 close-read 后生成 `.memory/arcs/<book_id>.source_arc_map.json` 与 Markdown debug 导出；上下文装配可选择相关 source arc 片段。
-- 已有测试覆盖人物档案合并、上下文装配 contract、Character Evidence 汇合、章节调度、SourceArcMap 生成/压缩/查询、Writer 对 Memory 资产的消费。
+- 旧 `SourceArcMap` 已有实现：`SourceArcMappingService`、`PlotSummaryUnitCompressionService`、`build_source_arc_map` 支持 close-read 后生成 `.memory/arcs/<book_id>.source_arc_map.json` 与 Markdown debug 导出；该路径保留为 legacy / fallback，标准新链路改由 Narrative Indexer 的 SceneCards 聚合生成 SourceArcMap。
+- 已有测试覆盖人物档案合并、上下文装配 contract、Character Evidence 汇合、章节调度、旧 SourceArcMap 生成/压缩/查询、Writer 对 Memory 资产的消费。
 
 ## 当前有效任务
 
@@ -41,7 +41,7 @@
   - [ ] 保持现有 dry-run、fallback、debug markdown 和旧数据兼容读取
 
 - [ ] Task 3: 明确 SQLite 与 Markdown 资产职责边界（部分落地）
-  - [x] 当前 SQLite 保存结构化运行结果，Markdown 保存世界观、概要、大纲和 SourceArcMap debug 资产
+  - [x] 当前 SQLite 保存结构化运行结果，Markdown 保存世界观、概要、大纲和 legacy SourceArcMap debug 资产
   - [ ] 在文档与接口中固化 SQLite / Markdown 的读写职责、source of truth 和重建策略
   - [ ] 评估是否需要 alias、关系、证据级别、source arc 的辅助表
   - [ ] 若新增证据或调试记录，不保存 offset、原文连续子串或 doc 级人物证据索引
@@ -60,22 +60,23 @@
   - [ ] 将 `prompt_io_schema.py` 中 Character Evidence dataclass 与 prompt / runner 实际输出保持一致
   - [ ] 保持不输出 offset、原文连续子串和逐 doc_id 人物列表的约束
 
-- [ ] Task 6: 补齐 SourceArcMap 与 Writer/KB 的后续边界（部分落地）
-  - [x] `SourceArcMap` JSON/Markdown 生成、压缩窗口、上下文装配片段选择已实现
+- [ ] Task 6: 收口旧 SourceArcMap 与 Narrative Indexer Handoff 边界（部分落地）
+  - [x] 旧 `SourceArcMap` JSON/Markdown 生成、压缩窗口、上下文装配片段选择已实现
   - [x] Writer 能识别可选 `memory.source_arc_map` 缺失与就绪状态
-  - [ ] 明确 `SourceArcMap` 是否继续只存文件，还是补充 `source_arc_maps` 表或 `book_assets.source_arc_map_path`
-  - [ ] 明确哪些 source arc 信息可进入 Writer factual context，哪些只交给创作知识库沉淀结构模式
-  - [ ] 增加端到端验收：`documents -> close-read -> SourceArcMap -> context assembly -> writer readiness`
+  - [ ] 将旧 `SourceArcMap` 标注为 legacy / fallback 输入，避免它继续作为 Memory 层标准结构判断路径
+  - [ ] 定义 `NarrativeIndexerHandoffService`，输出 Scene Indexer 所需的连续 raw window、前后压缩梗概和 trace
+  - [ ] 明确 Context Assembly 中的 source arc 片段来自 Narrative Indexer 生成结果；旧文件仅兼容读取
+  - [ ] 增加端到端验收：`documents -> close-read -> handoff bundle -> Narrative Indexer -> context assembly readiness`
 
 - [ ] Task 7: 补齐端到端测试与文档验收（部分落地）
-  - [x] 已有人物档案、上下文装配、SourceArcMap、Character Evidence 汇合等局部测试
+  - [x] 已有人物档案、上下文装配、legacy SourceArcMap、Character Evidence 汇合等局部测试
   - [ ] 增加端到端测试：`documents -> chapter summaries -> memory updates -> context assembly`
   - [ ] 增加世界观 schema / 概要压缩测试
   - [ ] 增加章节摘要与整书大纲 schema 测试
   - [ ] 更新 `spec.md` / `design.md`，删除与当前代码不一致的旧任务痕迹
 
 - [ ] Task 8: 引入 Summary / Outline 状态模型（待处理）
-  - [ ] 新增状态值 contract：`provisional` 表示顺序 close-read 的即时判断，`committed` 表示已结合后续窗口或 `SourceArcMap` 复核
+  - [ ] 新增状态值 contract：`provisional` 表示顺序 close-read 的即时判断，`committed` 表示已结合后续窗口、SceneCards 或人工复核
   - [ ] Chapter Summary Agent 写入的 `summary_md` / `summary_short` 默认标记为 `summary_status = provisional`
   - [ ] Memory Candidate Agent 或 Global Memory 生成的即时 `outline_update` 默认标记为 `outline_status = provisional`
   - [ ] 章节摘要中的“结构功能/节奏”只作为 `provisional` 结构判断，不能被 Writer 当作最终篇章功能
@@ -88,16 +89,16 @@
   - [ ] 定稿完成后写入或导出 `committed` 状态，并保留 `evidence_window` / `target_range`
   - [ ] 定稿失败时不得覆盖已有 `committed` 结果；可保留旧 `provisional` 并输出缺失或失败原因
 
-- [ ] Task 10: 将 SourceArcMap 接入 committed 结构信息（待处理）
-  - [ ] 明确 `SourceArcMap` 的篇章功能、节奏和 `chapter_role_map` 属于 `committed` 级结构信息
-  - [ ] 支持 `SourceArcMap` 生成后反向更新或辅助定稿相关章节摘要 / 大纲片段
-  - [ ] 若同一范围同时存在窗口定稿与 `SourceArcMap` 判断，定义冲突处理和优先级策略
-  - [ ] 更新 `SourceArcMap` JSON/Markdown 输出或上下文装配 payload，使其携带必要的状态和参考窗口信息
+- [ ] Task 10: 接入 SceneCards 作为结构复核信息（待处理）
+  - [ ] 明确 SceneCards 的场景类型、结构功能和 source range 可作为 Summary / Outline 定稿的复核输入
+  - [ ] 不允许 `SourceArcMap` 在 Memory 层自动反向覆盖章节摘要 / 大纲片段
+  - [ ] 若同一范围同时存在窗口定稿与 SceneCards 判断，定义冲突处理和优先级策略
+  - [ ] 更新 Context Assembly payload，使其区分 Memory 自身状态与 Narrative Indexer 派生结构状态
 
 - [ ] Task 11: 更新 Context Assembly 的状态感知策略（待处理）
   - [ ] `ContextAssemblyService` 优先选择 `committed` 章节摘要和故事大纲
   - [ ] 当目标范围没有 `committed` 结果时，可回退到 `provisional`，但必须在 payload 中显式标注状态
-  - [ ] 增加 `memory_status` 或等价字段，说明 `chapter_context`、`story_outline`、`source_arc_context` 是 `committed`、`provisional` 还是 `mixed`
+  - [ ] 增加 `memory_status` 或等价字段，说明 `chapter_context`、`story_outline`、`scene_or_arc_context` 是 `committed`、`provisional` 还是 `mixed`
   - [ ] Writer 输入侧不得把 `provisional` 的结构功能 / 节奏判断当作稳定事实
 
 - [ ] Task 12: 补齐状态模型测试与迁移验收（待处理）
@@ -106,7 +107,7 @@
   - [ ] 增加窗口定稿测试：较大 `evidence_window` 可将较小 `target_range` 标记为 `committed`
   - [ ] 增加优先级测试：同范围 `committed` 优先于 `provisional`
   - [ ] 增加 Context Assembly 测试：输出状态标记，并在缺少 `committed` 时正确回退
-  - [ ] 增加 SourceArcMap 集成测试：篇章功能和节奏判断可作为 `committed` 级结构信息进入上下文装配
+  - [ ] 增加 SceneCards / SourceArcMap 集成测试：Narrative Indexer 派生结构可作为可选定位上下文进入上下文装配
 
 ## BTree Narrative Memory Query 重构
 
@@ -114,10 +115,11 @@
   - `来源`: [spec.md](spec.md) 的 `BTree-like Narrative Memory`、[design.md](design.md) 的 `BTree Descent Query`
   - `建议只读`: [spec.md](spec.md), [design.md](design.md), [`../writer-agent-layered-generation/designs/outline-research-loop.design.md`](../writer-agent-layered-generation/designs/outline-research-loop.design.md)
   - `建议只关注代码文件`: `novel_agent/app/schemas/`, `novel_agent/app/repos/`, `novel_agent/app/services/`, `novel_agent/tests/test_*memory*.py`
-  - [ ] 定义 `document -> chapter summary -> event list -> event summary` 四层 Page 数据结构
-  - [ ] `event_summary` Page MUST 只保存对应 event id 起止范围、source doc range、<= 200 字摘要和状态
+  - [ ] 定义 `document -> chapter summary -> outline segment -> outline root` 分层 Page 数据结构
+  - [ ] `outline_segment` Page MUST 直接压缩连续 chapter summaries，保存 source doc/title range、连续自然语言摘要和状态
   - [ ] `chapter summary` Page MUST 记录 `source_doc_start_id` / `source_doc_end_id`，且 `summary_md` 不超过原文 1/10
-  - [ ] `event` MUST 包含 `event_id`、`label`、`summary`、`participants`、`source_chapter_range`、`source_doc_range`、`status`
+  - [ ] `outline_root` MUST 只保存 segment refs、source range、极短 summary hints 和状态
+  - [ ] Story Outline Memory schema MUST NOT 输出 `timeline_events`、`event_ids`、`pending_event_ids` 或等价事件数组
   - [ ] 支持旧数据兼容读取；缺失 BTree Page 时可由现有 chapters / outline assets 重建
   - [ ] 增加 schema / repo / migration 测试
 
@@ -126,20 +128,20 @@
   - `建议只读`: [spec.md](spec.md), [design.md](design.md)
   - `建议只关注代码文件`: `novel_agent/app/runner/close_read_runner.py`, `novel_agent/app/services/outline_service.py`, `novel_agent/app/services/character_profile_service.py`, `novel_agent/app/repos/`, `novel_agent/tests/`
   - [ ] close-read 每个章节批次生成或更新 chapter summary Page，并保留 doc range
-  - [ ] 从 chapter summaries 压缩生成 `event list`，事件粒度高于 document，通常覆盖多个 document 或一个章节关键推进
-  - [ ] 实现 `event summary` 压缩服务：在存在 N 个未压缩 events 时，让模型选择关联性强的一段压缩，并返回尾部未压缩 event index
-  - [ ] 支持多 `event_summary` Page；每个 Page 目标覆盖 10-20 万字原文，摘要 <= 200 字
-  - [ ] 人物档案新增人物维度 `story_events`，每条事件携带 event id、chapter refs、doc refs、participants
+  - [ ] 从连续 chapter summaries 直接压缩生成 `outline_segment`，不得先生成 `timeline_events`
+  - [ ] 实现 `outline_segment` 滚动压缩服务：在存在 N 个未覆盖 chapter summaries 时，直接生成连续自然语言摘要
+  - [ ] 支持多 `outline_segment` Page；每个 Page 目标覆盖配置指定的连续 N 个 document/chapter 或约 10-20 万字原文
+  - [ ] 人物档案新增人物维度关键经历索引，但其结构应从 Narrative Indexer 的 character/event cards 派生，不依赖 outline `timeline_events`
   - [ ] `mentioned_doc_ids` / `speaking_doc_ids` 只作为底层倒排索引，不作为 Writer 理解人物过往的主要入口
-  - [ ] 增加 close-read 索引构建测试，覆盖 event doc range、event summary range、人物事件时间线和旧数据回退
+  - [ ] 增加 close-read 索引构建测试，覆盖 outline segment doc range、chapter range、人物关键经历索引和旧数据回退
 
 - [ ] Task 15: 实现 `NarrativeMemoryQueryService`
   - `来源`: [design.md](design.md) 的 `NarrativeMemoryQueryService`
   - `建议只读`: [design.md](design.md), [spec.md](spec.md)
   - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/repos/`, `novel_agent/app/schemas/`, `novel_agent/tests/test_narrative_memory_query*.py`
-  - [ ] 实现 `root_scan(query, budget)`，返回 event_summary root candidates
-  - [ ] 实现 `drill_down(state, selected_ids)`，支持 event_summary -> event -> chapter -> document
-  - [ ] 实现 `resolve_event_ids`、`resolve_chapter_refs`、`resolve_document_refs`
+  - [ ] 实现 `root_scan(query, budget)`，返回 outline root / outline segment candidates
+  - [ ] 实现 `drill_down(state, selected_ids)`，支持 outline_root -> outline_segment -> chapter -> document
+  - [ ] 实现 `resolve_outline_segment_refs`、`resolve_chapter_refs`、`resolve_document_refs`
   - [ ] 每层输出 `MemoryQueryState`，包含 `original_query`、`query_suffix_chain`、`path_context`、`current_level`、`current_candidates`、预算消耗和 trace
   - [ ] 实现 `Path Context + Current Candidates` 裁剪策略；进入下一层后默认裁剪未选 sibling
   - [ ] 支持 `need_sibling_scan`、空选择、低置信度的相邻 Page 扩展
@@ -160,7 +162,7 @@
   - `建议只读`: [spec.md](spec.md), [design.md](design.md), [`../agentic-benchmark/tasks.md`](../agentic-benchmark/tasks.md)
   - `建议只关注代码文件`: `novel_agent/tests/`, `novel_agent/app/run_single_sample_smoke.py`
   - [ ] 增加端到端测试：`documents -> close-read -> BTree Pages -> NarrativeMemoryQueryService -> evidence bundle`
-  - [ ] 测试能从 event summary 定位到 event，再定位到 chapter summary，再定位到 document ids
+  - [ ] 测试能从 outline root 定位到 outline segment，再定位到 chapter summary，再定位到 document ids
   - [ ] 测试人物档案能从人物事件时间线定位到相关 event / document
   - [ ] 默认单元测试使用 fake model，不调用真实 LLM
   - [ ] 最终验收必须通过显式真实模型 API 的 smoke benchmark；不得用 fake 返回值替代
@@ -171,11 +173,11 @@
 - Task 2 依赖现有 close-read 主流程稳定运行
 - Task 3 可与 Task 1、Task 2 并行推进
 - Task 5 应先于继续扩展 Character Evidence 相关测试
-- Task 6 依赖现有 `SourceArcMap` 文件实现与上下文装配能力
+- Task 6 依赖现有 legacy `SourceArcMap` 文件实现与上下文装配能力
 - Task 7 依赖 Task 1、Task 2、Task 4、Task 5 的 contract 收口
 - Task 8 依赖 Task 1 的 schema 决策，并应先于 Task 9、Task 11、Task 12
 - Task 9 依赖 Task 8，并可在 Task 10 前先实现独立窗口定稿
-- Task 10 依赖 Task 6 与 Task 8
+- Task 10 依赖 Task 6、Task 8 与 Narrative Indexer 的 SceneCards 设计
 - Task 11 依赖 Task 8，并可在 Task 9 / Task 10 未完全完成时先支持状态透传与回退
 - Task 12 依赖 Task 8、Task 9、Task 10、Task 11 的实现结果
 - Task 13 是 Task 14、Task 15、Task 16、Task 17 的前置
@@ -188,7 +190,7 @@
 
 - 依赖 `novel-continuation-mvp/spec.md` 提供的 `documents` 基线、粗读入库能力与主运行入口。
 - 可与 `creative-knowledge-base/spec.md` 的检索结果装配接口集成，但 Memory 层不阻塞于 KB 层完成。
-- Writer 可在缺少 `SourceArcMap` 时继续运行，但源作品结构定位能力会下降。
+- Writer 可在缺少 Narrative Indexer 派生 SceneCards / SourceArcMap 时继续运行，但源作品结构定位能力会下降。
 
 ## 独立 Worktree 执行注意
 

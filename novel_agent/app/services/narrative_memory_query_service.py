@@ -112,7 +112,8 @@ class NarrativeMemoryQueryService:
     summary artifacts. It never opens reference-only benchmark files.
     """
 
-    LEVEL_ORDER = ("event_summary", "event", "chapter", "document")
+    LEVEL_ORDER = ("outline_root", "outline_segment", "chapter", "document")
+    LEGACY_LEVEL_ORDER = ("event_summary", "event", "chapter", "document")
 
     def __init__(
         self,
@@ -136,37 +137,65 @@ class NarrativeMemoryQueryService:
         budget: MemoryQueryBudget | None = None,
     ) -> MemoryQueryState:
         budget = budget or MemoryQueryBudget()
+        root_pages = self._outline_root_pages(conn, book_id=book_id)
+        if root_pages:
+            root_level = "outline_root"
+            fallback = False
+        else:
+            root_level = "event_summary"
+            root_pages = self._event_summary_pages(conn, book_id=book_id)
+            fallback = not bool(self._event_summary_artifact(book_id).exists())
         candidates = self._rank_pages(
-            self._event_summary_pages(conn, book_id=book_id),
+            root_pages,
             query=query,
             limit=budget.max_root_candidates,
         )
         if not candidates:
+            root_level = "event_summary"
             candidates = self._rank_pages(
                 self._synthetic_event_summary_pages(conn, book_id=book_id),
                 query=query,
                 limit=budget.max_root_candidates,
             )
+            fallback = True
         candidate_dicts = [self._candidate_dict(page, budget=budget) for page in candidates]
         trace = [
             {
                 "operation": "root_scan",
-                "level": "event_summary",
+                "level": root_level,
                 "query": query,
                 "candidate_ids": [item["id"] for item in candidate_dicts],
                 "budget": budget.to_dict(),
                 "source_scope": "prefix_memory_only",
-                "fallback": not bool(self._event_summary_artifact(book_id).exists()),
+                "fallback": fallback,
             }
         ]
         return MemoryQueryState(
             original_query=query,
-            current_level="event_summary",
+            current_level=root_level,
             current_candidates=candidate_dicts,
             budget=budget,
             budget_used={"candidate_count": len(candidate_dicts)},
             trace=trace,
         )
+
+    def root_map(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        budget: MemoryQueryBudget | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return the event-summary map without semantic ranking.
+
+        This is the lightweight table-of-contents entry point for agents that
+        need to plan retrieval before asking for specific story detail.
+        """
+        budget = budget or MemoryQueryBudget(max_root_candidates=128)
+        pages = self._outline_root_pages(conn, book_id=book_id)
+        if not pages:
+            pages = self._event_summary_pages(conn, book_id=book_id) or self._synthetic_event_summary_pages(conn, book_id=book_id)
+        return [self._candidate_dict(page, budget=budget) for page in pages[: budget.max_root_candidates]]
 
     def drill_down(
         self,
@@ -298,6 +327,32 @@ class NarrativeMemoryQueryService:
             ],
         )
 
+    def resolve_outline_segment_refs(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        segment_ids: Sequence[str],
+    ) -> MemoryEvidenceBundle:
+        pages = self._pages_by_ids(conn, book_id=book_id, level="outline_segment", page_ids=[str(item) for item in segment_ids])
+        source_doc_ids = sorted({doc_id for page in pages for doc_id in page.source_doc_ids})
+        chapter_refs = sorted({child for page in pages for child in page.child_refs})
+        return MemoryEvidenceBundle(
+            evidence_items=[self._evidence_from_page(page) for page in pages],
+            sources=[self._source_from_page(page) for page in pages],
+            status=_combined_status([page.status for page in pages]),
+            source_doc_ids=source_doc_ids,
+            chapter_refs=chapter_refs,
+            trace=[
+                {
+                    "operation": "resolve_outline_segment_refs",
+                    "segment_ids": list(segment_ids),
+                    "resolved_refs": [page.page_id for page in pages],
+                    "source_doc_ids": source_doc_ids,
+                }
+            ],
+        )
+
     def resolve_document_refs(
         self,
         conn: sqlite3.Connection,
@@ -369,9 +424,15 @@ class NarrativeMemoryQueryService:
         pages = [
             *self._document_pages(conn, book_id=book_id),
             *self._chapter_pages(conn, book_id=book_id),
+            *self._outline_segment_pages(conn, book_id=book_id),
+            *self._outline_root_pages(conn, book_id=book_id),
             *self._event_pages(conn, book_id=book_id),
             *self._event_summary_pages(conn, book_id=book_id),
         ]
+        if any(page.page_type == "outline_segment" for page in pages) and not any(
+            page.page_type == "outline_root" for page in pages
+        ):
+            pages.extend(self._synthetic_outline_root_pages(conn, book_id=book_id))
         if not any(page.page_type == "event_summary" for page in pages):
             pages.extend(self._synthetic_event_summary_pages(conn, book_id=book_id))
         self.pages_repo.clear_book(conn, book_id=book_id)
@@ -381,6 +442,174 @@ class NarrativeMemoryQueryService:
 
     def _event_summary_artifact(self, book_id: str) -> Path:
         return self.repo_root / DEFAULT_MEMORY_ROOT / "outlines" / f"{book_id}.event_summaries.json"
+
+    def _outline_segments_artifact(self, book_id: str) -> Path:
+        return self.repo_root / DEFAULT_MEMORY_ROOT / "outlines" / f"{book_id}.outline_segments.json"
+
+    def _outline_root_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
+        stored = self._stored_pages(conn, book_id=book_id, page_type="outline_root")
+        if stored:
+            return stored
+        artifact_pages = self._outline_root_pages_from_artifact(conn, book_id=book_id)
+        if artifact_pages:
+            return artifact_pages
+        return self._synthetic_outline_root_pages(conn, book_id=book_id)
+
+    def _outline_segment_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
+        stored = self._stored_pages(conn, book_id=book_id, page_type="outline_segment")
+        if stored:
+            return stored
+        artifact_pages = self._outline_segment_pages_from_artifact(book_id=book_id)
+        if artifact_pages:
+            return artifact_pages
+        return self._outline_segment_pages_from_chapters(conn, book_id=book_id)
+
+    def _outline_root_pages_from_artifact(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
+        path = self._outline_segments_artifact(book_id)
+        if not path.exists():
+            return []
+        payload = self._read_json_file(path)
+        roots = payload.get("roots") or []
+        segment_status = {page.page_id: page.status for page in self._outline_segment_pages(conn, book_id=book_id)}
+        pages: list[NarrativeMemoryPage] = []
+        for index, root in enumerate(roots if isinstance(roots, list) else [], start=1):
+            if not isinstance(root, Mapping):
+                continue
+            segment_ids = [str(item) for item in (root.get("outline_segment_ids") or []) if str(item)]
+            if not segment_ids:
+                continue
+            doc_ids = _int_list(root.get("source_doc_ids"))
+            root_id = _text(root.get("outline_root_id")) or f"{book_id}:outline-root-{index:04d}"
+            pages.append(
+                NarrativeMemoryPage(
+                    page_id=root_id,
+                    page_type="outline_root",
+                    summary=_safe_excerpt(str(root.get("summary") or ""), limit=700),
+                    child_refs=segment_ids,
+                    source_doc_ids=doc_ids,
+                    source_doc_range=_text(root.get("source_doc_range")) or _range_text(doc_ids),
+                    status=_text(root.get("status")) or _combined_status([segment_status.get(item, "provisional") for item in segment_ids]),
+                    updated_at=str(payload.get("updated_at") or _utc_now()),
+                    metadata={
+                        "outline_segment_ids": segment_ids,
+                        "source_title_indexes": _int_list(root.get("source_title_indexes")),
+                    },
+                )
+            )
+        return pages
+
+    def _outline_segment_pages_from_artifact(self, *, book_id: str) -> list[NarrativeMemoryPage]:
+        path = self._outline_segments_artifact(book_id)
+        if not path.exists():
+            return []
+        payload = self._read_json_file(path)
+        segments = payload.get("segments") or []
+        pages: list[NarrativeMemoryPage] = []
+        for index, segment in enumerate(segments if isinstance(segments, list) else [], start=1):
+            if not isinstance(segment, Mapping):
+                continue
+            segment_id = _text(segment.get("outline_segment_id")) or f"{book_id}:outline-segment-{index:04d}"
+            doc_ids = _int_list(segment.get("source_doc_ids"))
+            title_indexes = _int_list(segment.get("source_title_indexes"))
+            pages.append(
+                NarrativeMemoryPage(
+                    page_id=segment_id,
+                    page_type="outline_segment",
+                    summary=_text(segment.get("summary")),
+                    child_refs=[f"chapter-{title_index}" for title_index in title_indexes],
+                    source_doc_ids=doc_ids,
+                    source_doc_range=_text(segment.get("source_doc_range")) or _range_text(doc_ids),
+                    status=_text(segment.get("status")) or "provisional",
+                    updated_at=str(segment.get("updated_at") or payload.get("updated_at") or _utc_now()),
+                    metadata={
+                        "outline_segment_id": segment_id,
+                        "chapter_line": _text(segment.get("chapter_line")),
+                        "source_title_indexes": title_indexes,
+                        **(dict(segment.get("metadata")) if isinstance(segment.get("metadata"), Mapping) else {}),
+                    },
+                )
+            )
+        return pages
+
+    def _outline_segment_pages_from_chapters(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
+        pages: list[NarrativeMemoryPage] = []
+        for row in self._chapter_rows(conn, book_id=book_id):
+            outline = _json_dict(row["outline_update_json"])
+            summary = _text(outline.get("outline_segment"))
+            if not summary:
+                continue
+            title_index = int(row["document_title_index"] or 0)
+            doc_ids = _int_list(outline.get("source_doc_ids")) or self._source_doc_ids_from_chapter_row(row)
+            title_indexes = _int_list(outline.get("source_title_indexes")) or ([title_index] if title_index else [])
+            source_doc_range = _text(outline.get("source_doc_range")) or _range_text(doc_ids)
+            segment_id = _text(outline.get("outline_segment_id")) or f"outline-segment:chapter-{title_index}"
+            pages.append(
+                NarrativeMemoryPage(
+                    page_id=segment_id,
+                    page_type="outline_segment",
+                    summary=summary,
+                    child_refs=[f"chapter-{item}" for item in title_indexes],
+                    source_doc_ids=doc_ids,
+                    source_doc_range=source_doc_range,
+                    status=_text(outline.get("status")) or str(row["outline_status"] or "provisional"),
+                    updated_at=str(row["updated_at"] or ""),
+                    metadata={
+                        "outline_segment_id": segment_id,
+                        "chapter_line": _text(outline.get("chapter_line")),
+                        "chapter_id": int(row["chapter_id"] or 0),
+                        "document_title_index": title_index,
+                        "chapter_title": str(row["chapter_title"] or ""),
+                        "source_title_indexes": title_indexes,
+                        "source_total_chars": int(row["source_total_chars"] or 0),
+                    },
+                )
+            )
+        return pages
+
+    def _synthetic_outline_root_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
+        segments = self._outline_segment_pages(conn, book_id=book_id)
+        if not segments:
+            return []
+        groups: list[list[NarrativeMemoryPage]] = []
+        current: list[NarrativeMemoryPage] = []
+        current_chars = 0
+        for segment in segments:
+            current.append(segment)
+            current_chars += int(segment.metadata.get("source_total_chars") or 0)
+            if len(current) >= 16 or current_chars >= 120_000:
+                groups.append(current)
+                current = []
+                current_chars = 0
+        if current:
+            groups.append(current)
+        pages: list[NarrativeMemoryPage] = []
+        for index, group in enumerate(groups, start=1):
+            doc_ids = sorted({doc_id for page in group for doc_id in page.source_doc_ids})
+            segment_ids = [page.page_id for page in group]
+            pages.append(
+                NarrativeMemoryPage(
+                    page_id=f"{book_id}:outline-root-{index:04d}",
+                    page_type="outline_root",
+                    summary=_safe_excerpt("；".join(page.summary for page in group if page.summary), limit=700),
+                    child_refs=segment_ids,
+                    source_doc_ids=doc_ids,
+                    source_doc_range=_range_text(doc_ids),
+                    status=_combined_status([page.status for page in group]),
+                    updated_at=_utc_now(),
+                    metadata={
+                        "outline_segment_ids": segment_ids,
+                        "fallback_reason": "missing_outline_segments_artifact",
+                    },
+                )
+            )
+        return pages
+
+    def _read_json_file(self, path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return dict(payload) if isinstance(payload, Mapping) else {}
 
     def _event_summary_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
         stored = self._stored_pages(conn, book_id=book_id, page_type="event_summary")
@@ -629,6 +858,10 @@ class NarrativeMemoryQueryService:
         return resolved
 
     def _pages_for_level(self, conn: sqlite3.Connection, *, book_id: str, level: str) -> list[NarrativeMemoryPage]:
+        if level == "outline_root":
+            return self._outline_root_pages(conn, book_id=book_id)
+        if level == "outline_segment":
+            return self._outline_segment_pages(conn, book_id=book_id)
         if level == "event_summary":
             return self._event_summary_pages(conn, book_id=book_id) or self._synthetic_event_summary_pages(conn, book_id=book_id)
         if level == "event":
@@ -675,11 +908,12 @@ class NarrativeMemoryQueryService:
         return self._pages_by_ids(conn, book_id=book_id, level=level, page_ids=candidate_ids)
 
     def _next_level(self, current_level: str) -> str:
+        level_order = self.LEVEL_ORDER if current_level in self.LEVEL_ORDER else self.LEGACY_LEVEL_ORDER
         try:
-            index = self.LEVEL_ORDER.index(current_level)
+            index = level_order.index(current_level)
         except ValueError:
-            return "event"
-        return self.LEVEL_ORDER[min(index + 1, len(self.LEVEL_ORDER) - 1)]
+            return "outline_segment"
+        return level_order[min(index + 1, len(level_order) - 1)]
 
     def _rank_pages(
         self,
@@ -728,6 +962,22 @@ class NarrativeMemoryQueryService:
                 "start_event_id": event_range.get("start_event_id") if isinstance(event_range, Mapping) else "",
                 "end_event_id": event_range.get("end_event_id") if isinstance(event_range, Mapping) else "",
             }
+        if page.page_type == "outline_root":
+            segment_ids = metadata.get("outline_segment_ids")
+            segment_ids = segment_ids if isinstance(segment_ids, list) else list(page.child_refs)
+            return {
+                "outline_segment_ids": [str(item) for item in segment_ids],
+                "start_outline_segment_id": str(segment_ids[0]) if segment_ids else "",
+                "end_outline_segment_id": str(segment_ids[-1]) if segment_ids else "",
+            }
+        if page.page_type == "outline_segment":
+            return {
+                "outline_segment_id": metadata.get("outline_segment_id") or page.page_id,
+                "chapter_line": metadata.get("chapter_line") or "",
+                "source_title_indexes": metadata.get("source_title_indexes") or [],
+                "document_title_index": metadata.get("document_title_index"),
+                "chapter_title": metadata.get("chapter_title") or "",
+            }
         if page.page_type == "chapter":
             return {
                 "chapter_ref": page.page_id,
@@ -759,6 +1009,10 @@ class NarrativeMemoryQueryService:
             chapter_id = page.metadata.get("source_chapter_id") or page.metadata.get("chapter_id")
             if chapter_id:
                 source_path = f"sqlite:chapters:{chapter_id}"
+        if page.page_type == "outline_segment":
+            chapter_id = page.metadata.get("chapter_id")
+            if chapter_id:
+                source_path = f"sqlite:chapters:{chapter_id}:outline_segment"
         if page.page_type == "document" and page.source_doc_ids:
             source_path = f"sqlite:documents:{page.source_doc_ids[0]}"
         return {

@@ -123,6 +123,13 @@ class CommandRouter:
                 "query_close_read",
                 aliases=("query", "close-read-query", "inspect-close-read"),
             ),
+            CommandSpec(
+                "analyze",
+                "和只读 Analyzer 讨论当前小说大纲与剧情合理性",
+                "Analyzer",
+                "analyze_outline",
+                aliases=("analyzer", "outline-analyzer"),
+            ),
             CommandSpec("kb", "构建或查看 Creative KB", "read pipeline", "build_creative_kb"),
             CommandSpec(
                 "benchmark",

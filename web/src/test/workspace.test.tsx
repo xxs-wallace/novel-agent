@@ -7,6 +7,7 @@ import { createAppQueryClient } from "../App";
 import { WorkspaceShell } from "../components/layout/WorkspaceShell";
 import {
   calls,
+  setMessageResponseDelay,
   setTaskActiveJob,
   setWriterArtifactReviewAfterJobReplay,
   setWriterArtifactReviewMessage,
@@ -165,6 +166,71 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() => expect(calls.messages).toHaveLength(1));
     expect(calls.commands).toHaveLength(0);
     expect(calls.messages[0].body).toMatchObject({ content: "请让主角先回到旧案现场。" });
+  });
+
+  it("switches the shared chat input into read-only analyzer mode", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    expect(input).toHaveAttribute("placeholder", "向小说专家提问，例如：当前未解之谜哪条最适合下一阶段回收？");
+
+    await user.type(input, "当前旧案线索应该如何推进？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(calls.messages).toHaveLength(1));
+    expect(calls.messages[0].body).toMatchObject({
+      content: "当前旧案线索应该如何推进？",
+      payload: {
+        channel: "outline_analyzer",
+        question: "当前旧案线索应该如何推进？"
+      }
+    });
+    expect(calls.commands).toHaveLength(0);
+  });
+
+  it("shows a local analyzer pending message while the model call is running", async () => {
+    const user = userEvent.setup();
+    setMessageResponseDelay(200);
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "强哥下一阶段是否应该回归？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("强哥下一阶段是否应该回归？")).toBeInTheDocument();
+    expect(await screen.findByText("Analyzer 正在阅读当前小说记忆并分析剧情，请稍等。")).toBeInTheDocument();
+    await waitFor(() => expect(calls.messages).toHaveLength(1));
+  });
+
+  it("keeps analyzer mode separate from Writer gate actions", async () => {
+    const user = userEvent.setup();
+    setWriterQuestionMessage("task-alpha");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    expect(await screen.findByText("顾迟是否为新增人物？")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
+    expect(await screen.findByRole("button", { name: "退出专家意见" })).toBeInTheDocument();
+
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "/analyze 当前未解之谜哪条更适合回收？");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(calls.messages).toHaveLength(1));
+    expect(calls.messages[0].body).toMatchObject({
+      content: "/analyze 当前未解之谜哪条更适合回收？",
+      payload: {
+        channel: "outline_analyzer",
+        question: "/analyze 当前未解之谜哪条更适合回收？"
+      }
+    });
+    expect(calls.actions.some((call) => call.body.action === "submit_outline_research_answers")).toBe(false);
+    expect(calls.commands).toHaveLength(0);
   });
 
   it("binds Writer question answers to the chat input and only continues through the card action", async () => {
