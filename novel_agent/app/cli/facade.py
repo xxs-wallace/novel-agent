@@ -264,6 +264,8 @@ class WorkflowFacade:
             "fragment_cards": 0,
             "fragment_card_docs": 0,
             "fragment_clusters": 0,
+            "narrative_scene_cards": 0,
+            "narrative_scene_card_docs": 0,
         }
         if db_path.exists():
             db = NovelAgentDB(db_path)
@@ -276,6 +278,7 @@ class WorkflowFacade:
                 counts["fragment_cards"] = self._count(conn, "fragment_cards")
                 counts["fragment_card_docs"] = self._count_distinct(conn, "fragment_cards", "doc_id")
                 counts["fragment_clusters"] = self._count(conn, "fragment_clusters")
+        counts.update(self._narrative_scene_index_counts(book_id))
         world_summary = self.repo_root / ".memory" / "world" / f"{book_id}.summary.md"
         world_markdown = self.repo_root / ".memory" / "world" / f"{book_id}.md"
         outline = self.repo_root / ".memory" / "outlines" / f"{book_id}.md"
@@ -291,6 +294,26 @@ class WorkflowFacade:
             source_arc_map_ready=source_arc.exists(),
             counts=counts,
         )
+
+    def _narrative_scene_index_counts(self, book_id: str) -> dict[str, int]:
+        path = self.repo_root / ".memory" / "index_cards" / f"{book_id}.scene_cards.json"
+        if not path.exists():
+            return {"narrative_scene_cards": 0, "narrative_scene_card_docs": 0}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"narrative_scene_cards": 0, "narrative_scene_card_docs": 0}
+        data = payload.get("data") if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping) else payload
+        raw_cards = data.get("scene_cards") if isinstance(data, Mapping) else data
+        cards = [item for item in raw_cards if isinstance(item, Mapping)] if isinstance(raw_cards, list) else []
+        source_docs: set[str] = set()
+        for card in cards:
+            for doc_id in card.get("source_doc_ids") or []:
+                source_docs.add(str(doc_id))
+        return {
+            "narrative_scene_cards": len(cards),
+            "narrative_scene_card_docs": len(source_docs),
+        }
 
     def query_close_read(
         self,
@@ -425,6 +448,35 @@ class WorkflowFacade:
         self.event_stream.emit("系统", "Creative KB 已可用", payload=payload)
         return payload
 
+    def writer_start_preflight(self, *, book_id: str) -> dict[str, object]:
+        from .. import run_interactive
+
+        db_path = run_interactive.resolve_writer_memory_db_path(
+            repo_root=self.repo_root,
+            book_id=book_id,
+            reset=False,
+        )
+        db, workflow = run_interactive.build_writer_workflow(
+            repo_root=self.repo_root,
+            db_path=db_path,
+            runs_dir=self.repo_root / "runs" / "writer",
+            dry_run=True,
+        )
+        with db.connect() as conn:
+            db.init_schema(conn)
+            init_creative_kb_schema(conn)
+            modeling_status = workflow.planner.check_modeling_status(conn, book_id=book_id)
+        advisories = run_interactive._modeling_advisory_steps(modeling_status)  # noqa: SLF001
+        return {
+            "book_id": book_id,
+            "can_start": bool(modeling_status.ready_for_continuation),
+            "missing_modeling_steps": list(modeling_status.missing_modeling_steps),
+            "modeling_advisories": advisories,
+            "missing_guidance": run_interactive._modeling_missing_guidance(list(modeling_status.missing_modeling_steps)),  # noqa: SLF001
+            "advisory_guidance": run_interactive._modeling_missing_guidance(advisories),  # noqa: SLF001
+            "modeling_status": modeling_status.to_dict(),
+        }
+
     def build_narrative_scene_index(
         self,
         *,
@@ -459,6 +511,7 @@ class WorkflowFacade:
                 book_id=book_id,
                 model_client=model_client,
                 persist=True,
+                progress_callback=self.event_stream.progress_callback,
             )
             conn.commit()
             artifact_path = service.artifact_path(book_id)

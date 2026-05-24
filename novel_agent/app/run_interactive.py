@@ -518,6 +518,8 @@ def _modeling_advisory_steps(modeling_status: Any) -> list[str]:
             continue
         if name == "source_arc_map":
             missing.append("memory.source_arc_map")
+        elif name == "creative_kb":
+            missing.append("creative_kb.fragment_cards")
         elif name == "narrative_structure_patterns":
             missing.append("creative_kb.narrative_structure_patterns")
     return missing

@@ -56,6 +56,7 @@ class CharacterRelationshipItem:
     status_summary: str
     field_type: ProfileFieldType
     evidence_level: EvidenceLevel
+    address_terms: list[str] = field(default_factory=list)
     source_chapter_indexes: list[int] = field(default_factory=list)
     source_doc_ids: list[int] = field(default_factory=list)
     last_updated_chapter_index: int = 0

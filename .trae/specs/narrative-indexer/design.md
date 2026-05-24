@@ -1,5 +1,17 @@
 # Narrative Indexer Design
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Indexer
+改动通常按对象或查询链路阅读：
+
+- Card schema / family：读第 3 节，并回查 [`spec.md`](spec.md)。
+- Close-read 与 Indexer 分工：读第 4 节。
+- Creative KB 接入：读第 5 节，并回查
+  [`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md)。
+- Query flow / storage：读第 7、8 节。
+- Prompt 或 benchmark 影响：读第 9、10 节。
+
 ## 1. 目标
 
 Narrative Indexer 将 close-read、BTree Memory Query、Creative KB、Analyzer 和 Writer 的检索思想统一到同一个上位框架：

@@ -24,6 +24,8 @@ def build_book_continuation_plan_prompt(
         "stage_highlights 只能拆解或复述该边界，不得新增未授权高潮、地点跳转、势力或替代主线。\n"
         "6. continuation_intent.story_scale 与 climax_plan 是正式规划输入；"
         "必须归并进 BookContinuationPlan，不得只作为备注。\n"
+        "7. 如果 climax_plan.no_climax=true 或 climax_plan.climax_mode=none，表示用户选择本批/本段为过渡剧情；"
+        "不得强行发明高潮章节，chapter_outline_slots 应体现铺垫、过渡、关系缓冲或信息整理功能。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n\n"

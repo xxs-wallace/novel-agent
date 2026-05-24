@@ -2,7 +2,18 @@ import { Plus, RefreshCw } from "lucide-react";
 import { type MouseEvent, useState } from "react";
 
 import type { CreateTaskRequest, DeleteTaskPreview, TaskSummary, WriterRunDeletePreview } from "../../api/types";
-import { blockingBadge, kbProgress, kbProgressDetail, kbStatus, percent, toPublicStatusText, writerStatus } from "../../utils/status";
+import {
+  blockingBadge,
+  kbProgress,
+  kbProgressDetail,
+  kbStatus,
+  narrativeSceneIndexProgress,
+  narrativeSceneIndexProgressDetail,
+  narrativeSceneIndexStatus,
+  percent,
+  toPublicStatusText,
+  writerStatus
+} from "../../utils/status";
 import { CreateTaskDialog } from "./CreateTaskDialog";
 import { TaskActionMenu } from "./TaskActionMenu";
 
@@ -14,7 +25,7 @@ interface TaskRailProps {
   onCreateTask: (request: CreateTaskRequest) => Promise<unknown>;
   onSelectTask: (taskId: string) => void;
   onAction: (taskId: string, action: string, payload?: Record<string, unknown>) => void;
-  onStartWriter: () => void;
+  onStartWriter: () => void | Promise<unknown>;
   onResetCloseRead: (taskId: string) => Promise<unknown>;
   onDeleteTask: (taskId: string, confirm: boolean) => Promise<DeleteTaskPreview>;
   onDeleteLatestWriterRun: (taskId: string, confirm: boolean) => Promise<WriterRunDeletePreview>;
@@ -142,6 +153,9 @@ export function TaskRail({
           const closeReadPct = percent(task.close_read_completed, task.total_documents);
           const kb = kbProgress(task.progress, task.total_documents);
           const kbPct = percent(kb.completed, kb.total);
+          const sceneIndexActive = task.active_job?.type === "narrative_scene_index";
+          const sceneIndex = narrativeSceneIndexProgress(task.progress, task.total_documents, sceneIndexActive);
+          const sceneIndexPct = sceneIndexActive ? 100 : percent(sceneIndex.completed, sceneIndex.total);
           const badge = blockingBadge(task.progress);
           return (
             <article
@@ -171,9 +185,12 @@ export function TaskRail({
               <div className="progress-stack">
                 <ProgressLine label="导入原文" value={readPct} detail={`${task.read_completed}/${task.total_documents || 0}`} />
                 <ProgressLine label="阅读" value={closeReadPct} detail={`${task.close_read_completed}/${task.total_documents || 0}`} />
+                <ProgressLine label="叙事场景索引" value={sceneIndexPct} detail={narrativeSceneIndexProgressDetail(sceneIndex)} />
                 <ProgressLine label="Creative KB" value={kbPct} detail={kbProgressDetail(kb)} />
               </div>
               <div className="task-status-grid">
+                <span>场景索引</span>
+                <strong>{sceneIndexActive ? "构建中" : narrativeSceneIndexStatus(task.progress)}</strong>
                 <span>KB</span>
                 <strong>{kbStatus(task.progress)}</strong>
                 <span>Writer</span>
@@ -211,16 +228,16 @@ export function TaskRail({
         <div className="dialog-backdrop">
           <div role="dialog" aria-modal="true" aria-labelledby="delete-writer-run-title" className="dialog-card">
             <div className="dialog-header">
-              <h2 id="delete-writer-run-title">删除最近续写预览</h2>
+              <h2 id="delete-writer-run-title">删除续写任务预览</h2>
             </div>
-            <p>将删除任务 {writerRunDeletePreview.taskId} 最近一次 Writer 运行产物。</p>
+            <p>将删除任务 {writerRunDeletePreview.taskId} 下的续写任务产物。</p>
             <pre className="preview-box">{JSON.stringify(writerRunDeletePreview.preview, null, 2)}</pre>
             <div className="dialog-actions">
               <button type="button" className="secondary-button" onClick={() => setWriterRunDeletePreview(null)}>
                 取消
               </button>
               <button type="button" className="danger-button" onClick={() => void confirmWriterRunDelete()}>
-                确认删除最近续写
+                确认删除续写任务
               </button>
             </div>
           </div>

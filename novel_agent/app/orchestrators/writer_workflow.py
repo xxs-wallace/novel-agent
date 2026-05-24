@@ -226,9 +226,14 @@ class WriterInteractiveWorkflow:
         if question_set is not None:
             if question_set_id and question_set_id != question_set.question_set_id:
                 raise ValueError("提交的问题集与当前等待的问题集不一致。")
-            missing_required = self._missing_required_outline_answers(
-                question_set=question_set,
-                answers=normalized_answers,
+            freeform_answer_text = str(answer_text or "").strip()
+            missing_required = (
+                []
+                if freeform_answer_text
+                else self._missing_required_outline_answers(
+                    question_set=question_set,
+                    answers=normalized_answers,
+                )
             )
             if missing_required:
                 return self._outline_research_missing_answer_payload(

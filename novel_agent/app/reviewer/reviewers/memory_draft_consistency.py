@@ -21,4 +21,4 @@ class MemoryDraftConsistencyReviewer(ModelOnlyReviewer):
     }
     focus_zh = "先抽取草稿中的事件、人物、地点、关系、设定和状态 claims，再用 Memory 证据核查历史一致性。"
     boundary_zh = "不评价整体文笔，不评价全文大纲方向，不把缺少证据的推测写成确认矛盾。"
-    context_guidance_zh = "所有历史证据只能通过 memory_query 请求 ReviewerMemoryTool；必须区分确认矛盾和证据不足。"
+    context_guidance_zh = "所有历史证据只能通过 memory_query 请求 ReviewerMemoryTool；工具会优先返回 narrative_scene compact cards 和相关 outline segment，再提供 Memory 证据。必须区分确认矛盾和证据不足。"

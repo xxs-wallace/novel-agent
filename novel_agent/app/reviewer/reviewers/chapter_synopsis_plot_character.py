@@ -21,4 +21,4 @@ class ChapterSynopsisPlotCharacterReviewer(ModelOnlyReviewer):
     }
     focus_zh = "从章节梗概或 chapter_brief 中抽取人物、行动、关系、状态变化和关键事件，评估剧情合理性与人物一致性。"
     boundary_zh = "不评价正文文笔，不做全文大纲方向裁决，不臆造人物档案。"
-    context_guidance_zh = "人物档案、关系状态和历史行动只能通过 memory_query 请求 ReviewerMemoryTool；证据不足必须明说。"
+    context_guidance_zh = "人物档案、关系状态和历史行动只能通过 memory_query 请求 ReviewerMemoryTool；工具会优先返回 narrative_scene compact cards 和相关 outline segment，再提供 Memory 证据。证据不足必须明说。"

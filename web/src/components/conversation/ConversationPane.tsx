@@ -27,6 +27,7 @@ interface ConversationPaneProps {
   writerWizardSignal?: number;
   onOpenArtifactDetail?: (artifactId: string) => void;
   onAction: (action: string, payload?: Record<string, unknown>) => Promise<unknown> | void;
+  onRequestWriterStart?: () => Promise<boolean> | boolean;
 }
 
 export function ConversationPane({
@@ -36,7 +37,8 @@ export function ConversationPane({
   actionPending = false,
   writerWizardSignal = 0,
   onOpenArtifactDetail,
-  onAction
+  onAction,
+  onRequestWriterStart
 }: ConversationPaneProps) {
   const queryClient = useQueryClient();
   const [input, setInput] = useState("");
@@ -261,8 +263,7 @@ export function ConversationPane({
 
   useEffect(() => {
     if (writerWizardSignal > 0 && selectedTask) {
-      setAnalyzerMode(false);
-      setWizardOpen(true);
+      void requestWriterStart();
     }
   }, [selectedTask, writerWizardSignal]);
 
@@ -348,6 +349,17 @@ export function ConversationPane({
 
   async function submitWriterIntent(payload: Record<string, unknown>) {
     await onAction("start_writer", payload);
+  }
+
+  async function requestWriterStart() {
+    if (onRequestWriterStart) {
+      const canOpen = await onRequestWriterStart();
+      if (!canOpen) {
+        return;
+      }
+    }
+    setAnalyzerMode(false);
+    setWizardOpen(true);
   }
 
   async function submitQuestionSet(questionSet: WriterQuestionSet) {
@@ -694,10 +706,7 @@ export function ConversationPane({
             type="button"
             className="primary-button"
             disabled={!selectedTask || actionPending}
-            onClick={() => {
-              setAnalyzerMode(false);
-              setWizardOpen(true);
-            }}
+            onClick={() => void requestWriterStart()}
           >
             <WandSparkles size={16} aria-hidden="true" />
             开始续写

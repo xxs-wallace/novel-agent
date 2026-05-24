@@ -175,6 +175,20 @@ class DocumentsRepo:
             return None
         return self._row_to_document(row)
 
+    def fetch_latest_title_document(self, conn: sqlite3.Connection, *, book_id: str) -> DocumentRow | None:
+        row = conn.execute(
+            '''
+            SELECT * FROM documents
+            WHERE book_id = ?
+            ORDER BY document_title_index DESC, doc_id DESC
+            LIMIT 1
+            ''',
+            (book_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_document(row)
+
     def _row_to_document(self, row: sqlite3.Row) -> DocumentRow:
         return DocumentRow(
             doc_id=int(row['doc_id']),

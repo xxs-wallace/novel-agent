@@ -88,6 +88,47 @@ export function kbProgressDetail(summary: KbProgressSummary): string {
   return `${base}${cardText}${clusterText}`;
 }
 
+export interface NarrativeSceneIndexProgressSummary {
+  completed: number;
+  total: number;
+  cards: number;
+  active: boolean;
+}
+
+export function narrativeSceneIndexStatus(progress: TaskProgress | null | undefined): string {
+  const cards = progress?.counts?.narrative_scene_cards ?? 0;
+  return cards > 0 ? "已生成" : "未生成";
+}
+
+export function narrativeSceneIndexProgress(
+  progress: TaskProgress | null | undefined,
+  fallbackTotal = 0,
+  active = false
+): NarrativeSceneIndexProgressSummary {
+  const counts = progress?.counts ?? {};
+  const cards = counts.narrative_scene_cards ?? 0;
+  const completed = counts.narrative_scene_card_docs ?? (cards ? counts.documents ?? fallbackTotal : 0);
+  const total = counts.documents ?? progress?.close_read_progress?.total ?? fallbackTotal;
+  return {
+    completed: Math.max(0, completed),
+    total: Math.max(0, total),
+    cards: Math.max(0, cards),
+    active
+  };
+}
+
+export function narrativeSceneIndexProgressDetail(summary: NarrativeSceneIndexProgressSummary): string {
+  if (summary.active) {
+    return summary.cards ? `构建中 · ${summary.cards} 卡` : "构建中";
+  }
+  if (!summary.total) {
+    return summary.cards ? `${summary.cards} 卡` : "0/0";
+  }
+  const base = `覆盖 ${Math.min(summary.completed, summary.total)}/${summary.total} 文档`;
+  const cardText = summary.cards ? ` · ${summary.cards} 卡` : "";
+  return `${base}${cardText}`;
+}
+
 export function writerStatus(task: TaskSummary): string {
   return toPublicStatusText(task.progress?.step, task.close_read_done ? "可开始续写" : "未开始");
 }

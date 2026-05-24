@@ -297,6 +297,15 @@ class NarrativeInquiryBroker:
             return EvidenceBundle.missing(request, "memory_root_candidates")
         selection = self._select_memory_candidates(state=state, request=request, selection_adapter=selection_adapter)
         if selection is None:
+            outline_bundle = self._resolve_outline_level_without_selector(
+                conn,
+                book_id=book_id,
+                request=request,
+                state=state,
+                budget=budget,
+            )
+            if outline_bundle is not None:
+                return outline_bundle
             return self._bundle_from_memory_candidates(request, state, resolver="NarrativeMemoryQueryService.root_scan")
         return self._resolve_story_memory_btree(
             conn,
@@ -324,7 +333,7 @@ class NarrativeInquiryBroker:
         decision_log: list[dict[str, Any]] = []
         model_reasoning_debug: list[dict[str, Any]] = []
         selection: MemoryCandidateSelection | None = initial_selection
-        levels_to_visit = {"event_summary", "event", "chapter"}
+        levels_to_visit = {"outline_root", "outline_segment", "event_summary", "event", "chapter"}
 
         while final_state.current_level in levels_to_visit and final_state.current_candidates and selection is not None:
             self._append_selection_trace(
@@ -335,6 +344,16 @@ class NarrativeInquiryBroker:
                 model_reasoning_debug=model_reasoning_debug,
             )
             if not selection.selected_ids:
+                break
+            if final_state.current_level == "outline_root" and not selection.need_drill_down:
+                evidence_bundle = self._memory_bundle_from_selected_candidates(final_state, selection.selected_ids)
+                break
+            if final_state.current_level == "outline_segment" and not selection.need_drill_down:
+                evidence_bundle = self.memory_query_service.resolve_outline_segment_refs(
+                    conn,
+                    book_id=book_id,
+                    segment_ids=selection.selected_ids,
+                )
                 break
             if final_state.current_level == "event_summary" and not selection.need_drill_down:
                 evidence_bundle = self._memory_bundle_from_selected_candidates(final_state, selection.selected_ids)
@@ -421,6 +440,72 @@ class NarrativeInquiryBroker:
             )
         return bundle
 
+    def _resolve_outline_level_without_selector(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        request: NarrativeInquiryRequest,
+        state: MemoryQueryState,
+        budget: AnalyzerBudget,
+    ) -> EvidenceBundle | None:
+        expected_depth = _text(request.expected_depth).lower()
+        if state.current_level != "outline_root":
+            return None
+        if expected_depth not in {"outline_segment", "outline", "story_outline", "segment"}:
+            return None
+        selected_root_ids = [
+            str(item.get("id") or item.get("page_id") or "")
+            for item in state.current_candidates[:2]
+            if str(item.get("id") or item.get("page_id") or "")
+        ]
+        if not selected_root_ids:
+            return None
+        next_state = self.memory_query_service.drill_down(
+            conn,
+            book_id=book_id,
+            state=state,
+            selected_ids=selected_root_ids,
+            query_suffix="定位和评审问题相关的 outline segment",
+            selection_reason="selector unavailable; ranked outline root expansion",
+            confidence=0.5,
+        )
+        segment_ids = [
+            str(item.get("outline_segment_id") or item.get("id") or item.get("page_id") or "")
+            for item in next_state.current_candidates[:4]
+            if str(item.get("outline_segment_id") or item.get("id") or item.get("page_id") or "")
+        ]
+        if not segment_ids:
+            return self._bundle_from_memory_candidates(
+                request,
+                next_state,
+                resolver="NarrativeMemoryQueryService.outline_segment_scan",
+            )
+        memory_bundle = self.memory_query_service.resolve_outline_segment_refs(
+            conn,
+            book_id=book_id,
+            segment_ids=segment_ids,
+        )
+        bundle = self._bundle_from_memory(request, memory_bundle, status_if_empty="missing")
+        bundle.trace.extend(
+            [
+                *state.trace,
+                *next_state.trace,
+                {
+                    "operation": "narrative_inquiry_outline_segment_scan",
+                    "resolver": "NarrativeMemoryQueryService.resolve_outline_segment_refs",
+                    "request_type": request.request_type,
+                    "selected_outline_root_ids": selected_root_ids,
+                    "selected_outline_segment_ids": segment_ids,
+                    "expected_depth": expected_depth,
+                },
+            ]
+        )
+        for item in bundle.evidence_items:
+            item.setdefault("memory_query_protocol", "outline_segment_scan")
+            item.setdefault("final_evidence_ids", {"outline_segment_ids": segment_ids})
+        return bundle
+
     def _select_memory_candidates(
         self,
         *,
@@ -473,6 +558,12 @@ class NarrativeInquiryBroker:
         state: MemoryQueryState,
         budget: AnalyzerBudget,
     ) -> MemoryEvidenceBundle | None:
+        if state.current_level == "outline_segment":
+            ids = [
+                str(item.get("outline_segment_id") or item.get("id") or item.get("page_id"))
+                for item in state.current_candidates[:3]
+            ]
+            return self.memory_query_service.resolve_outline_segment_refs(conn, book_id=book_id, segment_ids=ids)
         if state.current_level == "event":
             ids = [str(item.get("event_id") or item.get("id")) for item in state.current_candidates[:3]]
             return self.memory_query_service.resolve_event_ids(conn, book_id=book_id, event_ids=ids)

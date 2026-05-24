@@ -48,7 +48,6 @@ from ..services.character_mention_service import CharacterMentionService
 from ..services.outline_research_service import (
     CharacterMentionExtractor,
     CharacterMentionResolver,
-    HeuristicOutlineResearchModelAdapter,
     ModelOutlineResearchModelAdapter,
     OutlineResearchContextBroker,
     OutlineResearchLoopController,
@@ -102,11 +101,32 @@ def _normalize_string_list(items: list[object] | tuple[object, ...] | set[object
     return normalized
 
 
+def _coerce_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[，,；;\n]+", value)
+        return _normalize_string_list(tuple(part for part in parts if part.strip()))
+    if isinstance(value, (list, tuple, set)):
+        return _normalize_string_list(value)
+    return [_normalize_text(value)] if _normalize_text(value) else []
+
+
 def _append_unique(items: list[str], value: str) -> list[str]:
     text = _normalize_text(value)
     if text and text not in items:
         items.append(text)
     return items
+
+
+def _positive_int(value: object) -> int:
+    if isinstance(value, int):
+        return max(0, value)
+    text = _normalize_text(value)
+    if not text:
+        return 0
+    match = re.search(r"\d+", text)
+    return max(0, int(match.group(0))) if match else 0
 
 
 @dataclass(slots=True)
@@ -240,8 +260,6 @@ class WriterLayeredGenerationOrchestrator:
             )
 
         creative_kb_ready = self._creative_kb_ready(conn)
-        if not creative_kb_ready:
-            missing_steps.append("creative_kb.fragment_cards")
         checks.append(
             ModelingCheckItem(
                 name="creative_kb",
@@ -304,7 +322,6 @@ class WriterLayeredGenerationOrchestrator:
             "character_profiles",
             "story_outline",
             "world_summary",
-            "creative_kb",
         }
         ready_for_continuation = all(item.ready for item in checks if item.name in required_check_names)
         return ModelingStatus(
@@ -341,14 +358,22 @@ class WriterLayeredGenerationOrchestrator:
             if any(len(existing) > len(candidate) and candidate in existing for existing in major_characters):
                 continue
             major_characters.append(candidate)
+        story_scale = self._normalize_story_scale(payload.get("story_scale"))
+        climax_plan = self._normalize_climax_plan(payload.get("climax_plan"))
+        if not self._has_explicit_climax_plan(climax_plan):
+            climax_plan = self._analyze_climax_plan_from_user_prompt(
+                payload=payload,
+                story_scale=story_scale,
+                existing_climax=climax_plan,
+            )
         return ContinuationIntent(
             major_characters=major_characters,
             desired_actions=[str(item) for item in (payload.get("desired_actions") or [])],
             avoidances=[str(item) for item in (payload.get("avoidances") or [])],
             preferred_outcome=str(payload.get("preferred_outcome") or ""),
             notes=str(payload.get("notes") or ""),
-            story_scale=self._normalize_story_scale(payload.get("story_scale")),
-            climax_plan=self._normalize_climax_plan(payload.get("climax_plan")),
+            story_scale=story_scale,
+            climax_plan=climax_plan,
             sources=[
                 TraceableSource(
                     type="user_input",
@@ -380,14 +405,119 @@ class WriterLayeredGenerationOrchestrator:
     @staticmethod
     def _normalize_climax_plan(value: object) -> dict[str, Any]:
         source = value if isinstance(value, Mapping) else {}
+        target_chapter_index = _positive_int(source.get("target_chapter_index"))
+        if not target_chapter_index:
+            target_chapter_index = _positive_int(source.get("target_chapter_position") or source.get("target_chapter_position_text"))
+        no_climax = bool(source.get("no_climax")) or str(source.get("climax_mode") or "").strip().lower() in {
+            "none",
+            "no_climax",
+            "transition",
+        }
+        analysis_status = str(source.get("analysis_status") or "").strip()
         return {
             "conflict_climax": str(source.get("conflict_climax") or ""),
             "emotional_climax": str(source.get("emotional_climax") or ""),
-            "target_chapter_index": int(source.get("target_chapter_index") or 0),
-            "must_foreshadow": [str(item) for item in (source.get("must_foreshadow") or [])],
-            "must_not_resolve_before": [str(item) for item in (source.get("must_not_resolve_before") or [])],
+            "target_chapter_index": target_chapter_index,
+            "must_foreshadow": _coerce_string_list(source.get("must_foreshadow")),
+            "must_not_resolve_before": _coerce_string_list(source.get("must_not_resolve_before")),
             "payoff_expectation": str(source.get("payoff_expectation") or ""),
+            "climax_mode": "none" if no_climax else str(source.get("climax_mode") or ""),
+            "no_climax": no_climax,
+            "climax_notes": str(source.get("climax_notes") or source.get("no_climax_reason") or ""),
+            "analysis_status": analysis_status,
+            "user_questions": _coerce_string_list(source.get("user_questions"))[:3],
         }
+
+    @staticmethod
+    def _has_explicit_climax_plan(climax_plan: Mapping[str, Any]) -> bool:
+        if bool(climax_plan.get("no_climax")) or str(climax_plan.get("climax_mode") or "").strip().lower() in {"none", "transition"}:
+            return True
+        return bool(
+            str(climax_plan.get("conflict_climax") or "").strip()
+            or str(climax_plan.get("emotional_climax") or "").strip()
+            or int(climax_plan.get("target_chapter_index") or 0) > 0
+            or str(climax_plan.get("payoff_expectation") or "").strip()
+        )
+
+    def _analyze_climax_plan_from_user_prompt(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        story_scale: Mapping[str, Any],
+        existing_climax: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if self.model_client is None:
+            source = dict(existing_climax)
+            source["analysis_status"] = "needs_model"
+            source["user_questions"] = [self._default_climax_question(story_scale=story_scale)]
+            return self._normalize_climax_plan(source)
+
+        prompt_seed = {
+            "desired_actions": [str(item) for item in (payload.get("desired_actions") or []) if str(item).strip()],
+            "continuation_goal": str(payload.get("continuation_goal") or ""),
+            "preferred_outcome": str(payload.get("preferred_outcome") or ""),
+            "avoidances": [str(item) for item in (payload.get("avoidances") or []) if str(item).strip()],
+            "notes": str(payload.get("notes") or payload.get("constraints") or ""),
+            "story_scale": dict(story_scale),
+        }
+        fallback = {
+            "analysis_status": "needs_user_input",
+            "user_questions": [self._default_climax_question(story_scale=story_scale)],
+        }
+        result, _raw = self.model_client.generate_json(
+            system_prompt=(
+                "你是 Writer 启动阶段的高潮设想分析器。只分析用户 prompt 本身，不读取原文、Memory 或 Reviewer。"
+                "只返回 JSON。任务：从用户自然语言中抽取高潮设想，供后续大纲 Agent Loop 使用。"
+                "如果用户明确表示没有高潮、只是过渡剧情，返回 analysis_status=no_climax、climax_mode=none、no_climax=true，"
+                "不要强行发明高潮。"
+                "如果能看出需要重点详细刻画的发展、冲突爆点、情绪转折或希望靠近的章节位置，返回 analysis_status=extracted，"
+                "并尽量填写 conflict_climax、emotional_climax、target_chapter_index、must_foreshadow、must_not_resolve_before、payoff_expectation。"
+                "如果看不出来，返回 analysis_status=needs_user_input，并给出 1 个像对话一样的具体 user_questions；"
+                "问题应询问用户希望重点刻画的高潮/转折是什么，或是否本批次只是过渡剧情。"
+            ),
+            user_prompt=json.dumps(
+                {
+                    "analyze_seed": prompt_seed,
+                    "output_schema": {
+                        "analysis_status": "extracted | needs_user_input | no_climax",
+                        "conflict_climax": "",
+                        "emotional_climax": "",
+                        "target_chapter_index": 0,
+                        "must_foreshadow": [],
+                        "must_not_resolve_before": [],
+                        "payoff_expectation": "",
+                        "climax_mode": "normal | none",
+                        "no_climax": False,
+                        "climax_notes": "",
+                        "user_questions": [],
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            fallback_factory=lambda: fallback,
+            use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
+        )
+        source = dict(existing_climax)
+        if isinstance(result, Mapping):
+            source.update(dict(result))
+        normalized = self._normalize_climax_plan(source)
+        if normalized.get("analysis_status") == "no_climax":
+            normalized["analysis_status"] = "extracted"
+            normalized["climax_mode"] = "none"
+            normalized["no_climax"] = True
+        if normalized.get("analysis_status") == "needs_user_input" and not normalized.get("user_questions"):
+            normalized["user_questions"] = [self._default_climax_question(story_scale=story_scale)]
+        return normalized
+
+    @staticmethod
+    def _default_climax_question(*, story_scale: Mapping[str, Any]) -> str:
+        count = int(story_scale.get("target_chapter_count") or 0)
+        scope = f"这 {count} 章" if count > 0 else "这批续写"
+        return (
+            f"{scope}里你希望重点详细刻画的高潮或关键转折是什么？"
+            "如果没有高潮、只是过渡剧情，也可以直接说“没有高潮，本批次为过渡剧情”。"
+        )
 
     @staticmethod
     def _fallback_chapter_outline_slots(
@@ -398,9 +528,15 @@ class WriterLayeredGenerationOrchestrator:
         climax_plan: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         target_index = int(climax_plan.get("target_chapter_index") or 0)
+        no_climax = bool(climax_plan.get("no_climax")) or str(climax_plan.get("climax_mode") or "").strip().lower() in {
+            "none",
+            "transition",
+        }
         slots: list[dict[str, Any]] = []
         for index in range(1, max(1, count) + 1):
-            if target_index and index == target_index:
+            if no_climax:
+                plot_function = "过渡铺垫并保持阶段节奏"
+            elif target_index and index == target_index:
                 plot_function = "承接前文铺垫并推进到阶段高潮"
             elif index == 1:
                 plot_function = "承接上文并建立本轮续写目标"

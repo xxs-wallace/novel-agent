@@ -18,7 +18,8 @@ def build_character_identity_resolution_prompt(prompt_input: dict[str, Any]) -> 
         "6. 第二轮如果输入包含 all_character_profiles，必须给出 create_new / merge_existing / drop 三者之一，不要继续 request_all_profiles。\n"
         "7. merge_existing 时 existing_canonical_name 必须来自输入中的 existing_character_roster、character_profiles 或 all_character_profiles。\n"
         "8. aliases_to_add 只能包含可作为稳定称呼的别名；不要把未在原文出现的模型标签自动加入别名。\n"
-        "9. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "9. 如果候选是对话中的关系称呼或熟人称呼，且可指向既有人物，应 merge_existing 并把称呼放入 aliases_to_add；不要用该称呼覆盖既有人物 canonical_name。\n"
+        "10. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
         "请按以下 JSON schema 返回：\n"

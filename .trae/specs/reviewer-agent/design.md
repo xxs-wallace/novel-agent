@@ -1,5 +1,20 @@
 # Reviewer Agent 独立评审模块设计
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Reviewer
+设计按工作面切片阅读：
+
+- Runtime / state machine / model loop：读第 2、3 节，并回查
+  [`contracts.md`](contracts.md)。
+- Memory / Narrative Index / evidence 查询：读第 4 节，并回查
+  [`../narrative-indexer/spec.md`](../narrative-indexer/spec.md) 与
+  [`../narrative-memory-context/spec.md`](../narrative-memory-context/spec.md)。
+- Creative KB 风格和桥段评审：读第 5 节，并回查
+  [`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md)。
+- Artifact 读取、泄漏边界和 Writer / Benchmark 接入：读第 5.1、6、10 节。
+- Reviewer 类型和 smoke：读第 7、8 节。
+
 ## 1. Design Summary
 
 Reviewer Agent 是一个模型驱动、只读、可插拔的评审运行时。
@@ -176,9 +191,11 @@ Self-check 不改变核心语义；若只存在 JSON 结构问题，可触发一
 
 ## 4. Memory Query Integration
 
-Reviewer 通过 `ReviewerMemoryTool` 使用 `NarrativeMemoryQueryService`。
+Reviewer 通过 `ReviewerMemoryTool` 使用 `NarrativeInquiryBroker`；Broker 再复用 `NarrativeIndexFacade` 与 `NarrativeMemoryQueryService`。
 
-Memory Query 已经定义为输入来源无关，可以由 user feedback、reviewer feedback 或 retry instruction 触发。Reviewer 应复用同一套协议，而不是建立新的私有检索路径。
+对 Reviewer 来说，公开工具名仍是 `memory_query`；实现路线是把 Reviewer 的自然语言核查意图转成 Broker 可理解的语义请求，而不是让 Reviewer Runtime 直接操作 Memory DB、`.memory` Markdown 或 Narrative Index 内部表。
+
+Memory Query 已经定义为输入来源无关，可以由 user feedback、reviewer feedback 或 retry instruction 触发。Reviewer 应复用同一套协议和预算 / trace / 授权边界，而不是建立新的私有检索路径。
 
 推荐工具接口：
 
@@ -197,13 +214,20 @@ class ReviewerMemoryTool:
 
 内部流程：
 
-1. 调用 `NarrativeMemoryQueryService.root_scan()`。
-2. 将 candidates 交回 Reviewer 模型选择。
-3. 调用 `drill_down()`。
-4. 直到模型停止、预算耗尽或 resolve 到 event/chapter/document evidence。
-5. 返回 `MemoryEvidenceBundle` 和完整 trace。
+1. 将一次 `memory_query` 转成 Broker 语义请求。
+2. 优先调用 `narrative_scene_card_search`，返回 `NarrativeSceneCard` compact evidence，用于定位关键场景、局部高潮、结构转折和相关原文范围。
+3. 同步发起 `story_detail(expected_depth=outline_segment)`，通过 outline root -> outline segment 查询返回连续剧情压缩证据。
+4. 如 compact card 与 outline segment 不足，后续版本可继续经 Broker 请求 chapter summary 或 raw excerpt；raw excerpt 必须受预算和 read reason 约束。
+5. 返回统一 `ReviewerToolResult`，其中 `evidence_items` 保留 inquiry request type、source、fact status 与 trace。
 
-Reviewer Runtime 不得直接扫描 Memory DB 或 `.memory` Markdown。
+Evidence 约束：
+
+- `NarrativeSceneCard` 适合帮助 Reviewer 定位场景、结构转折和相关原文范围，但不能单独替代人物档案、世界观规则或 chapter/outline factual memory。
+- `story_detail(expected_depth=outline_segment)` 适合提供连续剧情压缩证据；若模型要判断对白、文风、动作细节或微妙情绪，必须显式申请更细粒度 evidence。
+- raw excerpt 只能在 compact evidence 不足时升级读取，并且必须记录 `raw_read_reason`、来源范围和预算消耗。
+- 每条 evidence 都应能生成 `EvidenceRef`，至少保留 source type、source id/path/range、summary 和 confidence/fact status。
+
+Reviewer Runtime 不得直接扫描 Memory DB 或 `.memory` Markdown；Reviewer 插件也不得绕过 `ReviewerMemoryTool` 私自访问 Narrative Index 或 Memory。
 
 ## 5. KB Integration
 
@@ -231,6 +255,24 @@ KB 查询可用于：
 - 相似场景密度或节奏参考。
 
 KB 工具只读，不写回，不更新权重，不修改 rerank 逻辑。
+
+### 5.1 Artifact Read Integration
+
+Reviewer 通过 `ReviewerArtifactTool` 读取授权 artifact。
+
+Artifact 读取只用于评审目标上下文和证据补充，例如：
+
+- Writer 当前 run 的章节梗概、批次计划、正文草稿、写回摘要。
+- 调用方显式授权的 benchmark artifact。
+- 用户上传或粘贴后保存的评审对象。
+
+约束：
+
+- `ReviewContextPolicy.allow_writer_artifacts` 为 false 时，不得读取 Writer artifact。
+- `allowed_artifact_kinds` 是强约束；不在白名单内的 artifact 必须拒绝并记录 trace。
+- benchmark held-out reference truth 只能在 `purpose = benchmark` 且调用方显式授权时读取。
+- ArtifactTool 只读，不修改 Writer run state、workflow state、artifact 文件或 Memory / KB。
+- Artifact id、path、checkpoint、stage 等内部信息只进入 `artifact_trace` 或 debug 视图，不作为用户主状态展示。
 
 ## 6. Context Policy And Leakage
 
@@ -384,12 +426,12 @@ Reviewer 有更高评审视角，但必须受场景约束。
 
 ## 8. Reviewer Smoke Test Design
 
-Reviewer smoke 的目标是验证五类 Reviewer 在真实模型、真实 Memory Query 和真实 KB 检索条件下，能够对偏离写作意图或存在明显错误的构造输入提出中文修改意见。
+Reviewer smoke 的目标是验证五类 Reviewer 在真实模型、真实 Broker-backed Memory Query 和真实 KB 检索条件下，能够对偏离写作意图或存在明显错误的构造输入提出中文修改意见。
 
 Smoke 不验证 Writer 是否生成了好文本，也不把 Reviewer 分数作为通过标准。Smoke 只验证 Reviewer 能否：
 
 - 成功运行模型驱动 Agent Loop。
-- 根据需要触发真实 Memory Query 或 KB Retrieval。
+- 根据需要触发真实 Memory Query、Narrative Inquiry 或 KB Retrieval。
 - 对构造文本中的明显问题提出中文审核意见。
 - 产出 `score_usage = reference_only` 的参考评分。
 - 保留 request、resolved target、tool trace、model responses 和 report。
@@ -405,7 +447,7 @@ one real source text
   -> document import / segmentation
   -> real rough read model calls
   -> real close read model calls
-  -> real Narrative Memory artifacts and pages
+  -> real Narrative Memory artifacts, Narrative Index cards and pages
   -> real Creative KB build
   -> reviewer smoke case builder
   -> five constructed ReviewTargets
@@ -414,7 +456,7 @@ one real source text
 
 约束：
 
-- 粗读、精读、Memory 生成、Memory Query、KB 构建和 Reviewer 都必须是真实模型 prompt 请求。
+- 粗读、精读、Memory 生成、Narrative Inquiry / Memory Query、KB 构建和 Reviewer 都必须是真实模型 prompt 请求。
 - Memory / KB 不得使用 synthetic DB、fake markdown、规则式 fallback 或手写历史事实。
 - 只有 Reviewer 的 `ReviewTarget.text` 可以是构造数据。
 - 构造数据必须标记 `constructed_for_smoke = true`，不得写回 Memory / KB。
@@ -427,7 +469,7 @@ Smoke runner SHOULD 使用一个 `ReviewerSmokeCaseBuilder` 生成五个 case。
 Case builder 的职责：
 
 - 读取共享建模任务输出的 Memory / KB index。
-- 通过真实 Memory Query 选择少量可引用的历史事件、人物状态、章节梗概或场景特征。
+- 通过真实 Broker-backed Memory Query 选择少量可引用的历史事件、人物状态、章节梗概、NarrativeSceneCard 或场景特征。
 - 构造带有明确缺陷的 `ReviewTarget.text`。
 - 写入每个 case 的预期问题类型，但不写入 Reviewer 应输出的固定答案。
 
@@ -499,7 +541,7 @@ Constructed target:
 Expected smoke evidence:
 
 - Reviewer 触发真实 `ReviewerMemoryTool`。
-- `memory_query_trace` 非空，并能看到多轮查询或至少一次模型驱动 candidate selection。
+- `memory_query_trace` 非空，并能看到 Broker request、card/outline evidence、预算消耗和至少一次模型驱动 evidence selection。
 - Report 区分剧情问题和人物一致性问题。
 - Findings 引用 Memory evidence 或明确标记证据不足。
 - `score_usage = reference_only`。
@@ -546,7 +588,7 @@ Constructed target:
 Expected smoke evidence:
 
 - Reviewer 先抽取待核查 claims。
-- Reviewer 通过 `ReviewerMemoryTool` 发起真实多轮 Memory Query。
+- Reviewer 通过 `ReviewerMemoryTool` 发起真实多轮 Broker-backed Memory Query。
 - Report 的 evidence refs 包含 Memory evidence。
 - Report 明确判断确认矛盾或证据不足，不得凭空补事实。
 - `score_usage = reference_only`。
@@ -580,7 +622,7 @@ Expected smoke evidence:
 Reviewer smoke run 成功标准：
 
 - 五个 case 均调用真实 Reviewer 模型。
-- 需要 Memory 的 case 有真实 `memory_query_trace`。
+- 需要 Memory 的 case 有真实 `memory_query_trace`，其中保留 Broker / Narrative Inquiry trace。
 - 需要 KB 的 case 有真实 `kb_query_trace`。
 - 每个成功 report 都包含中文 `summary_zh`、参考 `score`、`score_usage = reference_only`、非空 `findings` 或 `suggested_revision_focus`。
 - 每个 case 的 artifacts 可复现，包括构造输入、上下文 policy、模型响应、tool trace 和 report。

@@ -42,7 +42,12 @@ class CharacterCanonicalNameService:
                     "confidence": 0.0,
                 },
             )
-            normalized = self._apply_decision(update=update, decision=decision, candidate_names=candidate_names)
+            normalized = self._apply_decision(
+                update=update,
+                decision=decision,
+                candidate_names=candidate_names,
+                has_existing_profile=bool(existing_profiles),
+            )
             resolved.append(normalized)
         return resolved
 
@@ -70,11 +75,14 @@ class CharacterCanonicalNameService:
         update: dict[str, Any],
         decision: dict[str, Any],
         candidate_names: list[str],
+        has_existing_profile: bool = False,
     ) -> dict[str, Any]:
         candidate_set = set(candidate_names)
         current = str(update.get("canonical_name") or "").strip()
         preferred = str(decision.get("preferred_canonical_name") or "").strip()
         if preferred not in candidate_set:
+            preferred = current
+        if has_existing_profile and preferred != current and not self._should_retitle_existing(decision):
             preferred = current
         aliases = []
         raw_aliases = decision.get("aliases_to_keep")
@@ -93,6 +101,15 @@ class CharacterCanonicalNameService:
         normalized["aliases"] = normalized_aliases
         normalized["preferred_canonical_name"] = preferred
         return normalized
+
+    def _should_retitle_existing(self, decision: dict[str, Any]) -> bool:
+        try:
+            confidence = float(decision.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        reason = str(decision.get("reason") or "")
+        correction_markers = ("误认", "误判", "错误", "错写", "伪装名", "假名", "身份修正")
+        return confidence >= 0.95 and any(marker in reason for marker in correction_markers)
 
     def _candidate_context(self, conn, *, book_id: str, update: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
         names = self._name_list([update.get("canonical_name"), *self._as_list(update.get("aliases"))])

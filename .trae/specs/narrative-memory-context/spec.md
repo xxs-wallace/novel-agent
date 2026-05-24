@@ -178,7 +178,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 系统为某人物创建或更新档案
 - **THEN** 至少应支持如下字段或等价字段：
   - `character_id`
-  - `canonical_name`
+  - `canonical_name`：叙事视角中稳定使用的人物主称呼，不等同于“最新出现的全名”
   - `aliases`
   - `personality_summary`
   - `occupation`
@@ -186,6 +186,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
   - `abilities`
   - `recent_activity_scope`
   - `relationship_summary`
+  - `relationship_address_terms` 或关系条目内等价字段：记录特定关系中的对话称呼
   - `chapter_refs`
   - `speaking_character_status`
   - `personhood_evidence_summary`
@@ -196,6 +197,19 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 系统更新人物档案
 - **THEN** 应优先写入可支持续写一致性的事实、状态与关系变化
 - **AND** 不应将桥段写法偏好存入人物档案
+
+#### Scenario: Character Profile 主称呼稳定性
+- **WHEN** 系统已经为某人物建立人物档案
+- **THEN** `canonical_name` SHOULD 默认保持既有叙事主称呼
+- **AND** 后续章节中新出现的全名、昵称、熟人称呼、职业称谓、关系称呼或一次性称呼 SHOULD 先进入 `aliases`、关系称呼或证据字段
+- **AND** 系统不得仅因为后续窗口出现了一个新称呼就覆盖既有 `canonical_name`
+- **AND** 只有后续证据明确表明既有主称呼是误认对象、写错、伪装名或假名时，Profile Update / Canonical Name Agent 才可改写 `canonical_name`，并应保留旧称呼作为 alias 或迁移证据
+
+#### Scenario: 关系称呼
+- **WHEN** 原文中出现某角色对另一角色的对话称呼，例如配偶称“老公”、同事称英文名、朋友称昵称
+- **THEN** 该称呼 SHOULD 随关系条目保存，并尽量保留称呼方向，例如“A 称 B 为 X”
+- **AND** 关系称呼 MAY 作为检索 alias 使用，但不应自动替代被称呼人物的 `canonical_name`
+- **AND** Writer Context SHOULD 在相关人物同场或对话时优先携带这些关系称呼，帮助续写保持对话一致性
 
 #### Scenario: Character Profile 分层表达
 - **WHEN** 系统维护人物档案

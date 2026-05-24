@@ -1,0 +1,230 @@
+# Navigation aid for agents. This file is not a source of truth for behavior.
+# It maps common code paths and change types to the minimum spec documents that
+# should be read before implementation.
+
+root:
+  product_source_of_truth: .trae/specs/spec.md
+  checklist: .trae/specs/CONTRACT_CHECKLIST.md
+
+modules:
+  novel-continuation-mvp:
+    context: .trae/specs/novel-continuation-mvp/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/novel-continuation-mvp/spec.md
+      design: .trae/specs/novel-continuation-mvp/design.md
+      contracts: .trae/specs/novel-continuation-mvp/contracts.md
+      tasks: .trae/specs/novel-continuation-mvp/tasks.md
+    code_paths:
+      - novel_agent/app/orchestrators/main_layer_orchestrator.py
+      - novel_agent/app/run_mvp.py
+      - novel_agent/app/run_interactive.py
+      - novel_agent/app/run_continue_scene.py
+      - novel_agent/app/schemas/orchestration_schema.py
+    read_when:
+      - main orchestration
+      - document baseline
+      - shared cross-layer contract
+      - local run foundation
+
+  narrative-memory-context:
+    context: .trae/specs/narrative-memory-context/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/narrative-memory-context/spec.md
+      design: .trae/specs/narrative-memory-context/design.md
+      tasks: .trae/specs/narrative-memory-context/tasks.md
+    code_paths:
+      - novel_agent/app/services/chapter_boundary_detector.py
+      - novel_agent/app/services/document_ingest_service.py
+      - novel_agent/app/services/chapter_*_service.py
+      - novel_agent/app/services/character_*_service.py
+      - novel_agent/app/services/world_*_service.py
+      - novel_agent/app/services/context_assembly_service.py
+      - novel_agent/app/services/narrative_memory_query_service.py
+      - novel_agent/app/repos/documents_repo.py
+      - novel_agent/app/repos/chapters_repo.py
+      - novel_agent/app/repos/character_profiles_repo.py
+      - novel_agent/app/repos/narrative_memory_pages_repo.py
+      - novel_agent/app/schemas/narrative_memory_schema.py
+      - novel_agent/app/schemas/context_assembly_schema.py
+    read_when:
+      - close read
+      - factual memory
+      - chapter boundaries
+      - character or world memory
+      - context assembly
+      - raw text recall
+
+  narrative-indexer:
+    context: .trae/specs/narrative-indexer/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/narrative-indexer/spec.md
+      design: .trae/specs/narrative-indexer/design.md
+      tasks: .trae/specs/narrative-indexer/tasks.md
+    code_paths:
+      - novel_agent/app/run_narrative_scene_index.py
+      - novel_agent/app/build_source_arc_map.py
+      - novel_agent/app/services/narrative_index_facade.py
+      - novel_agent/app/services/narrative_scene_indexer_service.py
+      - novel_agent/app/services/source_arc_mapping_service.py
+      - novel_agent/app/services/narrative_inquiry_broker.py
+      - novel_agent/app/prompts/narrative_scene_index_prompt.py
+      - novel_agent/app/prompts/source_arc_prompt.py
+      - novel_agent/app/schemas/narrative_index_schema.py
+      - novel_agent/app/schemas/narrative_inquiry_schema.py
+      - novel_agent/app/schemas/source_arc_schema.py
+    read_when:
+      - index card
+      - scene card
+      - source arc map
+      - narrative inquiry
+      - card query
+
+  creative-knowledge-base:
+    context: .trae/specs/creative-knowledge-base/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/creative-knowledge-base/spec.md
+      design: .trae/specs/creative-knowledge-base/design.md
+      tasks: .trae/specs/creative-knowledge-base/tasks.md
+    code_paths:
+      - novel_agent/app/services/creative_kb_facade.py
+      - novel_agent/app/services/fragment_card_builder_service.py
+      - novel_agent/app/services/fragment_cluster_service.py
+      - novel_agent/app/services/scene_brief_service.py
+      - novel_agent/app/services/coarse_retrieval_service.py
+      - novel_agent/app/services/rerank_service.py
+      - novel_agent/app/services/retrieval_*.py
+      - novel_agent/app/repos/creative_kb_storage.py
+      - novel_agent/app/repos/fragment_cards_repo.py
+      - novel_agent/app/repos/fragment_clusters_repo.py
+      - novel_agent/app/prompts/fragment_card_prompt.py
+      - novel_agent/app/prompts/scene_brief_prompt.py
+      - novel_agent/app/prompts/rerank_prompt.py
+      - novel_agent/app/schemas/creative_kb_schema.py
+    read_when:
+      - creative reference
+      - bridge fragment
+      - fragment cluster
+      - SceneBrief retrieval
+      - coarse retrieval
+      - rerank
+      - style or atmosphere reference
+
+  writer-agent-layered-generation:
+    context: .trae/specs/writer-agent-layered-generation/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/writer-agent-layered-generation/spec.md
+      design: .trae/specs/writer-agent-layered-generation/design.md
+      contracts: .trae/specs/writer-agent-layered-generation/contracts.md
+      runtime_boundaries: .trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md
+      outline_research_design: .trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md
+      tasks: .trae/specs/writer-agent-layered-generation/tasks.md
+    code_paths:
+      - novel_agent/app/orchestrators/writer_*.py
+      - novel_agent/app/orchestrators/scoped_artifact_revision.py
+      - novel_agent/app/services/outline_research_service.py
+      - novel_agent/app/services/writer_memory_workspace_service.py
+      - novel_agent/app/services/continuation_generation_service.py
+      - novel_agent/app/prompts/writer_planning_prompt.py
+      - novel_agent/app/schemas/orchestration_schema.py
+    read_when:
+      - writer agent loop
+      - continuation planning
+      - artifact review gate
+      - outline research loop
+      - draft generation
+      - writeback
+      - cascade rollback
+
+  outline-analyzer:
+    context: .trae/specs/outline-analyzer/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/outline-analyzer/spec.md
+      design: .trae/specs/outline-analyzer/design.md
+      prompts: .trae/specs/outline-analyzer/prompts.md
+      tasks: .trae/specs/outline-analyzer/tasks.md
+    code_paths:
+      - novel_agent/app/services/outline_analyzer_service.py
+      - novel_agent/app/services/outline_analyzer_benchmark_service.py
+      - novel_agent/app/run_outline_analyzer_benchmark.py
+      - novel_agent/app/services/narrative_inquiry_broker.py
+    read_when:
+      - read-only analysis chat
+      - analyzer research loop
+      - literary analysis
+      - analyzer benchmark
+
+  reviewer-agent:
+    context: .trae/specs/reviewer-agent/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/reviewer-agent/spec.md
+      design: .trae/specs/reviewer-agent/design.md
+      contracts: .trae/specs/reviewer-agent/contracts.md
+      tasks: .trae/specs/reviewer-agent/tasks.md
+    code_paths:
+      - novel_agent/app/reviewer/**
+      - novel_agent/app/prompts/reviewer/**
+      - novel_agent/app/services/reviewer_smoke_service.py
+      - novel_agent/app/run_reviewer_smoke.py
+      - novel_agent/app/schemas/reviewer_schema.py
+    read_when:
+      - formal review
+      - reviewer runtime
+      - reviewer tool
+      - review report
+      - model-only reviewer
+
+  agentic-benchmark:
+    context: .trae/specs/agentic-benchmark/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/agentic-benchmark/spec.md
+      design: .trae/specs/agentic-benchmark/design.md
+      tasks: .trae/specs/agentic-benchmark/tasks.md
+    code_paths:
+      - novel_agent/app/run_single_sample_smoke.py
+      - novel_agent/app/run_paragraph_benchmark.py
+      - novel_agent/app/services/smoke_*.py
+      - novel_agent/app/services/paragraph_benchmark_service.py
+      - novel_agent/app/runner/single_sample_smoke_runner.py
+      - novel_agent/app/schemas/smoke_schema.py
+      - novel_agent/app/schemas/paragraph_benchmark_schema.py
+    read_when:
+      - benchmark sample
+      - authorized input boundary
+      - leakage audit
+      - scoring
+      - smoke runner
+
+  cli-interface:
+    context: .trae/specs/cli-interface/AGENT_CONTEXT.md
+    docs:
+      design: .trae/specs/cli-interface/design.md
+      tasks: .trae/specs/cli-interface/tasks.md
+      prompts: .trae/specs/cli-interface/prompts.md
+      agent_prompts: .trae/specs/cli-interface/agent-prompts.md
+    code_paths:
+      - novel_agent/app/cli/**
+      - novel_agent/app/cli_tui.py
+      - novel_agent/app/gui/writer_cli.py
+    read_when:
+      - CLI entry
+      - TUI
+      - command router
+      - status presenter
+      - artifact presenter
+      - terminal interaction
+
+  web-interface:
+    context: .trae/specs/web-interface/AGENT_CONTEXT.md
+    docs:
+      spec: .trae/specs/web-interface/spec.md
+      design: .trae/specs/web-interface/design.md
+      tasks: .trae/specs/web-interface/tasks.md
+    code_paths:
+      - novel_agent/app/web/**
+    read_when:
+      - web workbench
+      - FastAPI
+      - web action API
+      - artifact explorer
+      - task rail
+      - browser UI

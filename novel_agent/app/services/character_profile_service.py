@@ -127,12 +127,18 @@ class CharacterProfileService:
             for row in matched_rows:
                 all_known_names.append(self._normalize_name(row["canonical_name"]))
                 all_known_names.extend(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
+            existing_canonical_names = [
+                self._normalize_name(row["canonical_name"])
+                for row in matched_rows
+                if self._normalize_name(row["canonical_name"])
+            ]
             canonical_name = self._choose_canonical_name(
                 all_known_names,
                 preferred_name=(
                     id_row["canonical_name"]
                     if id_row is not None
                     else update.get("preferred_canonical_name")
+                    or (existing_canonical_names[0] if existing_canonical_names else "")
                 ),
             )
             base_profile = self._merge_existing_rows(matched_rows)
@@ -954,6 +960,11 @@ class CharacterProfileService:
         )
         field_type = str(raw_item.get("field_type", "fact") or "fact")
         evidence_level = str(raw_item.get("evidence_level", "explicit") or "explicit")
+        address_terms = self._relationship_address_terms(
+            raw_item,
+            subject_name=subject_name,
+            target_name=target_name,
+        )
         return CharacterRelationshipItem(
             target_name=target_name,
             relation_type=relation_type,
@@ -961,10 +972,33 @@ class CharacterProfileService:
             status_summary=status_summary,
             field_type="fact" if field_type == "fact" else "inference",
             evidence_level="explicit" if evidence_level == "explicit" else "inferred",
+            address_terms=address_terms,
             source_chapter_indexes=source_chapters,
             source_doc_ids=source_doc_ids,
             last_updated_chapter_index=int(raw_item.get("last_updated_chapter_index") or chapter_index or 0),
         ).to_dict()
+
+    def _relationship_address_terms(
+        self,
+        raw_item: dict[str, Any],
+        *,
+        subject_name: str,
+        target_name: str,
+    ) -> list[str]:
+        values: list[Any] = []
+        for field_name in ("address_terms", "forms_of_address", "appellations", "spoken_names"):
+            values.extend(self._as_list(raw_item.get(field_name)))
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_value in values:
+            term = self._normalize_text(raw_value)
+            if not term or term in seen:
+                continue
+            if term in {subject_name, target_name}:
+                continue
+            seen.add(term)
+            cleaned.append(term)
+        return cleaned[:8]
 
     def _resolve_relationship_conflict(
         self,
@@ -995,6 +1029,11 @@ class CharacterProfileService:
             if preferred.get(field_name) not in ("", None, []):
                 merged[field_name] = preferred.get(field_name)
         merged["target_name"] = preferred.get("target_name") or fallback.get("target_name")
+        merged["address_terms"] = self._merge_aliases(
+            self._as_list(fallback.get("address_terms")),
+            self._as_list(preferred.get("address_terms")),
+            canonical_name="",
+        )
         self._merge_sources(merged, preferred)
         self._merge_sources(merged, fallback)
         return merged
@@ -1019,6 +1058,12 @@ class CharacterProfileService:
             parts.extend(fact_lines)
         else:
             parts.append("- 暂无稳定基础属性。")
+        parts.extend(["", "## 人际关系/称呼"])
+        relationship_lines = self._format_relationship_lines(snapshot.relationships, limit=6)
+        if relationship_lines:
+            parts.extend(relationship_lines)
+        else:
+            parts.append("- 暂无稳定关系称呼。")
         parts.extend(["", "## 剧情时间线"])
         event_lines = self._format_story_event_lines(snapshot.story_events, limit=8)
         if event_lines:
@@ -1122,6 +1167,8 @@ class CharacterProfileService:
             detail = " | ".join(fragments)
             if item.status_summary:
                 detail = f"{detail} - {item.status_summary}"
+            if item.address_terms:
+                detail = f"{detail}；称呼：{', '.join(item.address_terms[:4])}"
             lines.append(
                 f"- 关系 [{item.evidence_level}]：{detail}"
                 f"{self._format_source_suffix(item.source_chapter_indexes)}"

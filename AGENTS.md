@@ -16,6 +16,8 @@
 - Be Pythonic: follow Python best practices and idiomatic patterns.
 - Write unit tests for new functionality.
 - 修改行为前先读取相关 spec / design / contracts / tasks，再判断实现方式。
+- 开发任务不要求读取全部 `.trae/specs`。先读取 `.trae/specs/INDEX.md` 或相关模块的 `AGENT_CONTEXT.md` 来判断最小相关文档集合，再按需展开原始 source-of-truth 文档。
+- 小型局部代码修复若不涉及产品流程、用户可见文案、跨层 JSON、prompt/model 语义、持久化 schema 或验收任务，可只读取相关代码、模块 `AGENT_CONTEXT.md` 和直接相关测试。
 - 涉及跨层对象时，必须先查对应 `contracts.md`，不得在代码里自行改变已冻结字段名、字段类型或字段语义。
 - 涉及用户可见流程、入口、状态文案或人工确认点时，必须遵守 `.trae/specs/spec.md`。
 - 涉及模块内部能力时，优先遵守该模块目录下的 `spec.md` 和 `design.md`。

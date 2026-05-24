@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { postAction } from "../../api/actions";
 import { streamJobEvents } from "../../api/jobs";
-import { createTask, deleteLatestWriterRun, deleteTask, getTasks, resetCloseRead, selectTask } from "../../api/tasks";
+import { createTask, deleteTask, deleteWriterRuns, getTasks, getWriterStartPreflight, resetCloseRead, selectTask } from "../../api/tasks";
 import type {
   CreateTaskRequest,
   DecisionCardModel,
@@ -156,7 +156,7 @@ export function WorkspaceShell() {
   });
 
   const deleteWriterRunMutation = useMutation({
-    mutationFn: ({ taskId, confirm }: { taskId: string; confirm: boolean }) => deleteLatestWriterRun(taskId, { confirm }),
+    mutationFn: ({ taskId, confirm }: { taskId: string; confirm: boolean }) => deleteWriterRuns(taskId, { confirm }),
     onSuccess: (_result, variables) => {
       refreshTaskArtifacts(variables.taskId);
       void queryClient.invalidateQueries({ queryKey: ["messages", variables.taskId] });
@@ -222,9 +222,29 @@ export function WorkspaceShell() {
     return deleteWriterRunMutation.mutateAsync({ taskId, confirm });
   }
 
-  function openWriterWizard() {
+  async function checkWriterStartAllowed(): Promise<boolean> {
+    if (!selectedTask) {
+      setLastActionMessage("请先选择任务。");
+      return false;
+    }
+    const preflight = await getWriterStartPreflight(selectedTask.task_id);
+    if (!preflight.can_start) {
+      setLastActionMessage(preflight.message);
+      setDecisionCards(preflight.decision_cards ?? []);
+      void queryClient.invalidateQueries({ queryKey: ["messages", selectedTask.task_id] });
+      return false;
+    }
+    return true;
+  }
+
+  async function openWriterWizard(): Promise<boolean> {
+    const canOpen = await checkWriterStartAllowed();
+    if (!canOpen) {
+      return false;
+    }
     setMobilePanel("conversation");
     setWriterWizardSignal((current) => current + 1);
+    return true;
   }
 
   const shellStatus = selectedTask
@@ -303,6 +323,7 @@ export function WorkspaceShell() {
             writerWizardSignal={writerWizardSignal}
             onOpenArtifactDetail={setFocusedArtifactId}
             onAction={handleAction}
+            onRequestWriterStart={checkWriterStartAllowed}
           />
         </section>
 

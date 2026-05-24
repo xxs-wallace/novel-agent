@@ -1,5 +1,16 @@
 # Outline Analyzer Design
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Analyzer
+是只读分析链路，默认按环节阅读：
+
+- Session / seed / loop：读第 2、3、4、5 节。
+- Evidence 选择、章节选择、raw excerpt 升级：读第 6 节。
+- Prompt 行为：读第 7、8 节，并回查 [`prompts.md`](prompts.md)。
+- Web / CLI 接入：读第 9、10 节。
+- 错误处理和 smoke benchmark：读第 11、12 节。
+
 ## 1. Design Goal
 
 Outline Analyzer 的设计目标是把“分析一本小说”拆成可控的 Agent Loop：

@@ -409,6 +409,7 @@ class OutlineSeedPacket:
     world_concept_index: list[dict[str, Any]] = field(default_factory=list)
     historical_story_overview: list[dict[str, Any]] = field(default_factory=list)
     current_continuation_anchor: str = ""
+    continuation_boundary: dict[str, Any] = field(default_factory=dict)
     optional_open_thread_index: list[dict[str, Any]] = field(default_factory=list)
     source_arc_index: list[dict[str, Any]] = field(default_factory=list)
     structure_pattern_index: list[dict[str, Any]] = field(default_factory=list)
@@ -427,6 +428,7 @@ class OutlineSeedPacket:
         self.world_concept_index = self._normalize_index_list(self.world_concept_index)
         self.historical_story_overview = self._normalize_index_list(self.historical_story_overview)
         self.current_continuation_anchor = _normalize_text(self.current_continuation_anchor)
+        self.continuation_boundary = dict(self.continuation_boundary)
         self.optional_open_thread_index = self._normalize_index_list(self.optional_open_thread_index)
         self.source_arc_index = self._normalize_index_list(self.source_arc_index)
         self.structure_pattern_index = self._normalize_index_list(self.structure_pattern_index)
@@ -453,6 +455,7 @@ class OutlineSeedPacket:
             "world_concept_index": [dict(item) for item in self.world_concept_index],
             "historical_story_overview": [dict(item) for item in self.historical_story_overview],
             "current_continuation_anchor": self.current_continuation_anchor,
+            "continuation_boundary": dict(self.continuation_boundary),
             "optional_open_thread_index": [dict(item) for item in self.optional_open_thread_index],
             "source_arc_index": [dict(item) for item in self.source_arc_index],
             "structure_pattern_index": [dict(item) for item in self.structure_pattern_index],
@@ -486,6 +489,7 @@ class OutlineSeedPacket:
                 dict(item) for item in (data.get("historical_story_overview") or []) if isinstance(item, Mapping)
             ],
             current_continuation_anchor=str(data.get("current_continuation_anchor") or ""),
+            continuation_boundary=dict(data.get("continuation_boundary") or {}),
             optional_open_thread_index=[
                 dict(item) for item in (data.get("optional_open_thread_index") or []) if isinstance(item, Mapping)
             ],

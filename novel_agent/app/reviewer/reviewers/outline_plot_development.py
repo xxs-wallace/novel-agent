@@ -21,4 +21,4 @@ class OutlinePlotDevelopmentReviewer(ModelOnlyReviewer):
     }
     focus_zh = "结合已授权的前序大纲、篇章地图或 Memory 事件线索，评估目标大纲的剧情发展合理性、阶段推进和长期结构。"
     boundary_zh = "不评价正文文笔，不把参考评分当作 Writer 或 benchmark 的质量裁决。"
-    context_guidance_zh = "优先读取授权的前序 outline artifact；如需要历史事件证据，只能请求 memory_query。"
+    context_guidance_zh = "优先读取授权的前序 outline artifact；如需要历史事件证据，只能请求 memory_query。memory_query 会优先返回 narrative_scene compact cards 和相关 outline segment，用于判断剧情承接和阶段结构。"

@@ -65,7 +65,7 @@ export function TaskActionMenu({
           </button>
           <button type="button" role="menuitem" className="danger-menu-item" onClick={() => run(onDeleteWriterRunPreview)}>
             <Trash2 size={15} aria-hidden="true" />
-            删除最近续写
+            删除续写任务
           </button>
           <button type="button" role="menuitem" onClick={() => run(onResetCloseRead)}>
             重置阅读

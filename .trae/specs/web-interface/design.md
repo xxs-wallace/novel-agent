@@ -1,5 +1,16 @@
 # Web Interface Design
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Web
+是当前图形端主路径；旧 PySide GUI 只作为历史原型或 smoke 对照。
+
+- 架构和技术选型：读第 1、2、5、6 节。
+- 前端布局 / artifact explorer：读第 3、4 节。
+- Web actions、jobs、SSE、状态管理：读第 5、6、7 节。
+- 用户流程和测试：读第 8、9 节。
+- 从旧 GUI 迁移：读第 10 节。
+
 ## 1. Design Conclusion
 
 Novel Agent 的图形端应从 PySide GUI 转为浏览器工作台。原因：
@@ -578,7 +589,7 @@ Outline Research 用户补充问题的 action 语义：
 ## 10. Migration Plan
 
 1. 保留 TUI 作为正式 CLI。
-2. 停止扩展 PySide GUI；删除本轮 GUI parity 新代码。
+2. 停止扩展 PySide GUI；不再为 PySide 增加新 parity 功能，历史入口仅保留兼容 / smoke / 原型对照价值。
 3. 新增 `web-interface` spec / design。
 4. 新增 FastAPI skeleton。
 5. 新增 React/Vite frontend skeleton。

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from ..deps import get_job_manager, get_session_service
-from ..schemas import CreateTaskRequest, JobSummary, TaskProgress, TaskSummary, WebActionResult
+from ..schemas import CreateTaskRequest, JobSummary, TaskProgress, TaskSummary, WebActionResult, WriterStartPreflight
 from ..services.job_manager import JobManager
 from ..services.web_session_service import WebSessionService
 
@@ -55,6 +55,15 @@ def delete_latest_writer_run(
     return session.delete_latest_writer_run(task_id=task_id, confirm=confirm)
 
 
+@router.delete("/tasks/{task_id}/writer-runs")
+def delete_writer_runs(
+    task_id: str,
+    confirm: bool = Query(False),
+    session: WebSessionService = Depends(get_session_service),
+) -> dict[str, object]:
+    return session.delete_writer_runs(task_id=task_id, confirm=confirm)
+
+
 @router.post("/tasks/{task_id}/reset-close-read", response_model=WebActionResult)
 def reset_close_read(task_id: str, session: WebSessionService = Depends(get_session_service)) -> WebActionResult:
     return session.reset_close_read(task_id=task_id)
@@ -67,6 +76,14 @@ def get_status(
     job_manager: JobManager = Depends(get_job_manager),
 ) -> TaskProgress:
     return _progress_with_active_job_status(session.task_progress(task_id), job_manager=job_manager)
+
+
+@router.get("/tasks/{task_id}/writer-preflight", response_model=WriterStartPreflight)
+def writer_start_preflight(
+    task_id: str,
+    session: WebSessionService = Depends(get_session_service),
+) -> WriterStartPreflight:
+    return session.writer_start_preflight(task_id)
 
 
 def _with_active_job_status(summary: TaskSummary, *, job_manager: JobManager) -> TaskSummary:
@@ -118,6 +135,11 @@ _ACTIVE_JOB_PROGRESS = {
         "flow": "Creative KB",
         "step": "正在构建 Creative KB",
         "next_action": "完成后可开始续写或查看知识库",
+    },
+    "narrative_scene_index": {
+        "flow": "叙事场景索引",
+        "step": "正在构建叙事场景索引",
+        "next_action": "完成后可用于剧情分析和续写检索",
     },
     "writer": {
         "flow": "Writer 分层生成",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import uuid
@@ -267,7 +268,10 @@ class WebActionService:
                 "resume": "已准备恢复最近一次未完成流程。",
                 "run_reviewer": "已准备运行 Reviewer，报告完成后会发到会话里。",
             }[action]
-        self.session_service.append_message(task_id, role="assistant", content=message, payload={"job_id": job.job_id})
+        message_payload: dict[str, Any] = {"job_id": job.job_id}
+        if action == "start_writer":
+            message_payload["writer_request"] = dict(payload)
+        self.session_service.append_message(task_id, role="assistant", content=message, payload=message_payload)
         return WebActionResult(
             action=action,
             task_id=task_id,
@@ -453,12 +457,35 @@ class WebActionService:
         if target_chapter_count is None:
             target_chapter_count = self._optional_int(payload, "target_chapters", default=3) or 3
         chapter_count = self._optional_int(payload, "chapter_count", default=target_chapter_count) or target_chapter_count
+        previous_result = await self._continue_previous_writer_chapter_if_requested(
+            context=context,
+            payload=payload,
+            dry_run=dry_run,
+            api_key=api_key,
+        )
+        if previous_result is not None:
+            self._append_writer_result_messages(task_id=context.task_id, result_payload=dict(previous_result))
+            return dict(previous_result)
+        if self._completion_request_needs_new_direction(payload):
+            result = {
+                "status": "needs_user_direction",
+                "message": "当前批次已经写完。请先补充下一批续写方向，再开始新一轮规划。",
+                "previous_run_id": str(payload.get("previous_run_id") or ""),
+            }
+            self._append_writer_result_messages(task_id=context.task_id, result_payload=result)
+            return result
+        run_id = str(payload.get("run_id") or uuid.uuid4().hex)
         context.emit("progress", "开始 Writer 分层生成。")
+        context.emit(
+            "log",
+            "Writer 创建请求已保存。",
+            payload={"run_id": run_id, "writer_request": dict(payload), "intent_payload": dict(intent_payload)},
+        )
         result = await self._call_facade_with_events(
             context,
             lambda: self.session_service.facade.start_writer(
                 book_id=context.task_id,
-                run_id=str(payload.get("run_id") or uuid.uuid4().hex),
+                run_id=run_id,
                 product_mode=str(payload.get("product_mode") or "assist"),
                 dry_run=dry_run,
                 api_key=api_key,
@@ -473,6 +500,133 @@ class WebActionService:
         result_payload = dict(result)
         self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
         return result_payload
+
+    async def _continue_previous_writer_chapter_if_requested(
+        self,
+        *,
+        context: JobContext,
+        payload: Mapping[str, Any],
+        dry_run: bool,
+        api_key: str | None,
+    ) -> dict[str, Any] | None:
+        previous_run_id = str(payload.get("previous_run_id") or "").strip()
+        if str(payload.get("requested_from") or "") != "writer_completion" or not previous_run_id:
+            return None
+        if self._completion_continue_has_new_direction(payload):
+            return None
+        chapter_id = self._next_chapter_id_from_run(previous_run_id)
+        if not chapter_id:
+            return None
+
+        product_mode = str(payload.get("product_mode") or "assist")
+        context.emit(
+            "progress",
+            "继续上一轮已确认规划，准备下一章草稿。",
+            payload={"run_id": previous_run_id, "chapter_id": chapter_id},
+        )
+        execution_input = await self._call_facade_with_events(
+            context,
+            lambda: self.session_service.facade.writer_action(
+                book_id=context.task_id,
+                run_id=previous_run_id,
+                action="prepare_execution",
+                product_mode=product_mode,
+                payload={"chapter_id": chapter_id},
+                dry_run=dry_run,
+                api_key=api_key,
+            ),
+        )
+        execution_result = await self._call_facade_with_events(
+            context,
+            lambda: self.session_service.facade.writer_action(
+                book_id=context.task_id,
+                run_id=previous_run_id,
+                action="execute_current_chapter",
+                product_mode=product_mode,
+                payload={},
+                dry_run=dry_run,
+                api_key=api_key,
+            ),
+        )
+        context.emit(
+            "progress",
+            "下一章草稿已生成，等待你决定是否接受。",
+            payload={"run_id": previous_run_id, "chapter_id": chapter_id},
+        )
+        return {
+            "status": "waiting_for_draft_review",
+            "run_id": previous_run_id,
+            "chapter_id": chapter_id,
+            "workflow_stage": "wait_chapter_acceptance",
+            "execution_input": execution_input,
+            "execution_result": execution_result,
+        }
+
+    @staticmethod
+    def _completion_continue_has_new_direction(payload: Mapping[str, Any]) -> bool:
+        for key in ("feedback_text", "user_feedback", "supplement_text", "revision_feedback", "preferred_outcome"):
+            if str(payload.get(key) or "").strip():
+                return True
+        for key in ("desired_actions", "major_characters", "avoidances"):
+            value = payload.get(key)
+            if isinstance(value, list) and any(str(item).strip() for item in value):
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+        intent_payload = payload.get("intent_payload")
+        if isinstance(intent_payload, Mapping):
+            for key in ("desired_actions", "major_characters", "avoidances", "preferred_outcome", "notes"):
+                value = intent_payload.get(key)
+                if isinstance(value, list) and any(str(item).strip() for item in value):
+                    return True
+                if isinstance(value, str) and value.strip():
+                    return True
+        return False
+
+    def _completion_request_needs_new_direction(self, payload: Mapping[str, Any]) -> bool:
+        requested_from = str(payload.get("requested_from") or "")
+        previous_run_id = str(payload.get("previous_run_id") or "").strip()
+        if requested_from not in {"writer_completion", "writer_new_batch"} or not previous_run_id:
+            return False
+        if self._completion_continue_has_new_direction(payload):
+            return False
+        if requested_from == "writer_new_batch":
+            return True
+        return not bool(self._next_chapter_id_from_run(previous_run_id))
+
+    def _next_chapter_id_from_run(self, run_id: str) -> str:
+        run_dir = self.session_service.repo_root / "runs" / "writer" / run_id
+        state = self._load_writer_run_json(run_dir / "workflow_state.json")
+        current_chapter_id = str(state.get("current_chapter_id") or "").strip()
+        if not current_chapter_id:
+            review = self._load_writer_run_json(run_dir / "generation_review_decision.json")
+            current_chapter_id = str(review.get("chapter_id") or "").strip()
+        package = self._load_writer_run_json(run_dir / "chapter_package.json")
+        if not package:
+            package = self._load_writer_run_json(run_dir / "freezes" / "freeze_c" / "chapter_package.json")
+        chapter_ids = [
+            str(item.get("chapter_id") or "").strip()
+            for item in (package.get("chapters") or [])
+            if isinstance(item, Mapping) and str(item.get("chapter_id") or "").strip()
+        ]
+        if not chapter_ids:
+            return ""
+        if current_chapter_id in chapter_ids:
+            current_index = chapter_ids.index(current_chapter_id)
+            if current_index + 1 < len(chapter_ids):
+                return chapter_ids[current_index + 1]
+            return ""
+        return chapter_ids[0]
+
+    @staticmethod
+    def _load_writer_run_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if isinstance(payload, Mapping) and isinstance(payload.get("data"), Mapping):
+            return dict(payload["data"])
+        return dict(payload) if isinstance(payload, Mapping) else {}
 
     async def _run_writer_resume(self, context: JobContext) -> dict[str, Any]:
         payload = context.payload
@@ -500,6 +654,17 @@ class WebActionService:
             ),
         )
         result_payload = dict(result)
+        if workflow_action == "approve_writeback":
+            next_chapter_payload = await self._continue_next_chapter_after_writeback_if_available(
+                context=context,
+                run_id=run_id,
+                product_mode=str(payload.get("product_mode") or "assist"),
+                dry_run=dry_run,
+                api_key=api_key,
+                writeback_result=result_payload,
+            )
+            if next_chapter_payload is not None:
+                result_payload = next_chapter_payload
         self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
         context.emit(
             "progress",
@@ -507,6 +672,58 @@ class WebActionService:
             payload={"run_id": run_id, "workflow_action": workflow_action},
         )
         return result_payload
+
+    async def _continue_next_chapter_after_writeback_if_available(
+        self,
+        *,
+        context: JobContext,
+        run_id: str,
+        product_mode: str,
+        dry_run: bool,
+        api_key: str | None,
+        writeback_result: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        next_chapter_id = self._next_chapter_id_from_run(run_id)
+        if not next_chapter_id:
+            return None
+        context.emit(
+            "progress",
+            "写回已完成，继续生成下一章草稿。",
+            payload={"run_id": run_id, "chapter_id": next_chapter_id},
+        )
+        execution_input = await self._call_facade_with_events(
+            context,
+            lambda: self.session_service.facade.writer_action(
+                book_id=context.task_id,
+                run_id=run_id,
+                action="prepare_execution",
+                product_mode=product_mode,
+                payload={"chapter_id": next_chapter_id},
+                dry_run=dry_run,
+                api_key=api_key,
+            ),
+        )
+        execution_result = await self._call_facade_with_events(
+            context,
+            lambda: self.session_service.facade.writer_action(
+                book_id=context.task_id,
+                run_id=run_id,
+                action="execute_current_chapter",
+                product_mode=product_mode,
+                payload={},
+                dry_run=dry_run,
+                api_key=api_key,
+            ),
+        )
+        return {
+            "status": "waiting_for_draft_review",
+            "run_id": run_id,
+            "chapter_id": next_chapter_id,
+            "workflow_stage": "wait_chapter_acceptance",
+            "writeback_result": dict(writeback_result),
+            "execution_input": execution_input,
+            "execution_result": execution_result,
+        }
 
     async def _run_reviewer(self, context: JobContext) -> dict[str, Any]:
         payload = dict(context.payload or {})
@@ -965,7 +1182,7 @@ class WebActionService:
         if job.type != "writer_resume":
             message = "已有后台任务正在运行，已复用现有任务；请等它结束后再触发当前动作。"
         else:
-            message = self._public_action_message(action)
+            message = self._public_action_message(str(normalized_payload.get("workflow_action") or action))
         self.session_service.append_message(
             task_id,
             role="assistant",
@@ -1137,6 +1354,35 @@ class WebActionService:
         return "resume"
 
     def _append_writer_result_messages(self, *, task_id: str, result_payload: dict[str, Any]) -> None:
+        if str(result_payload.get("status") or "") == "needs_user_direction":
+            previous_run_id = str(result_payload.get("previous_run_id") or "")
+            self.session_service.append_message(
+                task_id,
+                role="assistant",
+                content=str(result_payload.get("message") or "请先补充下一批续写方向，再开始新一轮规划。"),
+                payload={"channel": "writer_new_batch_direction_required", "previous_run_id": previous_run_id},
+                decision_cards=[
+                    DecisionCard(
+                        card_id=f"{task_id}:writer-new-batch-direction:{previous_run_id or 'latest'}",
+                        title="需要新的续写方向",
+                        body="在输入框写下下一批想写的剧情、节奏或重点后，再启动新一轮规划。",
+                        actions=[
+                            {
+                                "action": "start_writer",
+                                "label": "开始新一轮规划",
+                                "variant": "primary",
+                                "payload": {
+                                    "requested_from": "writer_new_batch",
+                                    "previous_run_id": previous_run_id,
+                                    "target_chapter_count": 3,
+                                    "chapter_count": 3,
+                                },
+                            }
+                        ],
+                    )
+                ],
+            )
+            return
         question_set = result_payload.get("question_set")
         if isinstance(question_set, dict):
             self.session_service.append_writer_question_message(task_id, question_set)
@@ -1172,7 +1418,7 @@ class WebActionService:
             "accept_chapter": "已接受本章草稿，接下来进入写回确认。",
             "rewrite_chapter": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "revise_chapter_length": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
-            "replan_chapter": "已提交章节梗概调整请求，Writer 会回到章节规划。",
+            "replan_chapter": "已提交章节梗概调整请求，Writer 会回到梗概审阅。",
             "discard_chapter": "已准备作废本次草稿。",
             "submit_outline_research_answers": "已提交补充回答，Writer 会继续大纲研究。",
             "approve_writeback": "已确认写回续写记忆。",

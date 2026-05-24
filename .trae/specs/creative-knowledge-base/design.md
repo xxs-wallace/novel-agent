@@ -1,7 +1,19 @@
 # 创作知识库实现设计稿
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。多数 KB
+改动按链路定位阅读即可：
+
+- 存储/schema：读第 3、4、9 节，并回查
+  [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md)。
+- 离线建卡/聚类/去重：读第 5、6 节。
+- 在线 `SceneBrief -> coarse retrieval -> rerank`：读第 7、8、9 节。
+- 兼容迁移和旧对象：读第 10 节。
+- Benchmark / A/B：读第 11 节。
+
 ## 1. 目标
-本设计稿把 [creative-knowledge-base/spec.md](.trae/specs/creative-knowledge-base/spec.md) 进一步细化到可编码实现的程度，重点回答：
+本设计稿把 [`spec.md`](spec.md) 进一步细化到可编码实现的程度，重点回答：
 
 - `fragment_cards` / `fragment_clusters` 如何落到 SQLite
 - `SceneBrief` / 粗筛 / rerank 的 JSON contract 如何固定
@@ -994,7 +1006,7 @@ def resolve_scene_brief(
 - 若显式提供 `SceneBrief`，必须优先使用 `SceneBrief`
 - 仅在缺失 `SceneBrief` 时，才允许使用旧 `ScenePlan` 子集补出最小可用 `SceneBrief`
 - 适配器只负责字段映射与最小补齐
-- 适配器不得修改 [`contracts.md`](.trae/specs/novel-continuation-mvp/contracts.md) 中已冻结的 `SceneBrief` 字段语义
+- 适配器不得修改 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md) 中已冻结的 `SceneBrief` 字段语义
 - 适配器不得把旧 `ScenePlan` 重新抬升为在线检索主入口
 
 最小兼容输出要求：

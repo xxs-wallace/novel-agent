@@ -120,11 +120,11 @@ Reviewer 相对于 Writer 有更高的评审视角，但它仍然不能绕过 Me
 
 Reviewer SHALL 通过工具访问上下文：
 
-- `ReviewerMemoryTool`：封装 `NarrativeMemoryQueryService`。
+- `ReviewerMemoryTool`：封装 `NarrativeInquiryBroker`，并通过 Broker 复用 `NarrativeIndexFacade` 与 `NarrativeMemoryQueryService`。
 - `ReviewerKBTool`：封装 Creative KB 检索和必要的结构模式查询。
 - `ReviewerArtifactTool`：只读读取授权的 Writer artifacts 或 benchmark artifacts。
 
-Memory Query MUST 复用 `NarrativeMemoryQueryService` 的预算、trace、prefix 授权和泄漏审计。Reviewer 不得直接扫描 SQLite、Markdown 或内部 artifact 来绕过 Memory facade。
+Memory Query MUST 复用 Broker / Memory facade 的预算、trace、prefix 授权和泄漏审计。Reviewer 不得直接扫描 SQLite、Markdown、Narrative Index 内部表或内部 artifact 来绕过受控 facade。
 
 KB 查询 MUST 保留 query、命中、裁剪、source ref 和预算 trace。Reviewer 不得把 KB 检索结果写回正式 KB。
 

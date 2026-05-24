@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from ...reviewer.base import ModelPrompt, ReviewerLoopState
 from ...schemas.reviewer_schema import ResolvedReviewTarget, ReviewReport, ReviewRequest
@@ -40,7 +40,7 @@ def build_planning_prompt(
         f"{json.dumps(_plan_example(spec, resolved_target.target_id), ensure_ascii=False, indent=2)}\n\n"
         "工具请求规则：\n"
         "- tool_requests 只是请求，runtime 会按 ReviewContextPolicy 和预算校验。\n"
-        "- 如需 Memory 证据，只能请求 memory_query，由 ReviewerMemoryTool 执行。\n"
+        "- 如需 Memory 证据，只能请求 memory_query，由 ReviewerMemoryTool 执行；该工具会优先使用 narrative_scene_card_search 定位关键场景，并补充 outline segment / story memory 查询。\n"
         "- 如需 KB 证据，只能请求 kb_retrieval，由 ReviewerKBTool 执行。\n"
         "- 如需授权 artifact，只能请求 artifact_read，由 ReviewerArtifactTool 执行。\n"
         "- 不要请求 allowed_tools 之外的工具；若证据不足，请在 notes_zh 中说明。\n\n"

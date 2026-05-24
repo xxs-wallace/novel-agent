@@ -283,26 +283,19 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     assert tree.status_code == 200
     tree_payload = tree.json()
     labels = _flatten_labels(tree_payload)
-    assert tree_payload[0]["label"] == "雨夜接应"
+    assert tree_payload[0]["label"] == "续写任务"
     assert labels == [
-        "雨夜接应",
-        "续写概览",
-        "写作目标",
-        "大纲研究结果",
-        "问题集",
-        "大纲研究笔记",
-        "检索轨迹",
-        "全书续写规划",
-        "本批剧情大纲",
-        "章节标题与梗概",
-        "章节写作指导",
-        "正文草稿",
-        "草稿决策",
-        "写回摘要",
+        "续写任务",
+        "用户原始输入",
+        "生成出来的大纲",
+        "接下来要写的梗概",
+        "草稿正文",
     ]
+    assert "续写概览" not in labels
+    assert "写作目标" not in labels
     assert "章节长度计划" not in labels
 
-    intent_node = _find_node(tree.json(), "写作目标")
+    intent_node = _find_node(tree.json(), "用户原始输入")
     intent_view = client.get(f"/api/artifacts/{intent_node['id']}/view").json()
     intent_rendered = json.dumps(intent_view, ensure_ascii=False)
     assert intent_view["kind"] == "writer_continuation_intent"
@@ -310,26 +303,21 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     assert "目标章节数：3" in intent_rendered
     assert "desired_actions" not in intent_rendered
 
-    batch_node = _find_node(tree.json(), "本批剧情大纲")
-    batch_view = client.get(f"/api/artifacts/{batch_node['id']}/view")
-    assert batch_view.status_code == 200
-    payload = batch_view.json()
+    plan_node = _find_node(tree.json(), "生成出来的大纲")
+    plan_view = client.get(f"/api/artifacts/{plan_node['id']}/view")
+    assert plan_view.status_code == 200
+    payload = plan_view.json()
     rendered = json.dumps(payload, ensure_ascii=False)
-    assert payload["kind"] == "writer_batch_plan"
-    assert "主角组与外部压力正面碰撞" in rendered
+    assert payload["kind"] == "writer_book_plan"
+    assert "围绕匿名信展开三章追查" in rendered
     assert "raw_json" not in payload
-    assert "stage_goal" not in rendered
+    assert "continuation_goal" not in rendered
 
-    technical = client.get(f"/api/artifacts/{batch_node['id']}/technical")
+    technical = client.get(f"/api/artifacts/{plan_node['id']}/technical")
     assert technical.status_code == 200
     assert "raw_json" in technical.json()
 
-    guidance_node = _find_node(tree.json(), "章节写作指导")
-    guidance_view = client.get(f"/api/artifacts/{guidance_node['id']}/view").json()
-    assert guidance_view["kind"] == "writer_writing_guidance"
-    assert "动作段更紧" in json.dumps(guidance_view, ensure_ascii=False)
-
-    draft_node = _find_node(tree.json(), "正文草稿")
+    draft_node = _find_node(tree.json(), "草稿正文")
     draft_view = client.get(f"/api/artifacts/{draft_node['id']}/view").json()
     assert draft_view["markdown"] == "雨落下来，巷口的灯忽明忽暗。"
 
@@ -355,7 +343,7 @@ def test_writer_tree_lists_multiple_writer_runs_as_history(tmp_path: Path) -> No
     tree = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=writer").json()
     top_labels = [node["label"] for node in tree]
 
-    assert set(top_labels) == {"第一章 雨夜接应", "第二章 旧码头回声"}
+    assert set(top_labels) == {"续写任务", "续写任务 2"}
     for node in tree:
         child_labels = [child["label"] for child in node["children"]]
-        assert "正文草稿" in child_labels
+        assert "草稿正文" in child_labels

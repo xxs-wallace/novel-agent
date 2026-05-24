@@ -126,7 +126,7 @@ class ArtifactViewService:
             status = self.status_presenter.present(visible_stage)
             return ArtifactView(
                 artifact_id=artifact_id,
-                title="续写概览",
+                title="续写任务",
                 kind="writer_run",
                 sections=[
                     ArtifactSection(title="当前状态", body=status.step),
@@ -434,12 +434,12 @@ class ArtifactViewService:
         ]
         return ArtifactView(
             artifact_id=artifact_id,
-            title="写作目标",
+            title="用户原始输入",
             kind="writer_continuation_intent",
             sections=self._nonempty_sections(
                 sections,
                 fallback_title="保存状态",
-                fallback_body="本次 Writer 提交未保存可展示的写作目标；后续新提交会在这里显示。",
+                fallback_body="本次 Writer 提交未保存可展示的原始输入；后续新提交会在这里显示。",
             ),
             technical_available=True,
         )
@@ -534,7 +534,7 @@ class ArtifactViewService:
         climax = payload.get("climax_plan") if isinstance(payload.get("climax_plan"), Mapping) else {}
         return ArtifactView(
             artifact_id=artifact_id,
-            title="全书续写规划",
+            title="生成出来的大纲",
             kind="writer_book_plan",
             actions=self._reviewer_actions(
                 writer_kind="book_plan",
@@ -609,7 +609,7 @@ class ArtifactViewService:
         ]
         return ArtifactView(
             artifact_id=artifact_id,
-            title="章节标题与梗概",
+            title="接下来要写的梗概",
             kind="writer_chapter_package",
             actions=self._reviewer_actions(
                 writer_kind="chapter_package",
@@ -689,7 +689,7 @@ class ArtifactViewService:
         text = path.read_text(encoding="utf-8", errors="replace")
         return ArtifactView(
             artifact_id=artifact_id,
-            title="正文草稿",
+            title="草稿正文",
             kind="writer_draft",
             actions=self._reviewer_actions(
                 writer_kind="draft",
@@ -1353,18 +1353,18 @@ class ArtifactViewService:
     @staticmethod
     def _writer_title(kind: str) -> str:
         return {
-            "continuation_intent": "写作目标",
-            "book_plan": "全书续写规划",
+            "continuation_intent": "用户原始输入",
+            "book_plan": "生成出来的大纲",
             "outline_research": "大纲研究结果",
             "outline_questions": "问题集",
             "planning_notebook": "大纲研究笔记",
             "research_trace": "检索轨迹",
             "batch_plan": "本批剧情大纲",
-            "chapter_package": "章节标题与梗概",
+            "chapter_package": "接下来要写的梗概",
             "length_plan": "章节长度计划",
             "execution_input": "本章写作材料",
             "writing_guidance": "章节写作指导",
-            "draft": "正文草稿",
+            "draft": "草稿正文",
             "generation_review": "草稿决策",
             "writeback": "写回摘要",
         }.get(kind, "Writer 产物")

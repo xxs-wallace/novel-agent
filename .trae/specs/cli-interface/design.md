@@ -1,5 +1,17 @@
 # 统一 CLI / TUI 交互设计
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。CLI/TUI
+改动通常不需要通读全文，按变更面选择章节：
+
+- 入口、命令、模式切换：读第 3、6、14 节。
+- 状态栏、用户可见文案、运行进度：读第 7、8、13 节，并回查
+  [`../spec.md`](../spec.md)。
+- Artifact 审阅、字段编辑、Writer review gate 映射：读第 9、10、12 节，
+  涉及 JSON 时回查 Writer contracts。
+- Textual 组件和实现里程碑：读第 14、15 节。
+
 ## 1. 设计结论
 
 CLI 应作为小说续写系统的统一交互工作台，而不是 Writer 或 read pipeline 各自独立启动的命令集合。
@@ -9,7 +21,7 @@ CLI 应作为小说续写系统的统一交互工作台，而不是 Writer 或 r
 - CLI 是跨模块产品入口，必须同时承载粗读、精读、Creative KB、Writer 和运行恢复。
 - Writer 的 `design.md` 应聚焦分层生成、冻结点、回写与状态机，不应承担全局界面架构。
 - read pipeline 虽然代码上可以独立于 Writer，但用户体验上必须和 Writer 在同一个会话、同一个状态栏、同一套命令体系里切换。
-- GUI 也应复用这套用户可见流程语义，因此 CLI design 应放在核心交互层，而不是某个模块下。
+- Web / 历史 GUI 也应复用这套用户可见流程语义，因此 CLI design 应放在核心交互层，而不是某个模块下。
 
 因此文档关系为：
 
@@ -728,7 +740,7 @@ CLI / TUI 层应是薄交互层，不直接实现业务逻辑。
 - `novel-agent`：打包安装后的 console script，进入同一 Textual 全屏 TUI。
 - `python -m novel_agent.app.cli_tui`：开发调试等价入口。
 - `python -m novel_agent.app.run_interactive`：兼容和 smoke 入口，不承担正式用户体验。
-- `novel-agent-gui`：桌面 GUI 入口，应复用同一套 presenter / facade / 状态词典。
+- `novel-agent-gui`：历史桌面 GUI 入口；不承载新功能，若保留则只作为兼容 / smoke / 原型对照，并复用同一套 presenter / facade / 状态词典。
 
 `run_interactive.py` 退场边界：
 
@@ -767,9 +779,10 @@ Textual 全屏 TUI SHOULD 分阶段落地：
 5. 接入 Writer 所有人工确认点，保存不推进，确认才调用 workflow action。
 6. 增加 Textual 组件测试 / snapshot 测试，覆盖宽屏、窄屏、命令面板、决策面板、输入不被输出覆盖。
 
-## 16. GUI 复用关系
+## 16. Web / 历史 GUI 复用关系
 
-GUI 应复用本文定义的：
+Web 工作台是当前图形端主路径。若历史桌面 GUI 继续保留作为兼容或 smoke
+对照，也应复用本文定义的：
 
 - 用户可见状态文案
 - artifact 审阅模型
@@ -777,7 +790,8 @@ GUI 应复用本文定义的：
 - 错误恢复建议
 - 从 read 到 Writer 的统一入口语义
 
-GUI 可以使用不同布局，但不能改变流程含义。CLI 和 GUI 的差异应是展示形态，而不是业务流程。
+Web / GUI 可以使用不同布局，但不能改变流程含义。CLI、Web 和历史 GUI
+的差异应是展示形态，而不是业务流程。
 
 ## 17. 非目标
 
@@ -787,7 +801,7 @@ GUI 可以使用不同布局，但不能改变流程含义。CLI 和 GUI 的差�
 - 数据库 schema
 - Writer prompt 字段
 - Memory 抽取 schema
-- GUI 组件实现细节
+- Web / GUI 组件实现细节
 - Textual 每个 widget 的 CSS 最终像素级样式
 
 这些内容分别由实现任务、模块 spec/design 和 contracts 定义。

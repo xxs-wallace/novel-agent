@@ -16,7 +16,7 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         "4. speaking_evidence 用一句短说明解释发言判断，不要复制长原文。\n"
         "5. personhood_evidence 说明该候选为什么像真实角色，例如被称呼、发言、执行人物行动、具有身份称谓或与他人发生关系。\n"
         "6. activity_or_state_evidence 描述当前 document 中可用于更新人物档案的行动、状态、心理或阶段变化。\n"
-        "7. relationship_evidence 描述当前 document 中可用于更新关系档案的互动或关系变化。\n"
+        "7. relationship_evidence 描述当前 document 中可用于更新关系档案的互动、关系变化和对话称呼；如果出现“某人称呼某人为 X”，保留称呼方向。\n"
         "8. 如果输入提供 existing_character_roster，请结合正文判断当前称呼是否指向已有角色；能确认时 character_id 必须使用 roster 中的 character_id，canonical_name 使用 roster 中的 canonical_name，原文称呼可放入 aliases。\n"
         "9. 不要因为称谓、职业、关系词或叙述视角变化就创建新人；如果正文中的“老板/丈夫/我/她”等能和 roster 中已有角色对应，应输出既有 canonical_name。\n"
         "10. 如果 character_roster_scope=recent_32 且 can_request_full_roster=true，当正文出现无法和最近 32 人确认对应的人物、疑似新人物或远期旧人物时，返回 request_full_roster=true；此时 characters 可为空或只保留已能确认的角色。\n"

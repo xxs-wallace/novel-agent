@@ -1,5 +1,18 @@
 # Writer Agent 分层生成设计
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Writer
+设计按链路切片阅读：
+
+- Agent Loop / 状态机 / review gate：读第 2、3、5 节，并回查
+  [`contracts.md`](contracts.md)。
+- Outline Research Loop：读第 4 节和
+  [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)。
+- 正文生成 / 执行输入 / 写回：读第 6、8、10、11 节，并回查
+  [`specs/runtime-boundaries.spec.md`](specs/runtime-boundaries.spec.md)。
+- 层级职责或产品模式：读第 7、12 节。
+
 ## 1. 文档结构
 
 Writer 设计文档收敛为两个核心文件：

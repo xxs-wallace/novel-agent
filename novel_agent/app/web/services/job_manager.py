@@ -123,7 +123,7 @@ class JobManager:
         )
         self._records[job_id] = record
         self._events[job_id] = []
-        self.emit_event(job_id, "queued", "任务已加入后台队列", payload={"type": job_type})
+        self.emit_event(job_id, "queued", "任务已加入后台队列", payload={"type": job_type, "request_payload": dict(payload or {})})
         task = asyncio.create_task(self._run_job(record, runner or self._default_runner))
         self._tasks[job_id] = task
         return self.summary(job_id)

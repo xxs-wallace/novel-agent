@@ -1,9 +1,21 @@
 # 叙事 Memory 与上下文实现设计稿
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。Memory
+设计较长，默认按工作面读取：
+
+- 章节边界、粗读入库、document 对齐：读第 3.0、4.0、10.0 节。
+- 精读、章节摘要、大纲、人物/世界更新：读第 3、4、6、7、8 节。
+- BTree / Query / context assembly：读第 3.6、3.9、10.5 节。
+- 当前实现和迁移判断：读第 4、5、9、11、12 节。
+- 涉及跨层 Writer 输入时，回查
+  [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md)。
+
 ## 1. 目标
 本设计稿将以下两部分合并整理到 Memory 与上下文层：
 
-- 从 [novel-continuation-mvp/spec.md](.trae/specs/novel-continuation-mvp/spec.md) 与 [novel-continuation-mvp/design.md](.trae/specs/novel-continuation-mvp/design.md) 中抽取出的 Memory / 上下文相关设计
+- 从 [`../novel-continuation-mvp/spec.md`](../novel-continuation-mvp/spec.md) 与 [`../novel-continuation-mvp/design.md`](../novel-continuation-mvp/design.md) 中抽取出的 Memory / 上下文相关设计
 - 当前 `novel_agent/` 已实现的精读 Agent、人物档案、世界观、大纲、进度与上下文输入装配逻辑
 
 本文档的目的不是再定义桥段检索，而是明确：
@@ -99,6 +111,9 @@
 保存人物的长期状态：
 
 - `canonical_name`
+  - 叙事视角中稳定使用的人物主称呼
+  - 默认不因后续出现全名、昵称、职业称谓或关系内称呼而改写
+  - 只有明确证据表明既有主称呼是误认对象、写错、伪装名或假名时才允许 retitle
 - `aliases`
 - `personality`
 - `occupations`
@@ -106,6 +121,7 @@
 - `abilities`
 - `recent_activity`
 - `relationships`
+  - 每条关系可携带 `address_terms`，记录关系内称呼及方向，例如“妻子称他为老公”“同事称他为 Don”
 - `story_events`
 - `chapter_indexes`
 - `mentioned_doc_ids`
@@ -116,6 +132,7 @@
 
 - 基础属性层
   - 保存姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、稳定关系、能力和特长
+  - 姓名部分应区分叙事主称呼、检索别名和关系内称呼；关系内称呼跟随关系条目，不覆盖人物档案标题
   - 该层用于 Writer 快速获得人物稳定状态，不应塞入过长流水账
 - 人物剧情时间线层
   - 保存以人物为维度过滤出的 `key_experiences`

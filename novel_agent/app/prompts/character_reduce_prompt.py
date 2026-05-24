@@ -14,10 +14,11 @@ def build_character_reduce_prompt(prompt_input: dict[str, Any]) -> tuple[str, st
         "3. 同一人物跨多个 documents 的状态、行动和关系必须按 source_doc_ids 的故事顺序归纳。\n"
         "4. existing_profile 是该人物现有档案；不要把已有同义事实重新输出为新事实，也不要制造重复的人物性证据。\n"
         "5. relationships 在人物内直接归并，避免同义重复和与 existing_profile 冲突；证据不足时返回空数组。\n"
-        "6. 关系明细只输出到 relationships 字段，不要复制进 personhood_evidence_summary、recent_activity 或 profile_summary_md。\n"
-        "7. 不要补全没有证据的性格、年龄、职业、能力或关系。\n"
-        "8. 如果证据不足以写入长期档案，返回 should_update=false 且 character_update=null。\n"
-        "9. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "6. 如果证据中出现关系内称呼，将其写入 relationship.address_terms，推荐保留方向，如“妻子称他为老公”“同事称他为 Don”。\n"
+        "7. 关系明细只输出到 relationships 字段，不要复制进 personhood_evidence_summary、recent_activity 或 profile_summary_md。\n"
+        "8. 不要补全没有证据的性格、年龄、职业、能力或关系。\n"
+        "9. 如果证据不足以写入长期档案，返回 should_update=false 且 character_update=null。\n"
+        "10. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
         "请按以下 JSON schema 返回：\n"
@@ -25,7 +26,7 @@ def build_character_reduce_prompt(prompt_input: dict[str, Any]) -> tuple[str, st
         '  "should_update": true,\n'
         '  "character_id": "123",\n'
         '  "canonical_name": "角色甲",\n'
-        '  "character_update": {"character_id": "123", "canonical_name": "角色甲", "aliases": [], "personality": [], "occupations": [], "age_update": null, "abilities": [], "recent_activity": "", "relationships": [], "evidence_level": "inferred", "is_speaking_character": false, "speaking_character_status": "personhood_supported", "speaking_evidence": "", "personhood_evidence_summary": "", "activity_or_state_evidence": "", "relationship_evidence": ""}\n'
+        '  "character_update": {"character_id": "123", "canonical_name": "角色甲", "aliases": [], "personality": [], "occupations": [], "age_update": null, "abilities": [], "recent_activity": "", "relationships": [{"target_name": "角色乙", "relation_type": "同事", "sentiment_state": "", "status_summary": "", "address_terms": ["角色乙称他为 Don"]}], "evidence_level": "inferred", "is_speaking_character": false, "speaking_character_status": "personhood_supported", "speaking_evidence": "", "personhood_evidence_summary": "", "activity_or_state_evidence": "", "relationship_evidence": ""}\n'
         "}\n\n"
         "输入数据如下：\n"
         + json.dumps(prompt_input, ensure_ascii=False, indent=2)

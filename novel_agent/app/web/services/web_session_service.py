@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from ...cli.facade import TuiTaskSnapshot, WorkflowFacade
 from ...cli.router import CommandRouter
-from ...cli.status import StatusPresenter, StatusView, WriterStatusPresenter
+from ...cli.status import StatusPresenter, WriterStatusPresenter
 from ..schemas import (
     ConversationMessage,
     DecisionCard,
@@ -20,6 +20,7 @@ from ..schemas import (
     WriterDraftReview,
     WriterQuestionSet,
     WriterReviewAction,
+    WriterStartPreflight,
 )
 from .artifact_ids import encode_artifact_id
 from .reviewer_action_specs import reviewer_specs_for_stage, writer_reviewer_actions
@@ -140,6 +141,74 @@ class WebSessionService:
             "message": message,
         }
 
+    def delete_writer_runs(self, *, task_id: str, confirm: bool = False) -> dict[str, Any]:
+        states = self.writer_states(task_id)
+        candidates: list[tuple[str, Path]] = []
+        seen_paths: set[Path] = set()
+        for state in states:
+            run_id = str(state.get("run_id") or "")
+            run_dir = Path(str(state.get("run_dir") or ""))
+            if not run_id or not run_dir.exists() or run_dir in seen_paths:
+                continue
+            seen_paths.add(run_dir)
+            candidates.append((run_id, run_dir))
+        run_ids = [run_id for run_id, _ in candidates]
+        candidate_paths = [str(run_dir) for _, run_dir in candidates]
+        if not candidates:
+            return {
+                "task_id": task_id,
+                "confirmed": confirm,
+                "run_id": "",
+                "run_ids": [],
+                "candidate_paths": [],
+                "deleted_paths": [],
+                "errors": [],
+                "message": "没有找到可删除的续写任务。",
+            }
+        if not confirm:
+            return {
+                "task_id": task_id,
+                "confirmed": False,
+                "run_id": run_ids[0],
+                "run_ids": run_ids,
+                "candidate_paths": candidate_paths,
+                "deleted_paths": [],
+                "errors": [],
+                "message": f"将删除 {len(candidates)} 个续写任务产物，不影响阅读记忆和任务索引。",
+            }
+
+        deleted_paths: list[str] = []
+        errors: list[str] = []
+        for _run_id, run_dir in candidates:
+            try:
+                shutil.rmtree(run_dir)
+                deleted_paths.append(str(run_dir))
+            except OSError as exc:
+                errors.append(f"{run_dir}: {exc}")
+        run_id_set = set(run_ids)
+        self._messages[task_id] = [
+            message
+            for message in self._messages.get(task_id, [])
+            if self._message_run_id(message) not in run_id_set
+        ]
+        message = "已删除续写任务，可以重新提交续写意图。"
+        self.append_message(
+            task_id,
+            role="assistant",
+            content=message,
+            payload={"channel": "writer_runs_deleted", "run_ids": run_ids, "deleted_paths": deleted_paths, "errors": errors},
+        )
+        return {
+            "task_id": task_id,
+            "confirmed": True,
+            "run_id": run_ids[0],
+            "run_ids": run_ids,
+            "candidate_paths": candidate_paths,
+            "deleted_paths": deleted_paths,
+            "errors": errors,
+            "message": message,
+        }
+
     def reset_close_read(self, *, task_id: str) -> WebActionResult:
         result = dict(self.facade.reset_close_read_task(book_id=task_id))
         self.append_message(task_id, role="assistant", content="已清空阅读进度，可以重新开始阅读。", payload=result)
@@ -190,6 +259,39 @@ class WebSessionService:
             technical_available=bool(writer_state),
         )
 
+    def writer_start_preflight(self, task_id: str) -> WriterStartPreflight:
+        payload = self.facade.writer_start_preflight(book_id=task_id)
+        can_start = bool(payload.get("can_start"))
+        missing_steps = [str(item) for item in payload.get("missing_modeling_steps") or [] if str(item).strip()]
+        advisories = [str(item) for item in payload.get("modeling_advisories") or [] if str(item).strip()]
+        missing_guidance = [str(item) for item in payload.get("missing_guidance") or [] if str(item).strip()]
+        advisory_guidance = [str(item) for item in payload.get("advisory_guidance") or [] if str(item).strip()]
+        if can_start:
+            message = "可以创建续写任务。"
+        else:
+            labels = "、".join(self._public_missing_modeling_label(step) for step in missing_steps)
+            message = f"现在还不能创建续写任务：请先补齐{labels or '必要建模材料'}。"
+        return WriterStartPreflight(
+            task_id=task_id,
+            can_start=can_start,
+            message=message,
+            missing_modeling_steps=missing_steps,
+            modeling_advisories=advisories,
+            missing_guidance=missing_guidance,
+            advisory_guidance=advisory_guidance,
+            decision_cards=[
+                DecisionCard(
+                    card_id=f"{task_id}:writer-start-preflight",
+                    title="续写前还需要建模",
+                    body=message,
+                    actions=self._writer_modeling_recovery_actions(missing_steps),
+                )
+            ]
+            if missing_steps
+            else [],
+            technical_details={"writer_preflight": payload},
+        )
+
     def messages(self, task_id: str) -> list[ConversationMessage]:
         self.sync_writer_question_messages(task_id)
         self.sync_writer_review_messages(task_id)
@@ -227,6 +329,38 @@ class WebSessionService:
                 )
             return message
         message = self.append_message(task_id, role="user", content=content, payload=payload)
+        if str(payload.get("channel") or "") == "writer_question_answer":
+            run_id = str(payload.get("run_id") or "")
+            question_set_id = str(payload.get("question_set_id") or "")
+            answer_text = str(payload.get("answer_text") or content).strip()
+            if run_id and question_set_id and answer_text:
+                self.append_message(
+                    task_id,
+                    role="assistant",
+                    content="已收到你的回答。点击提交后，Writer 会带着这段补充继续大纲研究。",
+                    payload={"input_message_id": message.message_id, "channel": "writer_question_answer_received"},
+                    decision_cards=[
+                        DecisionCard(
+                            card_id=f"{task_id}:submit-outline-answer:{question_set_id}",
+                            title="继续大纲研究",
+                            body="将这段回答提交给 Writer，继续生成下一条可审阅内容。",
+                            actions=[
+                                {
+                                    "action": "submit_outline_research_answers",
+                                    "label": "提交回答并继续研究",
+                                    "variant": "primary",
+                                    "payload": {
+                                        "run_id": run_id,
+                                        "question_set_id": question_set_id,
+                                        "source_message_id": message.message_id,
+                                        "answer_text": answer_text,
+                                    },
+                                }
+                            ],
+                        )
+                    ],
+                )
+                return message
         self.append_message(
             task_id,
             role="assistant",
@@ -458,45 +592,88 @@ class WebSessionService:
         terminal_stage = str(writer_state.get("terminal_stage") or "")
         if active_stage not in {"completed", "writeback_committed"} and "completed" not in terminal_stage:
             return
+        next_chapter_id = self._next_chapter_id_from_writer_state(writer_state)
         for message in self._messages.get(task_id, []):
             if (
                 message.payload.get("channel") == "writer_completion_next_step"
                 and message.payload.get("run_id") == run_id
             ):
                 return
-        card = DecisionCard(
-            card_id=f"{task_id}:writer-completed:{run_id}",
-            title="本章已写回",
-            body=(
-                "这章已经进入续写记忆，后续 Writer 会把它当作已确认上下文。"
-                "可以继续发起下一轮续写；若要补充新方向，先写在输入框里再点击继续。"
-            ),
-            actions=[
-                {
-                    "action": "start_writer",
-                    "label": "继续下一章",
-                    "variant": "primary",
-                    "payload": {
-                        "requested_from": "writer_completion",
-                        "previous_run_id": run_id,
-                        "continuation_goal": (
-                            "继续最新已写回章节之后的剧情；必须以 Writer Memory 中 "
-                            "document_title_index 最大的已写回章节作为 continuation anchor，"
-                            "不得重写已写回章节或回退到更早剧情。"
-                        ),
-                        "target_chapter_count": 1,
-                        "chapter_count": 1,
-                    },
-                }
-            ],
-        )
+        if next_chapter_id:
+            card = DecisionCard(
+                card_id=f"{task_id}:writer-completed:{run_id}",
+                title="本章已写回",
+                body=(
+                    "这章已经进入续写记忆，后续 Writer 会把它当作已确认上下文。"
+                    "当前批次还有未写章节，可以直接继续。"
+                ),
+                actions=[
+                    {
+                        "action": "start_writer",
+                        "label": "继续下一章",
+                        "variant": "primary",
+                        "payload": {
+                            "requested_from": "writer_completion",
+                            "previous_run_id": run_id,
+                            "continuation_goal": (
+                                "继续最新已写回章节之后的剧情；必须以 Writer Memory 中 "
+                                "document_title_index 最大的已写回章节作为 continuation anchor，"
+                                "不得重写已写回章节或回退到更早剧情。"
+                            ),
+                            "target_chapter_count": 1,
+                            "chapter_count": 1,
+                        },
+                    }
+                ],
+            )
+            content = "本章已经写回续写记忆。当前批次还有未写章节，可以继续下一章。"
+        else:
+            card = DecisionCard(
+                card_id=f"{task_id}:writer-batch-completed:{run_id}",
+                title="本批次已写完",
+                body="请先在输入框补充下一批续写方向，再开始新一轮规划。",
+                actions=[
+                    {
+                        "action": "start_writer",
+                        "label": "开始新一轮规划",
+                        "variant": "primary",
+                        "payload": {
+                            "requested_from": "writer_new_batch",
+                            "previous_run_id": run_id,
+                            "target_chapter_count": 3,
+                            "chapter_count": 3,
+                        },
+                    }
+                ],
+            )
+            content = "本批次章节已经全部写回续写记忆。请先补充下一批方向，再开始新一轮规划。"
         self.append_message(
             task_id,
             role="assistant",
-            content="本章已经写回续写记忆。你可以继续下一章，或先在输入框补充新的方向。",
+            content=content,
             payload={"channel": "writer_completion_next_step", "run_id": run_id, "stage": active_stage},
             decision_cards=[card],
         )
+
+    def _next_chapter_id_from_writer_state(self, writer_state: Mapping[str, Any]) -> str:
+        run_dir = Path(str(writer_state.get("run_dir") or ""))
+        if not run_dir.exists():
+            return ""
+        current_chapter_id = str(writer_state.get("current_chapter_id") or "").strip()
+        package = self._load_json_data(run_dir / "chapter_package.json")
+        if not package:
+            package = self._load_json_data(run_dir / "freezes" / "freeze_c" / "chapter_package.json")
+        chapter_ids = [
+            str(item.get("chapter_id") or "").strip()
+            for item in package.get("chapters", [])
+            if isinstance(item, Mapping) and str(item.get("chapter_id") or "").strip()
+        ]
+        if not chapter_ids:
+            return ""
+        if current_chapter_id in chapter_ids:
+            index = chapter_ids.index(current_chapter_id)
+            return chapter_ids[index + 1] if index + 1 < len(chapter_ids) else ""
+        return chapter_ids[0]
 
     def append_writer_recovery_message(
         self,
@@ -1169,11 +1346,11 @@ class WebSessionService:
             )
         return (
             "上一次 Writer 运行还没有保存到可审阅节点，当前没有可恢复的问题或审阅卡。"
-            "请重新点击“开始续写”提交方向；如需清理旧 run，可从任务菜单删除最近续写。",
+            "请重新点击“开始续写”提交方向；如需清理旧 run，可从任务菜单删除续写任务。",
             DecisionCard(
                 card_id=f"{task_id}:writer-empty-recovery:{run_id}",
                 title="没有可恢复审阅点",
-                body="当前 run 没有问题集、审阅产物或草稿决策点。请重新开始续写，或删除最近续写后重试。",
+                body="当前 run 没有问题集、审阅产物或草稿决策点。请重新开始续写，或删除续写任务后重试。",
                 actions=[],
             ),
         )
@@ -1194,10 +1371,11 @@ class WebSessionService:
             return []
         current_status = self._current_modeling_status(task_id)
         if current_status is None:
-            return stale_steps
+            return [step for step in stale_steps if step != "creative_kb.fragment_cards"]
         return [
             step
             for step in stale_steps
+            if step != "creative_kb.fragment_cards"
             if not self._modeling_step_ready(current_status=current_status, step=step)
         ]
 

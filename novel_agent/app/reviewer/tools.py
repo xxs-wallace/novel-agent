@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..schemas.creative_kb_schema import SceneBrief
-from ..schemas.narrative_memory_schema import MemoryQueryBudget
+from ..schemas.narrative_inquiry_schema import AnalyzerBudget, EvidenceBundle, NarrativeInquiryRequest
 from ..schemas.orchestration_schema import RetrievalContext
 from ..schemas.reviewer_schema import (
     ReviewBudget,
@@ -13,13 +13,25 @@ from ..schemas.reviewer_schema import (
     ReviewerToolCall,
     ReviewerToolResult,
 )
+from ..services.narrative_inquiry_broker import NarrativeInquiryBroker
 from ..services.narrative_memory_query_service import NarrativeMemoryQueryService
 from ..services.retrieval_facade import RetrievalFacade
 
 
 class ReviewerMemoryTool:
-    def __init__(self, *, query_service: NarrativeMemoryQueryService | None = None, repo_root: Path | None = None) -> None:
-        self.query_service = query_service or NarrativeMemoryQueryService(repo_root=repo_root or Path.cwd())
+    def __init__(
+        self,
+        *,
+        query_service: NarrativeMemoryQueryService | None = None,
+        inquiry_broker: NarrativeInquiryBroker | None = None,
+        repo_root: Path | None = None,
+    ) -> None:
+        self.repo_root = (repo_root or Path.cwd()).expanduser().resolve()
+        self.query_service = query_service or NarrativeMemoryQueryService(repo_root=self.repo_root)
+        self.inquiry_broker = inquiry_broker or NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.query_service,
+        )
 
     def query(
         self,
@@ -35,32 +47,169 @@ class ReviewerMemoryTool:
         if conn is None:
             return self._failed(tool_call, "Memory 查询需要数据库连接。")
         try:
-            budget = self._memory_budget(tool_call.budget, review_budget)
-            state = self.query_service.root_scan(conn, book_id=book_id, query=tool_call.query, budget=budget)
-            trace = [
-                {"operation": "reviewer_memory_query", "query": tool_call.query, "source": "reviewer_agent"},
-                *state.trace,
-            ]
+            inquiry_budget = self._inquiry_budget(tool_call.budget, review_budget)
+            bundles, usage = self.inquiry_broker.resolve_requests(
+                conn,
+                book_id=book_id,
+                requests=self._inquiry_requests(tool_call),
+                budget=inquiry_budget,
+            )
+            evidence_items = self._evidence_items_from_bundles(
+                bundles,
+                max_context_chars=review_budget.max_context_chars,
+            )
+            trace = self._trace_from_bundles(tool_call=tool_call, bundles=bundles, usage=usage, budget=inquiry_budget)
             return ReviewerToolResult(
                 tool_call_id=tool_call.tool_call_id,
                 tool=tool_call.tool,
-                status="success",
-                evidence_items=state.current_candidates,
-                source_refs=[{"source_type": "memory", "source_id": item.get("id", ""), "label": item.get("level", "")} for item in state.current_candidates],
+                status=self._status_from_bundles(bundles),
+                evidence_items=evidence_items,
+                source_refs=self._source_refs_from_bundles(bundles),
                 trace=trace,
             )
         except Exception as exc:
             return self._failed(tool_call, str(exc))
 
-    def _memory_budget(self, data: Mapping[str, Any], review_budget: ReviewBudget) -> MemoryQueryBudget:
-        return MemoryQueryBudget(
-            max_root_candidates=int(data.get("max_root_candidates") or min(8, max(1, review_budget.max_context_chars // 2000))),
-            max_child_candidates=int(data.get("max_child_candidates") or 12),
-            max_path_context_chars=int(data.get("max_path_context_chars") or 1600),
-            max_candidate_chars=int(data.get("max_candidate_chars") or 2400),
-            max_trace_items=int(data.get("max_trace_items") or 80),
-            excerpt_budget=int(data.get("excerpt_budget") or 1200),
+    def _inquiry_requests(self, tool_call: ReviewerToolCall) -> list[NarrativeInquiryRequest]:
+        query = tool_call.query or tool_call.intent
+        purpose = tool_call.reason_zh or tool_call.intent
+        return [
+            NarrativeInquiryRequest(
+                request_id=f"{tool_call.tool_call_id}:scene-cards",
+                request_type="narrative_scene_card_search",
+                query=query,
+                purpose=purpose or "定位与评审问题相关的关键场景卡片。",
+                priority="high",
+                expected_depth="index_card",
+                metadata={"consumer": "reviewer", "tool_call_id": tool_call.tool_call_id},
+            ),
+            NarrativeInquiryRequest(
+                request_id=f"{tool_call.tool_call_id}:outline-segments",
+                request_type="story_detail",
+                query=query,
+                purpose=purpose or "定位与评审问题相关的历史剧情压缩段落。",
+                priority="high",
+                expected_depth="outline_segment",
+                metadata={"consumer": "reviewer", "tool_call_id": tool_call.tool_call_id},
+            ),
+        ]
+
+    def _inquiry_budget(self, data: Mapping[str, Any], review_budget: ReviewBudget) -> AnalyzerBudget:
+        evidence_chars = int(data.get("max_evidence_chars_per_request") or min(2500, max(600, review_budget.max_context_chars // 4)))
+        return AnalyzerBudget(
+            max_rounds=1,
+            max_requests_per_round=2,
+            max_total_requests=2,
+            max_raw_excerpt_requests=0,
+            max_evidence_chars_per_request=evidence_chars,
+            max_prompt_bytes=max(4096, review_budget.max_context_chars * 4),
         )
+
+    def _evidence_items_from_bundles(
+        self,
+        bundles: Sequence[EvidenceBundle],
+        *,
+        max_context_chars: int,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        remaining = max(500, int(max_context_chars or 500))
+        for bundle in bundles:
+            bundle_prefix = {
+                "source_type": "memory",
+                "inquiry_request_id": bundle.request_id,
+                "inquiry_request_type": bundle.request_type,
+                "query": bundle.query,
+                "status": bundle.status,
+                "fact_status": bundle.fact_status,
+            }
+            for index, item in enumerate(bundle.evidence_items, start=1):
+                payload = {
+                    **bundle_prefix,
+                    "evidence_id": f"{bundle.request_id}:evidence-{index:03d}",
+                    "evidence": self._trim_mapping(item, limit=max(240, min(1200, remaining))),
+                }
+                remaining -= len(str(payload))
+                if remaining < 0 and items:
+                    return items
+                items.append(payload)
+            for index, excerpt in enumerate(bundle.excerpts, start=1):
+                payload = {
+                    **bundle_prefix,
+                    "evidence_id": f"{bundle.request_id}:excerpt-{index:03d}",
+                    "evidence_type": "raw_excerpt",
+                    "evidence": self._trim_mapping(excerpt, limit=max(240, min(1200, remaining))),
+                }
+                remaining -= len(str(payload))
+                if remaining < 0 and items:
+                    return items
+                items.append(payload)
+        return items
+
+    def _source_refs_from_bundles(self, bundles: Sequence[EvidenceBundle]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for bundle in bundles:
+            for source in bundle.sources:
+                source_id = str(
+                    source.get("card_id")
+                    or source.get("source_id")
+                    or source.get("path")
+                    or source.get("source_doc_range")
+                    or bundle.request_id
+                )
+                key = (bundle.request_type, source_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                refs.append(
+                    {
+                        "source_type": "memory",
+                        "source_id": source_id,
+                        "label": str(source.get("card_type") or source.get("type") or bundle.request_type),
+                    }
+                )
+        return refs
+
+    def _trace_from_bundles(
+        self,
+        *,
+        tool_call: ReviewerToolCall,
+        bundles: Sequence[EvidenceBundle],
+        usage: Mapping[str, int],
+        budget: AnalyzerBudget,
+    ) -> list[dict[str, Any]]:
+        trace = [
+            {
+                "operation": "reviewer_memory_query",
+                "query": tool_call.query,
+                "source": "reviewer_agent",
+                "broker": "NarrativeInquiryBroker",
+                "request_types": [bundle.request_type for bundle in bundles],
+                "usage": dict(usage),
+                "budget": budget.to_dict(),
+            }
+        ]
+        for bundle in bundles:
+            trace.extend(bundle.trace)
+        return trace
+
+    def _status_from_bundles(self, bundles: Sequence[EvidenceBundle]) -> str:
+        if not bundles:
+            return "failed"
+        statuses = {bundle.status for bundle in bundles}
+        if statuses == {"failed"}:
+            return "failed"
+        if statuses == {"blocked"}:
+            return "blocked"
+        return "success"
+
+    def _trim_mapping(self, data: Mapping[str, Any], *, limit: int) -> dict[str, Any]:
+        payload = dict(data)
+        for key in ("summary", "text", "content", "source_excerpt"):
+            value = payload.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                payload[key] = f"{value[:limit].rstrip()}..."
+        return payload
 
     def _blocked(self, tool_call: ReviewerToolCall, error: str) -> ReviewerToolResult:
         return ReviewerToolResult(

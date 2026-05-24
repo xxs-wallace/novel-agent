@@ -41,6 +41,7 @@ let deferredMessagesByTask: Record<string, ConversationMessage> = {};
 let deferredMessageJobIds: Record<string, string> = {};
 let deferredMessagesReady: Record<string, boolean> = {};
 let messageResponseDelayMs = 0;
+let writerPreflightCanStart = true;
 
 function progress(step = "freeze_d_review") {
   return {
@@ -52,7 +53,15 @@ function progress(step = "freeze_d_review") {
     read_progress: { completed: 2, total: 4 },
     close_read_progress: { completed: 1, total: 4 },
     modeling_ready: { characters: true, world: false, outline: true, "桥段 KB": true },
-    counts: { chapters: 2, documents: 4, fragment_cards: 3, fragment_card_docs: 3, fragment_clusters: 2 },
+    counts: {
+      chapters: 2,
+      documents: 4,
+      narrative_scene_cards: 2,
+      narrative_scene_card_docs: 2,
+      fragment_cards: 3,
+      fragment_card_docs: 3,
+      fragment_clusters: 2
+    },
     technical_available: true
   };
 }
@@ -84,6 +93,7 @@ export function resetMockState() {
   deferredMessageJobIds = {};
   deferredMessagesReady = {};
   messageResponseDelayMs = 0;
+  writerPreflightCanStart = true;
   tasks = [makeTask("task-alpha", true), makeTask("task-beta")];
   messagesByTask = {
     "task-alpha": [
@@ -191,6 +201,10 @@ export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_clo
   tasks = tasks.map((task) => (task.task_id === taskId ? { ...task, active_job: job } : task));
 }
 
+export function setWriterPreflightBlocked() {
+  writerPreflightCanStart = false;
+}
+
 export function setWriterQuestionMessage(taskId = "task-alpha") {
   const questionSet: WriterQuestionSet = {
     schema_version: "1.0",
@@ -205,7 +219,7 @@ export function setWriterQuestionMessage(taskId = "task-alpha") {
         question_id: "q1",
         prompt: "顾迟是否为新增人物？",
         required: true,
-        hint: "这会影响人物补充和章节规划。",
+        hint: "这会影响人物补充和章节梗概。",
         gap_id: "gap-001",
         risk_level: "high"
       }
@@ -417,25 +431,17 @@ const closeReadTree: ArtifactTreeNode[] = [
 
 const writerTree: ArtifactTreeNode[] = [
   {
-    ...node("writer-run-history-1", "第一章 雨夜接应", "writer_run_group", "writer", "待决策"),
+    ...node("writer-run-history-1", "续写任务", "writer_run_group", "writer", "待决策"),
     children: [
-      node("writer-run", "续写概览", "writer_run", "writer", "已生成"),
-      node("writer-research", "大纲研究", "writer_stage", "writer", "已生成"),
-      node("writer-questions", "问题集", "writer_artifact", "writer"),
-      node("writer-notebook", "大纲研究笔记", "writer_artifact", "writer"),
-      node("writer-trace", "检索轨迹", "writer_artifact", "writer"),
-      node("writer-plan", "全书续写规划", "writer_artifact", "writer"),
-      node("writer-batch-plan", "本批剧情大纲", "writer_artifact", "writer"),
-      node("writer-chapter-package", "章节标题与梗概", "writer_artifact", "writer"),
-      node("writer-guidance", "章节写作指导", "writer_artifact", "writer"),
-      node("writer-draft", "正文草稿", "draft", "writer"),
-      node("writer-generation-review", "草稿决策", "writer_artifact", "writer"),
-      node("writer-writeback", "写回摘要", "writeback", "writer")
+      node("writer-intent", "用户原始输入", "writer_artifact", "writer", "已生成"),
+      node("writer-plan", "生成出来的大纲", "writer_artifact", "writer"),
+      node("writer-chapter-package", "接下来要写的梗概", "writer_artifact", "writer"),
+      node("writer-draft", "草稿正文", "draft", "writer")
     ]
   },
   {
-    ...node("writer-run-history-2", "第二章 旧码头回声", "writer_run_group", "writer", "已生成"),
-    children: [node("writer-draft-2", "正文草稿", "draft", "writer")]
+    ...node("writer-run-history-2", "续写任务 2", "writer_run_group", "writer", "已生成"),
+    children: [node("writer-draft-2", "草稿正文", "draft", "writer")]
   }
 ];
 
@@ -476,7 +482,7 @@ function artifactView(artifactId: string): ArtifactView {
   if (artifactId.startsWith("writer")) {
     return {
       artifact_id: artifactId,
-      title: "正文草稿",
+      title: "草稿正文",
       kind: "writer_draft",
       sections: [
         { title: "字数", body: "3200" },
@@ -597,21 +603,35 @@ export const handlers = [
       deleted: confirm ? { db: true } : {}
     });
   }),
-  http.delete("/api/tasks/:taskId/writer-runs/latest", ({ params, request }) => {
+  http.delete("/api/tasks/:taskId/writer-runs", ({ params, request }) => {
     const confirm = new URL(request.url).searchParams.get("confirm") === "true";
     calls.deleteWriterRuns.push({ taskId: String(params.taskId), confirm });
     return HttpResponse.json({
       task_id: params.taskId,
       confirmed: confirm,
       run_id: "run-1",
+      run_ids: ["run-1"],
       candidate_paths: ["/tmp/runs/writer/run-1"],
       deleted_paths: confirm ? ["/tmp/runs/writer/run-1"] : [],
       errors: [],
-      message: confirm ? "已删除最近一次 Writer 运行，可以重新提交续写意图。" : "将删除最近一次 Writer 运行产物，不影响阅读记忆和任务索引。"
+      message: confirm ? "已删除续写任务，可以重新提交续写意图。" : "将删除 1 个续写任务产物，不影响阅读记忆和任务索引。"
     });
   }),
   http.post("/api/tasks/:taskId/reset-close-read", ({ params }) =>
     HttpResponse.json(actionResult(String(params.taskId), { action: "reset_close_read", payload: {} }))
+  ),
+  http.get("/api/tasks/:taskId/writer-preflight", ({ params }) =>
+    HttpResponse.json({
+      task_id: String(params.taskId),
+      can_start: writerPreflightCanStart,
+      message: writerPreflightCanStart ? "可以创建续写任务。" : "现在还不能创建续写任务：请先补齐人物档案。",
+      missing_modeling_steps: writerPreflightCanStart ? [] : ["memory.character_profiles"],
+      modeling_advisories: writerPreflightCanStart ? ["creative_kb.fragment_cards"] : [],
+      missing_guidance: writerPreflightCanStart ? [] : ["先运行阅读/记忆流程，生成角色档案。"],
+      advisory_guidance: writerPreflightCanStart ? ["运行 Creative KB 构建，生成 fragment_cards / fragment_clusters。"] : [],
+      decision_cards: [],
+      technical_details: {}
+    })
   ),
   http.get("/api/tasks/:taskId/messages", ({ params }) => {
     const taskId = String(params.taskId);

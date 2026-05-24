@@ -9,6 +9,7 @@ import {
   calls,
   setMessageResponseDelay,
   setTaskActiveJob,
+  setWriterPreflightBlocked,
   setWriterArtifactReviewAfterJobReplay,
   setWriterArtifactReviewMessage,
   setWriterDraftReviewMessage,
@@ -44,6 +45,11 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
+    expect(screen.getAllByText("叙事场景索引").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("叙事场景索引进度 50%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("覆盖 2/4 文档 · 2 卡").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("场景索引").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已生成").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Creative KB").length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText("Creative KB进度 75%").length).toBeGreaterThan(0);
     expect(screen.getAllByText("3/4 · 2 簇").length).toBeGreaterThan(0);
@@ -105,18 +111,18 @@ describe("Novel Agent Web workspace", () => {
     expect(calls.commands).toHaveLength(0);
   });
 
-  it("can preview and delete the latest Writer run without deleting the task", async () => {
+  it("can preview and delete Writer runs without deleting the task", async () => {
     const user = userEvent.setup();
     renderWorkspace();
     await waitForInitialTask();
 
     await user.click(await screen.findByLabelText("打开 task-alpha 操作菜单"));
-    await user.click(screen.getByRole("menuitem", { name: "删除最近续写" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除续写任务" }));
 
-    expect(await screen.findByText("删除最近续写预览")).toBeInTheDocument();
+    expect(await screen.findByText("删除续写任务预览")).toBeInTheDocument();
     expect(calls.deleteWriterRuns).toEqual([{ taskId: "task-alpha", confirm: false }]);
 
-    await user.click(screen.getByRole("button", { name: "确认删除最近续写" }));
+    await user.click(screen.getByRole("button", { name: "确认删除续写任务" }));
 
     await waitFor(() => expect(calls.deleteWriterRuns).toHaveLength(2));
     expect(calls.deleteWriterRuns[1]).toEqual({ taskId: "task-alpha", confirm: true });
@@ -388,11 +394,12 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
+    const input = await screen.findByLabelText("输入给 Agent 的自然语言");
+    await user.type(input, "进入新地点并揭露线索。");
     await user.click(await screen.findByRole("button", { name: "开始续写" }));
-    const dialog = screen.getByRole("dialog", { name: "Writer intent wizard" });
-    await user.clear(within(dialog).getByLabelText("续写目标"));
-    await user.type(within(dialog).getByLabelText("续写目标"), "进入新地点并揭露线索。");
-    await user.click(within(dialog).getByRole("button", { name: "提交 Writer 意图" }));
+    const dialog = await screen.findByRole("dialog", { name: "创建续写任务" });
+    expect(within(dialog).getByLabelText("User prompt")).toHaveValue("进入新地点并揭露线索。");
+    await user.click(within(dialog).getByRole("button", { name: "创建续写任务" }));
 
     await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(true));
     const writerCall = calls.actions.find((call) => call.body.action === "start_writer");
@@ -401,9 +408,49 @@ describe("Novel Agent Web workspace", () => {
       desired_actions: ["进入新地点并揭露线索。"],
       target_chapter_count: 3,
       default_chapter_target_chars: 3000,
-      story_scale: { target_chapter_count: 3, default_chapter_target_chars: 3000, pacing_profile: "延续原作节奏" }
+      target_total_chars: 9000,
+      story_scale: { target_chapter_count: 3, default_chapter_target_chars: 3000, target_total_chars: 9000 }
     });
     expect(calls.commands).toHaveLength(0);
+  });
+
+  it("lets the Writer wizard edit the user prompt before starting", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "开始续写" }));
+    const dialog = await screen.findByRole("dialog", { name: "创建续写任务" });
+    const prompt = within(dialog).getByLabelText("User prompt");
+    await user.type(prompt, "写一场雨夜重逢。");
+    await user.clear(within(dialog).getByLabelText("续写章节数"));
+    await user.type(within(dialog).getByLabelText("续写章节数"), "2");
+    await user.clear(within(dialog).getByLabelText("每章字数"));
+    await user.type(within(dialog).getByLabelText("每章字数"), "1800");
+    await user.click(within(dialog).getByRole("button", { name: "创建续写任务" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(true));
+    const writerCall = calls.actions.find((call) => call.body.action === "start_writer");
+    expect(writerCall?.body.payload).toMatchObject({
+      continuation_goal: "写一场雨夜重逢。",
+      desired_actions: ["写一场雨夜重逢。"],
+      target_chapter_count: 2,
+      default_chapter_target_chars: 1800,
+      target_total_chars: 3600
+    });
+  });
+
+  it("does not open the Writer wizard when preflight blocks startup", async () => {
+    const user = userEvent.setup();
+    setWriterPreflightBlocked();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "开始续写" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "创建续写任务" })).not.toBeInTheDocument());
+    expect(await screen.findByText("现在还不能创建续写任务：请先补齐人物档案。")).toBeInTheDocument();
+    expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(false);
   });
 
   it("submits decision card buttons as action ids", async () => {
@@ -438,14 +485,14 @@ describe("Novel Agent Web workspace", () => {
 
     await user.click(screen.getByRole("tab", { name: /Writer/ }));
 
-    expect(await screen.findByText("第一章 雨夜接应")).toBeInTheDocument();
-    expect(screen.getByText("第二章 旧码头回声")).toBeInTheDocument();
-    expect(await screen.findByText("大纲研究")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "问题集" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "大纲研究笔记" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "检索轨迹" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "章节写作指导" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "草稿决策" })).toBeInTheDocument();
+    expect(await screen.findByText("续写任务")).toBeInTheDocument();
+    expect(screen.getByText("续写任务 2")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /用户原始输入/ }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "生成出来的大纲" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "接下来要写的梗概" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "草稿正文" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "续写概览" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "写作目标" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "章节长度计划" })).not.toBeInTheDocument();
   });
 
@@ -455,7 +502,7 @@ describe("Novel Agent Web workspace", () => {
     await waitForInitialTask();
 
     await user.click(screen.getByRole("tab", { name: /Writer/ }));
-    const draftButtons = await screen.findAllByRole("button", { name: "正文草稿" });
+    const draftButtons = await screen.findAllByRole("button", { name: "草稿正文" });
     await user.click(draftButtons[0]);
     const detailShell = document.querySelector(".detail-shell") as HTMLElement;
     await user.click(await within(detailShell).findByRole("button", { name: "Reviewer：局部连续性" }));

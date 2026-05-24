@@ -1,5 +1,15 @@
 # 小说续写 MVP 实现设计稿
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。本文只维护
+主编排层设计，不承载 Memory / KB / Writer 字段级细节。
+
+- 主数据流和 orchestration：读第 4 节。
+- 粗读 Agent / 续写主 Agent 职责：读第 3 节。
+- 跨层装配：读第 4.3 节，并回查 [`contracts.md`](contracts.md)。
+- 旧 MVP / one-shot 兼容边界：读第 5 节。
+
 ## 1. 目标
 本设计稿只负责解释三层 spec 的关系、核心 Agent 的职责边界、主数据流和跨层装配方式。已经下沉到创作知识库层与 Memory 层的字段级设计、表结构与 prompt contract，不再在本文件重复维护。
 
@@ -29,8 +39,8 @@ flowchart TD
 
 ### 2.3 子层文档引用
 
-- 创作知识库实现细节：[`creative-knowledge-base/spec.md`](.trae/specs/creative-knowledge-base/spec.md) / [`creative-knowledge-base/design.md`](.trae/specs/creative-knowledge-base/design.md)
-- Memory 与上下文实现细节：[`narrative-memory-context/spec.md`](.trae/specs/narrative-memory-context/spec.md) / [`narrative-memory-context/design.md`](.trae/specs/narrative-memory-context/design.md)
+- 创作知识库实现细节：[`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md) / [`../creative-knowledge-base/design.md`](../creative-knowledge-base/design.md)
+- Memory 与上下文实现细节：[`../narrative-memory-context/spec.md`](../narrative-memory-context/spec.md) / [`../narrative-memory-context/design.md`](../narrative-memory-context/design.md)
 
 ## 3. 主层角色归属
 

@@ -44,6 +44,18 @@ class TaskSummary(BaseModel):
     active_job: JobSummary | None = None
 
 
+class WriterStartPreflight(BaseModel):
+    task_id: str
+    can_start: bool
+    message: str
+    missing_modeling_steps: list[str] = Field(default_factory=list)
+    modeling_advisories: list[str] = Field(default_factory=list)
+    missing_guidance: list[str] = Field(default_factory=list)
+    advisory_guidance: list[str] = Field(default_factory=list)
+    decision_cards: list["DecisionCard"] = Field(default_factory=list)
+    technical_details: dict[str, Any] = Field(default_factory=dict)
+
+
 class DecisionCard(BaseModel):
     card_id: str
     title: str

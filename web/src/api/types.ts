@@ -35,6 +35,18 @@ export interface TaskSummary {
   active_job?: JobSummary | null;
 }
 
+export interface WriterStartPreflight {
+  task_id: string;
+  can_start: boolean;
+  message: string;
+  missing_modeling_steps: string[];
+  modeling_advisories: string[];
+  missing_guidance: string[];
+  advisory_guidance: string[];
+  decision_cards: DecisionCardModel[];
+  technical_details: Record<string, unknown>;
+}
+
 export interface DecisionAction {
   action: string;
   label: string;
@@ -244,6 +256,7 @@ export interface WriterRunDeletePreview {
   task_id: string;
   confirmed: boolean;
   run_id: string;
+  run_ids?: string[];
   candidate_paths: string[];
   deleted_paths: string[];
   errors: string[];

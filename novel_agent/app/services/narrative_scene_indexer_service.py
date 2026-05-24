@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..constants import DEFAULT_MEMORY_ROOT
 from ..prompts.narrative_scene_index_prompt import build_narrative_scene_index_prompt
@@ -190,6 +190,7 @@ class NarrativeSceneIndexerService:
         book_id: str,
         model_client: Any,
         persist: bool = True,
+        progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> list[IndexCard]:
         if model_client is None:
             raise RuntimeError("NarrativeSceneIndexerService requires an available model_client")
@@ -199,13 +200,58 @@ class NarrativeSceneIndexerService:
         chapters = self.chapters_repo.list_by_book(conn, book_id=book_id)
         world_context = self._world_context(conn, book_id=book_id)
         windows = self._build_windows(documents=documents, chapters=chapters, world_context=world_context)
+        self._emit_progress(
+            progress_callback,
+            phase="windows_ready",
+            total_windows=len(windows),
+            total_documents=len(documents),
+        )
         cards: list[IndexCard] = []
-        for window in windows:
-            cards.extend(self._generate_window_cards(book_id=book_id, model_client=model_client, window=window))
+        for index, window in enumerate(windows, start=1):
+            self._emit_progress(
+                progress_callback,
+                phase="window_start",
+                window_index=index,
+                total_windows=len(windows),
+                source_doc_ids=window.source_doc_ids,
+                source_title_indexes=window.source_title_indexes,
+            )
+            window_cards = self._generate_window_cards(book_id=book_id, model_client=model_client, window=window)
+            cards.extend(window_cards)
+            self._emit_progress(
+                progress_callback,
+                phase="window_done",
+                window_index=index,
+                total_windows=len(windows),
+                source_doc_ids=window.source_doc_ids,
+                built_cards=len(window_cards),
+                accumulated_cards=len(cards),
+            )
         cards = self._dedupe_scene_cards(cards)
         if persist:
+            self._emit_progress(
+                progress_callback,
+                phase="persist_start",
+                total_windows=len(windows),
+                built_cards=len(cards),
+            )
             self.save_scene_cards(book_id=book_id, cards=cards)
+            self._emit_progress(
+                progress_callback,
+                phase="persist_done",
+                total_windows=len(windows),
+                built_cards=len(cards),
+            )
         return cards
+
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[Mapping[str, Any]], None] | None,
+        **payload: Any,
+    ) -> None:
+        if progress_callback is None:
+            return
+        progress_callback({"stage": "narrative_scene_index", **payload})
 
     def save_scene_cards(self, *, book_id: str, cards: Sequence[IndexCard]) -> Path:
         path = self.artifact_path(book_id)

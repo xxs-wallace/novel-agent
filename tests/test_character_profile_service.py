@@ -201,7 +201,7 @@ def test_character_roster_uses_recent_profiles_with_compact_identity_fields(tmp_
     assert roster[0]["last_seen_doc_id"] == 9
 
 
-def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) -> None:
+def test_merge_updates_normalizes_aliases_and_keeps_existing_narrative_name(tmp_path) -> None:
     db = NovelAgentDB(tmp_path / "character_profiles.db")
     service = _build_service()
 
@@ -241,9 +241,9 @@ def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) 
 
         rows = CharacterProfilesRepo().list_by_book(conn, book_id="book-1")
 
-    assert [str(row["canonical_name"]) for row in rows] == ["路明非"]
+    assert [str(row["canonical_name"]) for row in rows] == ["明非"]
     row = rows[0]
-    assert _load_json(row, "aliases_json") == ["明非"]
+    assert _load_json(row, "aliases_json") == ["路明非"]
 
     personality = _load_json(row, "personality_json")
     recent_activity = _load_json(row, "recent_activity_json")
@@ -254,6 +254,7 @@ def test_merge_updates_normalizes_aliases_and_promotes_canonical_name(tmp_path) 
     assert recent_activity[-1]["value"] == "在雨夜赶往医院"
     assert recent_activity[-1]["field_type"] == "fact"
     assert "## 基本属性/能力" in str(row["profile_summary_md"])
+    assert "## 人际关系/称呼" in str(row["profile_summary_md"])
     assert "## 剧情时间线" in str(row["profile_summary_md"])
 
 
@@ -345,6 +346,52 @@ def test_merge_updates_resolves_relationship_conflicts_and_alias_targets(tmp_pat
     assert relationships[0]["sentiment_state"] == "信任回升"
     assert relationships[0]["last_updated_chapter_index"] == 5
     assert relationships[0]["source_chapter_indexes"] == [2, 5]
+
+
+def test_relationships_keep_address_terms_without_retitling_profile(tmp_path) -> None:
+    db = NovelAgentDB(tmp_path / "character_address_terms.db")
+    service = _build_service()
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        CharacterProfilesRepo().upsert(
+            conn,
+            _profile_payload(
+                book_id="book-addr",
+                canonical_name="强哥",
+                aliases=[],
+                last_seen_doc_id=4,
+                last_seen_title_index=2,
+            ),
+        )
+        service.merge_updates(
+            conn,
+            book_id="book-addr",
+            chapter_index=3,
+            doc_ids=[8],
+            updates=[
+                {
+                    "canonical_name": "老徐",
+                    "aliases": ["强哥"],
+                    "recent_activity": "强哥与朋友通话。",
+                    "relationships": [
+                        {
+                            "target_name": "朋友",
+                            "relation_type": "朋友",
+                            "sentiment_state": "熟稔",
+                            "status_summary": "朋友用熟人称呼与他交谈。",
+                            "address_terms": ["朋友称他为老徐"],
+                        }
+                    ],
+                }
+            ],
+        )
+        row = _fetch_profile_row(conn, book_id="book-addr", canonical_name="强哥")
+
+    assert _load_json(row, "aliases_json") == ["老徐"]
+    relationships = _load_json(row, "relationships_json")
+    assert relationships[0]["address_terms"] == ["朋友称他为老徐"]
+    assert "称呼：朋友称他为老徐" in row["profile_summary_md"]
 
 
 def test_character_roster_exposes_character_id_and_merge_uses_it(tmp_path) -> None:

@@ -1,8 +1,20 @@
 # 小说续写 Agentic Benchmark 实现设计稿
 
+## Agent Reading Guide
+
+先读 [`AGENT_CONTEXT.md`](AGENT_CONTEXT.md) 判断是否需要展开本文。多数 benchmark
+相关小改动优先读本文第 2、6、8、11、12 节；只有涉及授权输入边界、
+泄漏规则、评分语义或 canonical runner 时才需要通读对应章节。
+
+- 改样本/授权边界：读第 4、5、7 节，并回查 [`spec.md`](spec.md)。
+- 改运行链路或 runner：读第 2.0、6、12、13 节。
+- 改评分/report：读第 8、9、11 节。
+- 接入 Writer / Memory / KB / Reviewer contract：先读对应模块 contract，
+  本文只说明 benchmark 如何包装和驱动它们。
+
 ## 1. 目标
 
-本设计稿把 [`spec.md`](.trae/specs/agentic-benchmark/spec.md) 进一步细化到可编码实现的程度，重点回答：
+本设计稿把 [`spec.md`](spec.md) 进一步细化到可编码实现的程度，重点回答：
 
 - benchmark 数据集样本如何组织
 - 三种 mode 如何裁剪授权输入边界
@@ -677,7 +689,7 @@ Compatibility note:
 ## 2.1 Contract 对齐原则
 
 `agentic-benchmark` 不得重新定义主系统已冻结的跨层对象语义。  
-运行时凡是与主链路交互的对象，必须遵守 [`novel-continuation-mvp/contracts.md`](.trae/specs/novel-continuation-mvp/contracts.md)：
+运行时凡是与主链路交互的对象，必须遵守 [`../novel-continuation-mvp/contracts.md`](../novel-continuation-mvp/contracts.md)：
 
 - 检索意图对象必须复用 `SceneBrief`
 - Memory 事实型上下文必须复用 `ContextAssemblyPayload`

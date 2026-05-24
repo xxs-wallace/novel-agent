@@ -26,14 +26,14 @@ test("Writer loop uses chat input plus structured actions for review gates", asy
   await page.goto("/");
   await expect(page.getByTestId("workspace-shell"), [...pageErrors, ...consoleMessages].join("\n")).toBeVisible();
 
+  const chatInput = page.getByLabel("输入给 Agent 的自然语言");
+  await chatInput.fill("进入新地点并揭露旧案线索。");
   await page.getByRole("button", { name: "开始续写", exact: true }).first().click();
-  const wizard = page.getByRole("dialog", { name: "Writer intent wizard" });
+  const wizard = page.getByRole("dialog", { name: "创建续写任务" });
   await expect(wizard).toBeVisible();
-  await wizard.getByLabel("续写目标").fill("进入新地点并揭露旧案线索。");
-  await wizard.getByRole("button", { name: "提交 Writer 意图" }).click();
+  await wizard.getByRole("button", { name: "创建续写任务" }).click();
 
   await expect(page.getByText("顾迟是否为新增人物？")).toBeVisible();
-  const chatInput = page.getByLabel("输入给 Agent 的自然语言");
   await chatInput.fill("不是新增人物，本轮只沿用已有关系。");
   await page.getByRole("button", { name: "发送" }).click();
 
@@ -279,11 +279,10 @@ function reviewAction(
 
 function writerTree(): ArtifactTreeNode[] {
   return [
-    node("writer-run", "Run 总览", "writer_run"),
-    node("writer-research", "大纲研究", "writer_stage"),
-    node("writer-questions", "问题集", "writer_artifact"),
-    node("writer-book-plan", "全书续写规划", "writer_artifact"),
-    node("writer-chapter", "章节标题与梗概", "writer_artifact")
+    node("writer-intent", "用户原始输入", "writer_artifact"),
+    node("writer-book-plan", "生成出来的大纲", "writer_artifact"),
+    node("writer-chapter", "接下来要写的梗概", "writer_artifact"),
+    node("writer-draft", "草稿正文", "draft")
   ];
 }
 

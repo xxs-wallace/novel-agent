@@ -17,6 +17,7 @@ from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
+from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget, MemoryQueryState
 from novel_agent.app.schemas.orchestration_schema import (
     ExtractedCharacterMention,
@@ -310,6 +311,110 @@ def test_outline_research_schema_serialization_and_validation(tmp_path: Path) ->
         SufficiencyDecision(decision_id="bad", status="needs_user_input")
 
 
+def test_outline_research_needs_user_input_uses_concrete_model_questions() -> None:
+    controller = OutlineResearchLoopController(
+        broker=OutlineResearchContextBroker(repo_root=Path.cwd()),
+        model_adapter=_ScriptedResearchAdapter(),
+    )
+
+    decision = controller._validated_decision(
+        {
+            "decision_id": "needs-role-answer",
+            "status": "needs_user_input",
+            "blocking_gaps": [
+                {
+                    "gap": "模型还无法判断“顾迟”是新增人物还是已有角色的隐藏身份",
+                    "why_it_matters": "会影响人物档案、伏笔回收和高潮揭露节奏",
+                    "question": "“顾迟”是新增人物，还是已有角色的隐藏身份？如果是已有角色，请说明是谁。",
+                }
+            ],
+        }
+    )
+
+    assert decision.user_questions == ["“顾迟”是新增人物，还是已有角色的隐藏身份？如果是已有角色，请说明是谁。"]
+    assert decision.blocking_gaps == ["模型还无法判断“顾迟”是新增人物还是已有角色的隐藏身份"]
+
+
+def test_outline_research_rejects_abstract_needs_user_input_fallback() -> None:
+    controller = OutlineResearchLoopController(
+        broker=OutlineResearchContextBroker(repo_root=Path.cwd()),
+        model_adapter=_ScriptedResearchAdapter(),
+    )
+
+    with pytest.raises(ValueError, match="concrete user_questions"):
+        controller._validated_decision(
+            {
+                "decision_id": "bad-needs-input",
+                "status": "needs_user_input",
+                "blocking_gaps": ["缺少大纲规划所需的授权边界"],
+            }
+        )
+
+
+def test_outline_research_asks_for_missing_climax_plan_before_formal_outline(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path, adapter=_ScriptedResearchAdapter())
+    book_id = "book-climax-question"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        conn.commit()
+
+        packet = OutlineSeedPacket(
+            packet_id="packet-climax",
+            book_id=book_id,
+            user_intent={"desired_actions": ["继续调查旧案"]},
+            story_scale={"target_chapter_count": 3},
+            climax_input={
+                "analysis_status": "needs_user_input",
+                "user_questions": [
+                    "这 3 章里你希望重点详细刻画的高潮或关键转折是什么？如果没有高潮、只是过渡剧情，也可以直接说“没有高潮，本批次为过渡剧情”。"
+                ],
+            },
+        )
+        result = OutlineResearchLoopController(
+            broker=OutlineResearchContextBroker(repo_root=orchestrator.repo_root),
+            model_adapter=_ScriptedResearchAdapter(decisions=[SufficiencyDecision(decision_id="enough", status="enough")]),
+        ).run(conn, book_id=book_id, seed_packet=packet, budget=ResearchBudget(max_rounds=1))
+
+    assert result.sufficiency_decision.status == "needs_user_input"
+    assert result.sufficiency_decision.user_questions == [
+        "这 3 章里你希望重点详细刻画的高潮或关键转折是什么？如果没有高潮、只是过渡剧情，也可以直接说“没有高潮，本批次为过渡剧情”。"
+    ]
+
+
+def test_outline_research_accepts_user_no_climax_answer(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path, adapter=_ScriptedResearchAdapter())
+    book_id = "book-no-climax-answer"
+    question = "这 3 章里你希望重点详细刻画的高潮或关键转折是什么？"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        conn.commit()
+
+        packet = OutlineSeedPacket(
+            packet_id="packet-no-climax",
+            book_id=book_id,
+            user_intent={"desired_actions": ["整理线索和关系"]},
+            story_scale={"target_chapter_count": 3},
+            climax_input={"analysis_status": "needs_user_input", "user_questions": [question]},
+        )
+        result = OutlineResearchLoopController(
+            broker=OutlineResearchContextBroker(repo_root=orchestrator.repo_root),
+            model_adapter=_ScriptedResearchAdapter(decisions=[SufficiencyDecision(decision_id="enough", status="enough")]),
+        ).run(
+            conn,
+            book_id=book_id,
+            seed_packet=packet,
+            budget=ResearchBudget(max_rounds=1),
+            user_answers={question: "没有高潮部分，本批次章节为过渡剧情。"},
+        )
+
+    assert result.sufficiency_decision.status == "enough"
+    assert result.planning_notebook.confirmed_facts[0].fact_status == "user_authorized"
+
+
 def test_outline_research_model_adapter_logs_prompt_lengths_for_broker_selection(caplog: Any) -> None:
     model_client = _PromptLengthModelClient(
         {
@@ -472,6 +577,88 @@ def test_outline_seed_packet_is_index_level_and_not_full_memory(tmp_path: Path) 
     assert len(serialized["world_overview"]) <= 903
     assert "秘密档案" * 20 not in json.dumps(serialized["character_index"], ensure_ascii=False)
     assert "完整世界观" * 80 not in serialized["world_overview"]
+
+
+def test_outline_seed_packet_marks_latest_written_chapter_as_completed_anchor(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-continuation-boundary"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": book_id,
+                "path": "generated/chapter-0011.md",
+                "scope": "generated",
+                "title": "第十一章 已完成锚点",
+                "document_title": "第十一章 已完成锚点",
+                "document_title_index": 11,
+                "inferred_chapter_no": 11,
+                "content": "沈青已经完成上一段行动，下一章应写新的后续。",
+                "content_chars": 24,
+                "character_keywords": ["沈青"],
+                "content_tags": ["writer_generated", "user_accepted"],
+                "source_path": "generated/chapter-0011.md",
+                "source_file_name": "chapter-0011.md",
+                "source_start_offset": 0,
+                "source_end_offset": 24,
+                "ingestion_run_id": "run-1",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        intent = orchestrator.build_continuation_intent(
+            {
+                "desired_actions": ["继续最新已写回章节之后的剧情"],
+                "story_scale": {"target_chapter_count": 1},
+                "climax_plan": {"climax_mode": "none", "no_climax": True},
+            }
+        )
+        mentions = orchestrator.character_mention_extractor.extract({})
+        packet = OutlineSeedPacketBuilder(repo_root=orchestrator.repo_root).build(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            mentions=mentions,
+            resolutions=[],
+        )
+
+    serialized = packet.to_dict()
+    boundary = serialized["continuation_boundary"]
+    assert boundary["completed_anchor_document_title_index"] == 11
+    assert boundary["next_document_title_index"] == 12
+    assert boundary["completed_anchor_is_past_context"] is True
+    assert "不得重写" in serialized["current_continuation_anchor"]
+    assert "document_title_index=12" in boundary["instruction"]
+
+
+def test_model_sufficiency_prompt_forbids_questions_about_completed_anchor() -> None:
+    client = FakeWriterModelClient()
+    adapter = ModelOutlineResearchModelAdapter(model_client=client)
+    packet = OutlineSeedPacket(
+        packet_id="packet-1",
+        book_id="book-1",
+        user_intent={"desired_actions": ["继续最新章节之后的剧情"]},
+        story_scale={"target_chapter_count": 1},
+        climax_input={"climax_mode": "none", "no_climax": True},
+        current_continuation_anchor="第十章 已完成锚点",
+        continuation_boundary={
+            "completed_anchor_document_title_index": 10,
+            "next_document_title_index": 11,
+            "completed_anchor_is_past_context": True,
+        },
+    )
+
+    adapter.decide_sufficiency(seed_packet=packet, notebook=PlanningNotebook(notebook_id="nb-1"), budget_state={})
+
+    system_prompt, user_prompt = client.json_calls[-1]
+    assert "不得询问用户是否要详细描写" in system_prompt
+    assert "next_document_title_index" in system_prompt
+    assert "continuation_boundary" in user_prompt
 
 
 def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_path: Path) -> None:
@@ -702,7 +889,9 @@ def test_outline_research_loop_multi_round_budget_assumptions_and_blocked(tmp_pa
         _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
         conn.commit()
 
-        intent = orchestrator.build_continuation_intent({"desired_actions": ["追查旧案线索"]})
+        intent = orchestrator.build_continuation_intent(
+            {"desired_actions": ["追查旧案线索"], "climax_plan": {"no_climax": True, "climax_mode": "none"}}
+        )
         mentions = orchestrator.character_mention_extractor.extract({"desired_actions": ["沈青追查旧案线索"]})
         resolutions = orchestrator.character_mention_resolver.resolve(conn, book_id=book_id, mentions=mentions)
         seed = orchestrator.outline_seed_builder.build(
@@ -795,10 +984,14 @@ def test_workflow_needs_user_input_then_continues_without_unconfirmed_character_
         initial = workflow.prepare_planning(
             conn,
             run_id="run-user-input",
-            book_id=book_id,
-            product_mode="assist",
-            intent_payload={"major_characters": ["沈青", "顾迟"], "desired_actions": ["沈青追查旧案"]},
-        )
+                book_id=book_id,
+                product_mode="assist",
+                intent_payload={
+                    "major_characters": ["沈青", "顾迟"],
+                    "desired_actions": ["沈青追查旧案"],
+                    "climax_plan": {"no_climax": True, "climax_mode": "none"},
+                },
+            )
         continued = workflow.continue_after_outline_research_input(
             conn,
             run_id="run-user-input",
@@ -842,10 +1035,14 @@ def test_outline_research_missing_required_answer_does_not_fabricate_user_eviden
         initial = workflow.prepare_planning(
             conn,
             run_id="run-missing-answer",
-            book_id=book_id,
-            product_mode="assist",
-            intent_payload={"major_characters": ["沈青", "顾迟"], "desired_actions": ["沈青追查旧案"]},
-        )
+                book_id=book_id,
+                product_mode="assist",
+                intent_payload={
+                    "major_characters": ["沈青", "顾迟"],
+                    "desired_actions": ["沈青追查旧案"],
+                    "climax_plan": {"no_climax": True, "climax_mode": "none"},
+                },
+            )
         result = workflow.continue_after_outline_research_input(
             conn,
             run_id="run-missing-answer",
@@ -862,6 +1059,60 @@ def test_outline_research_missing_required_answer_does_not_fabricate_user_eviden
     notebook = _load_run_data(planner.run_writer, "run-missing-answer", "planning_notebook.json")
     assert [fact for fact in notebook["confirmed_facts"] if fact["fact_status"] == "user_authorized"] == []
     assert not (planner.run_writer.layout.run_dir("run-missing-answer") / "outline_research_answer_submission.json").exists()
+
+
+def test_outline_research_freeform_answer_can_satisfy_question_set(tmp_path: Path) -> None:
+    db, planner = _build_db_and_orchestrator(tmp_path, adapter=_AnswerAwareAdapter())
+    executor = RestrictedWriterExecutor(repo_root=planner.repo_root, run_writer=planner.run_writer)
+    workflow = WriterInteractiveWorkflow(
+        planner=planner,
+        executor=executor,
+        rollback_manager=WriterRollbackManager(run_writer=planner.run_writer),
+        run_writer=planner.run_writer,
+    )
+    book_id = "book-freeform-answer"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=planner.repo_root)
+        conn.commit()
+
+        initial = workflow.prepare_planning(
+            conn,
+            run_id="run-freeform-answer",
+            book_id=book_id,
+            product_mode="assist",
+            intent_payload={
+                "major_characters": ["沈青", "顾迟"],
+                "desired_actions": ["沈青追查旧案"],
+                "climax_plan": {"no_climax": True, "climax_mode": "none"},
+            },
+        )
+        question_set_path = planner.run_writer.layout.run_dir("run-freeform-answer") / "outline_research_question_set.json"
+        question_set_doc = json.loads(question_set_path.read_text(encoding="utf-8"))
+        question_set_doc["data"]["questions"].append(
+            {"question_id": "q2", "prompt": "下一章节奏偏快还是偏慢？", "required": True}
+        )
+        question_set_path.write_text(json.dumps(question_set_doc, ensure_ascii=False), encoding="utf-8")
+
+        continued = workflow.continue_after_outline_research_input(
+            conn,
+            run_id="run-freeform-answer",
+            book_id=book_id,
+            product_mode="assist",
+            question_set_id=initial["question_set"]["question_set_id"],
+            answer_text="下一章先确认人物关系，再用慢节奏推进调查。",
+            user_answers=[],
+        )
+
+    assert continued["character_requirement_report"]["named_new_characters"] == []
+    state = workflow.load_workflow_state(run_id="run-freeform-answer")
+    assert state["current_stage"] == "freeze_a_review"
+    submission = _load_run_data(planner.run_writer, "run-freeform-answer", "outline_research_answer_submission.json")
+    assert submission["answer_text"] == "下一章先确认人物关系，再用慢节奏推进调查。"
+    assert submission["user_answers"] == []
+    notebook = _load_run_data(planner.run_writer, "run-freeform-answer", "planning_notebook.json")
+    assert any(fact["fact_status"] == "user_authorized" for fact in notebook["confirmed_facts"])
 
 
 def test_proceed_with_assumptions_writes_formal_book_plan_assumptions(tmp_path: Path) -> None:
@@ -885,10 +1136,14 @@ def test_proceed_with_assumptions_writes_formal_book_plan_assumptions(tmp_path: 
         conn.commit()
         bundle = orchestrator.prepare_freeze_a(
             conn,
-            run_id="run-assumptions",
-            book_id=book_id,
-            intent_payload={"major_characters": ["沈青"], "desired_actions": ["追查旧案线索"]},
-        )
+                run_id="run-assumptions",
+                book_id=book_id,
+                intent_payload={
+                    "major_characters": ["沈青"],
+                    "desired_actions": ["追查旧案线索"],
+                    "climax_plan": {"no_climax": True, "climax_mode": "none"},
+                },
+            )
 
     assert bundle["book_continuation_plan"]["assumptions"][0]["fact_status"] == "assumption"
     assert "缺少低风险转场细节" in bundle["book_continuation_plan"]["open_questions"]

@@ -8,6 +8,21 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping
 
 
+def _range_text(values: list[Any]) -> str:
+    cleaned: list[int] = []
+    for value in values:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            cleaned.append(number)
+    unique = sorted(set(cleaned))
+    if not unique:
+        return ""
+    return str(unique[0]) if len(unique) == 1 else f"{unique[0]}-{unique[-1]}"
+
+
 @dataclass(frozen=True, slots=True)
 class RunEvent:
     kind: str
@@ -65,6 +80,8 @@ class RunEventStream:
             message = self._close_read_message(event)
         elif stage == "creative_kb":
             message = self._creative_kb_message(event)
+        elif stage == "narrative_scene_index":
+            message = self._narrative_scene_index_message(event)
         elif stage == "creative_kb_benchmark":
             message = self._creative_kb_benchmark_message(event)
         else:
@@ -128,6 +145,36 @@ class RunEventStream:
         if "creative_kb" in payload:
             return {"stage": "creative_kb", **dict(payload.get("creative_kb") or {})}
         return None
+
+    @staticmethod
+    def _narrative_scene_index_message(event: Mapping[str, Any]) -> str:
+        phase = str(event.get("phase") or "")
+        window_index = event.get("window_index")
+        total_windows = event.get("total_windows")
+        progress = ""
+        if window_index is not None and total_windows is not None:
+            progress = f"{window_index}/{total_windows}"
+        source_doc_ids = event.get("source_doc_ids")
+        doc_range = ""
+        if isinstance(source_doc_ids, list) and source_doc_ids:
+            doc_range = _range_text(source_doc_ids)
+        doc_text = f"（doc {doc_range}）" if doc_range else ""
+        if phase == "windows_ready":
+            return f"叙事场景索引已切分为 {total_windows or 0} 个窗口"
+        if phase == "window_start":
+            suffix = f" {progress}" if progress else ""
+            return f"正在生成叙事场景索引窗口{suffix}{doc_text}"
+        if phase == "window_done":
+            built_cards = event.get("built_cards")
+            accumulated_cards = event.get("accumulated_cards")
+            cards_text = f"，本窗口 {built_cards} 卡，累计 {accumulated_cards} 卡"
+            suffix = f" {progress}" if progress else ""
+            return f"叙事场景索引窗口完成{suffix}{cards_text}"
+        if phase == "persist_start":
+            return f"正在保存叙事场景索引，共 {event.get('built_cards', 0)} 卡"
+        if phase == "persist_done":
+            return f"叙事场景索引已保存，共 {event.get('built_cards', 0)} 卡"
+        return "叙事场景索引正在运行"
 
     @staticmethod
     def _creative_kb_benchmark_message(event: Mapping[str, Any]) -> str:

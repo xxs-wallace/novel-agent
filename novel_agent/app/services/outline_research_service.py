@@ -80,6 +80,147 @@ def _json_dict(value: object) -> dict[str, Any]:
     return {}
 
 
+def _clean_user_question_text(value: object) -> str:
+    text = _normalize_text(value)
+    text = re.sub(r"^请(?:补充)?确认[:：]\s*", "", text)
+    if text and not re.search(r"[？?。.!！]$", text):
+        text += "？"
+    return text
+
+
+def _is_generic_outline_question(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return True
+    compact = re.sub(r"\s+", "", normalized)
+    generic_fragments = {
+        "缺少大纲规划所需的授权边界",
+        "缺少授权边界",
+        "授权边界不足",
+        "信息不足",
+        "需要用户补充关键问题",
+    }
+    if any(fragment in compact for fragment in generic_fragments):
+        return True
+    if compact in {"请补充确认", "请补充", "请确认"}:
+        return True
+    return False
+
+
+def _question_from_blocking_gap(value: object) -> str:
+    if isinstance(value, Mapping):
+        for key in ("question", "prompt", "user_question", "ask_user"):
+            question = _clean_user_question_text(value.get(key))
+            if question and not _is_generic_outline_question(question):
+                return question
+        gap_text = _normalize_text(value.get("gap") or value.get("summary") or value.get("name"))
+    else:
+        gap_text = _normalize_text(value)
+
+    if not gap_text or _is_generic_outline_question(gap_text):
+        return ""
+    mention_match = re.search(r"人物提及未确认[:：]\s*(.+)$", gap_text)
+    if mention_match:
+        name = mention_match.group(1).strip(" “”，,。；;")
+        if name:
+            return f"“{name}”是否为新增人物？如果不是，请说明对应已有角色。"
+    if re.search(r"[？?]", gap_text) or re.search(r"(是否|能否|要不要|需不需要|可不可以)", gap_text):
+        return _clean_user_question_text(gap_text)
+    return ""
+
+
+def _normalize_decision_questions(data: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    raw_gaps = normalized.get("blocking_gaps") or []
+    gap_items: list[object] = []
+    if isinstance(raw_gaps, Sequence) and not isinstance(raw_gaps, (str, bytes)):
+        gap_items = list(raw_gaps)
+        gap_texts: list[str] = []
+        for item in raw_gaps:
+            if isinstance(item, Mapping):
+                text = _normalize_text(item.get("gap") or item.get("summary") or item.get("name") or item.get("question"))
+            else:
+                text = _normalize_text(item)
+            if text:
+                gap_texts.append(text)
+        normalized["blocking_gaps"] = gap_texts
+    raw_questions = normalized.get("user_questions") or normalized.get("questions") or []
+    questions: list[str] = []
+    if isinstance(raw_questions, Sequence) and not isinstance(raw_questions, (str, bytes)):
+        for item in raw_questions:
+            if isinstance(item, Mapping):
+                text = _clean_user_question_text(item.get("prompt") or item.get("question") or item.get("text"))
+            else:
+                text = _clean_user_question_text(item)
+            if text and not _is_generic_outline_question(text):
+                questions.append(text)
+            if len(questions) >= 3:
+                break
+
+    if not questions:
+        fallback_items = gap_items or list(normalized.get("blocking_gaps") or normalized.get("required_actions") or [])
+        for item in fallback_items:
+            text = _question_from_blocking_gap(item)
+            if text and text not in questions:
+                questions.append(text)
+            if len(questions) >= 3:
+                break
+
+    if questions:
+        normalized["user_questions"] = questions
+    return normalized
+
+
+def _has_user_authorized_climax_answer(notebook: PlanningNotebook) -> bool:
+    for fact in notebook.confirmed_facts:
+        if fact.fact_status != "user_authorized":
+            continue
+        claim = _normalize_text(fact.claim)
+        if re.search(r"高潮|转折|重点刻画|过渡剧情|没有高潮", claim):
+            return True
+    return False
+
+
+def _climax_question_from_seed(seed_packet: OutlineSeedPacket, notebook: PlanningNotebook) -> tuple[str, str] | None:
+    if _has_user_authorized_climax_answer(notebook):
+        return None
+    climax = seed_packet.climax_input if isinstance(seed_packet.climax_input, Mapping) else {}
+    if bool(climax.get("no_climax")) or str(climax.get("climax_mode") or "").strip().lower() in {
+        "none",
+        "no_climax",
+        "transition",
+    }:
+        return None
+    analysis_status = str(climax.get("analysis_status") or "").strip()
+    if analysis_status == "needs_user_input":
+        questions = [
+            _clean_user_question_text(item)
+            for item in (climax.get("user_questions") or [])
+            if _clean_user_question_text(item)
+        ]
+        if questions:
+            return ("高潮设想需要用户补充", questions[0])
+
+    has_climax_detail = any(
+        _normalize_text(climax.get(key))
+        for key in ("conflict_climax", "emotional_climax", "payoff_expectation", "climax_notes")
+    )
+    has_target_position = _normalize_text(climax.get("target_chapter_index")).strip("0") != ""
+    if has_climax_detail and not has_target_position:
+        return (
+            "高潮章节位置未确认",
+            "你希望这个高潮或关键转折靠近哪一章？如果其实没有高潮、只是过渡剧情，也可以直接说明。",
+        )
+    if not has_climax_detail and analysis_status in {"", "needs_model"}:
+        count = int((seed_packet.story_scale or {}).get("target_chapter_count") or 0)
+        scope = f"这 {count} 章" if count > 0 else "这批续写"
+        return (
+            "高潮设想未确认",
+            f"{scope}里你希望重点详细刻画的高潮或关键转折是什么？如果没有高潮、只是过渡剧情，也可以直接说“没有高潮，本批次为过渡剧情”。",
+        )
+    return None
+
+
 def _tokenize_query(text: str) -> list[str]:
     tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", _normalize_text(text))
     cleaned: list[str] = []
@@ -274,9 +415,10 @@ class OutlineSeedPacketBuilder:
             self.repo_root / ".memory" / "structure_patterns" / f"{book_id}.arc_pattern_cards.json",
         ]
         try:
-            last_doc = self.documents_repo.fetch_last_document(conn, book_id=book_id)
+            last_doc = self.documents_repo.fetch_latest_title_document(conn, book_id=book_id)
         except sqlite3.OperationalError:
             last_doc = None
+        boundary = self._continuation_boundary(last_doc)
 
         return OutlineSeedPacket(
             packet_id=f"{book_id}-outline-seed",
@@ -299,11 +441,14 @@ class OutlineSeedPacketBuilder:
             ]
             + self._event_summary_index(event_summary_path, book_id=book_id),
             current_continuation_anchor=(
-                f"{last_doc.document_title or last_doc.title or last_doc.path}: "
+                f"已完成锚点，不得重写或要求用户决定其写法；下一章从 "
+                f"document_title_index={last_doc.document_title_index + 1} 及之后开始。"
+                f"\n{last_doc.document_title or last_doc.title or last_doc.path}: "
                 f"{_safe_excerpt(last_doc.content, limit=220)}"
                 if last_doc is not None
                 else ""
             ),
+            continuation_boundary=boundary,
             optional_open_thread_index=self._open_thread_index(outline_text),
             source_arc_index=self._source_arc_index(source_arc_path),
             structure_pattern_index=self._structure_pattern_index(pattern_paths),
@@ -343,6 +488,40 @@ class OutlineSeedPacketBuilder:
                 ),
             ],
         )
+
+    @staticmethod
+    def _continuation_boundary(last_doc: Any | None) -> dict[str, Any]:
+        if last_doc is None:
+            return {
+                "mode": "start_from_available_memory",
+                "completed_anchor_document_title_index": 0,
+                "next_document_title_index": 1,
+                "completed_anchor_is_past_context": True,
+                "instruction": (
+                    "没有可用的已完成章节锚点；大纲研究可以从现有 Memory 的起点规划续写。"
+                ),
+            }
+        anchor_index = int(getattr(last_doc, "document_title_index", 0) or 0)
+        return {
+            "mode": "continue_after_latest_written_chapter",
+            "completed_anchor_document_title_index": anchor_index,
+            "completed_anchor_document_title": str(
+                getattr(last_doc, "document_title", None)
+                or getattr(last_doc, "title", None)
+                or getattr(last_doc, "path", "")
+                or ""
+            ),
+            "completed_anchor_scope": str(getattr(last_doc, "scope", "") or ""),
+            "completed_anchor_doc_id": int(getattr(last_doc, "doc_id", 0) or 0),
+            "next_document_title_index": anchor_index + 1,
+            "completed_anchor_is_past_context": True,
+            "forbidden_question_scope": "completed_anchor_chapter_writing_intent",
+            "instruction": (
+                f"document_title_index={anchor_index} 是已经完成并写入 Memory 的过去剧情锚点。"
+                f"本轮大纲研究必须从 document_title_index={anchor_index + 1} 及之后规划；"
+                "不得询问用户是否要详细描写、改写或重新决定已完成锚点章节。"
+            ),
+        }
 
     def _asset_path(self, assets: sqlite3.Row | None, field_name: str) -> Path | None:
         if assets is None:
@@ -1706,6 +1885,9 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                 "你是大纲研究 Agent。只返回 JSON。基于轻量 seed、notebook 和上一轮结果，"
                 "提出下一轮 research requests。请求类型只能是 story_detail、character_profile、world_concept、structure_pattern。"
                 "不要编造本地资料中不存在的事实。"
+                "如果 seed_packet.continuation_boundary 指出 completed_anchor_document_title_index，"
+                "该章节只是已完成的过去剧情锚点；本轮只能研究 next_document_title_index 及之后如何续写，"
+                "不得把锚点章节当作当前待写章节。"
             ),
             payload={
                 "seed_packet": seed_packet.to_dict(),
@@ -1748,12 +1930,32 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             system_prompt=(
                 "你是大纲研究 Sufficiency Gate。只返回 JSON。判断现有 evidence 是否足够生成大纲。"
                 "高风险缺口必须 needs_user_input 或 blocked，不得伪造用户答案。"
+                "如果 seed_packet.continuation_boundary 指出 completed_anchor_document_title_index，"
+                "该章节已经完成并写入 Memory，只能作为过去上下文；"
+                "needs_user_input 的问题必须面向 next_document_title_index 及之后的续写选择，"
+                "不得询问用户是否要详细描写、改写、重写或重新决定已完成锚点章节。"
+                "当 status=needs_user_input 时，必须返回 user_questions，且每个问题都要像作者对话一样具体、"
+                "可直接展示给用户：点名相关角色、设定、关系推进或剧情选择，并说明需要用户决定什么。"
+                "不要返回“缺少授权边界”“缺少大纲规划信息”“请补充确认”这类抽象内部文案。"
             ),
             payload={
                 "seed_packet": seed_packet.to_dict(),
                 "planning_notebook": notebook.to_dict(),
                 "budget_state": dict(budget_state),
                 "allowed_status": ["enough", "needs_user_input", "proceed_with_assumptions", "blocked"],
+                "needs_user_input_schema": {
+                    "status": "needs_user_input",
+                    "blocking_gaps": [
+                        {
+                            "gap": "模型还无法判断“角色名”是新增人物还是已有角色的隐藏身份",
+                            "why_it_matters": "会影响人物档案、伏笔回收和高潮揭露节奏",
+                            "question": "“角色名”是新增人物，还是已有角色的隐藏身份？如果是已有角色，请说明是谁。",
+                        }
+                    ],
+                    "user_questions": [
+                        "“角色名”是新增人物，还是已有角色的隐藏身份？如果是已有角色，请说明是谁。"
+                    ],
+                },
             },
             fallback=fallback,
         )
@@ -1971,6 +2173,11 @@ class OutlineResearchLoopController:
                 budget_state=budget_state,
             )
         )
+        decision = self._with_seed_required_user_questions(
+            seed_packet=seed_packet,
+            notebook=notebook,
+            decision=decision,
+        )
         if decision.status == "proceed_with_assumptions":
             for assumption in decision.assumptions:
                 if assumption not in notebook.assumptions:
@@ -2097,18 +2304,17 @@ class OutlineResearchLoopController:
         if isinstance(item, SufficiencyDecision):
             return item
         item = self._normalize_sufficiency_decision_status(item)
+        if str(item.get("status") or "") == "needs_user_input":
+            item = _normalize_decision_questions(item)
         try:
             return SufficiencyDecision.from_dict(item)
         except ValueError as exc:
             data = dict(item)
             if data.get("status") == "needs_user_input" and not data.get("user_questions"):
-                gaps = [
-                    str(value)
-                    for value in (data.get("blocking_gaps") or data.get("required_actions") or ["缺少大纲规划所需的授权边界"])
-                    if str(value).strip()
-                ]
-                data["user_questions"] = [f"请补充确认：{gap}" for gap in gaps[:3]]
-                return SufficiencyDecision.from_dict(data)
+                raise ValueError(
+                    "needs_user_input decisions must include concrete user_questions for the author; "
+                    "do not expose abstract authorization-boundary fallback text"
+                ) from exc
             if data.get("status") == "proceed_with_assumptions" and not data.get("assumptions"):
                 data["assumptions"] = [
                     {
@@ -2133,8 +2339,6 @@ class OutlineResearchLoopController:
             if data.get("assumptions"):
                 data["status"] = "proceed_with_assumptions"
                 return data
-            data["status"] = "needs_user_input"
-            data.setdefault("user_questions", ["请补充确认：缺少大纲规划所需的授权边界"])
             return data
         status_aliases = {
             "sufficient": "enough",
@@ -2165,3 +2369,31 @@ class OutlineResearchLoopController:
         data = dict(item)
         data["status"] = normalized_status
         return data
+
+    def _with_seed_required_user_questions(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        notebook: PlanningNotebook,
+        decision: SufficiencyDecision,
+    ) -> SufficiencyDecision:
+        if decision.status == "blocked":
+            return decision
+        climax_question = _climax_question_from_seed(seed_packet, notebook)
+        if climax_question is None:
+            return decision
+
+        gap, question = climax_question
+        if question in decision.user_questions:
+            return decision
+        data = decision.to_dict()
+        data["status"] = "needs_user_input"
+        gaps = list(decision.blocking_gaps)
+        if gap not in gaps:
+            gaps.append(gap)
+        questions = list(decision.user_questions)
+        if question not in questions:
+            questions.append(question)
+        data["blocking_gaps"] = gaps[:3]
+        data["user_questions"] = questions[:3]
+        return SufficiencyDecision.from_dict(data)

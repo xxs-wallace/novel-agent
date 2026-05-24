@@ -225,11 +225,13 @@ def test_narrative_scene_indexer_builds_persists_and_facade_searches_scene_cards
 
         model_client = FakeSceneModelClient()
         scene_indexer = NarrativeSceneIndexerService(repo_root=tmp_path, window_chars_budget=1000)
+        progress_events: list[dict[str, Any]] = []
         cards = scene_indexer.build_scene_cards(
             conn,
             book_id="book-1",
             model_client=model_client,
             persist=True,
+            progress_callback=lambda event: progress_events.append(dict(event)),
         )
 
         facade = NarrativeIndexFacade(repo_root=tmp_path)
@@ -255,6 +257,13 @@ def test_narrative_scene_indexer_builds_persists_and_facade_searches_scene_cards
     assert result.candidate_cards
     assert result.candidate_cards[0].card.card_type == "narrative_scene"
     assert result.raw_read_recommendations[0]["card_type"] == "narrative_scene"
+    assert [event["phase"] for event in progress_events] == [
+        "windows_ready",
+        "window_start",
+        "window_done",
+        "persist_start",
+        "persist_done",
+    ]
 
 
 def test_narrative_index_facade_searches_memory_world_and_creative_cards(tmp_path: Path) -> None:
@@ -369,3 +378,35 @@ def test_narrative_inquiry_broker_resolves_narrative_scene_card_search(tmp_path:
     assert bundle.evidence_items
     assert bundle.evidence_items[0]["card_type"] == "narrative_scene"
     assert bundle.source_doc_ids == [1, 2]
+
+
+def test_narrative_inquiry_broker_story_detail_can_return_outline_segments_without_selector(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "broker-outline-segment.db")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _insert_documents(conn)
+        _upsert_chapter(conn)
+        conn.commit()
+
+        broker = NarrativeInquiryBroker(repo_root=tmp_path)
+        request = NarrativeInquiryRequest(
+            request_id="req-outline-segment",
+            request_type="story_detail",
+            query="卡塞尔邀请如何打开主线",
+            purpose="为评审目标大纲的剧情承接提供历史剧情压缩证据",
+            priority="high",
+            expected_depth="outline_segment",
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-1",
+            request=request,
+            budget=AnalyzerBudget(max_evidence_chars_per_request=500),
+        )
+
+    assert bundle.status == "found"
+    assert bundle.evidence_items[0]["page_type"] == "outline_segment"
+    assert bundle.evidence_items[0]["memory_query_protocol"] == "outline_segment_scan"
+    assert bundle.source_doc_ids == [1, 2]
+    assert any(item["operation"] == "narrative_inquiry_outline_segment_scan" for item in bundle.trace)

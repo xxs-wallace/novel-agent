@@ -26,19 +26,10 @@ class ArtifactTreeService:
     )
 
     _WRITER_ITEMS = (
-        ("续写概览", "writer_run", "run_overview", "workflow_state.json"),
-        ("写作目标", "writer_artifact", "continuation_intent", "continuation_intent.json"),
-        ("大纲研究结果", "writer_stage", "outline_research", "sufficiency_decision.json"),
-        ("问题集", "writer_artifact", "outline_questions", "outline_research_question_set.json"),
-        ("大纲研究笔记", "writer_artifact", "planning_notebook", "planning_notebook.json"),
-        ("检索轨迹", "writer_artifact", "research_trace", "outline_research_trace.json"),
-        ("全书续写规划", "writer_artifact", "book_plan", "book_continuation_plan.json"),
-        ("本批剧情大纲", "writer_artifact", "batch_plan", "batch_plan.json"),
-        ("章节标题与梗概", "writer_artifact", "chapter_package", "chapter_package.json"),
-        ("章节写作指导", "writer_artifact", "writing_guidance", "chapter_writing_guidance.json"),
-        ("正文草稿", "draft", "draft", "draft.md"),
-        ("草稿决策", "writer_artifact", "generation_review", "generation_review_decision.json"),
-        ("写回摘要", "writeback", "writeback", "memory_writeback.json"),
+        ("用户原始输入", "writer_artifact", "continuation_intent", "continuation_intent.json"),
+        ("生成出来的大纲", "writer_artifact", "book_plan", "book_continuation_plan.json"),
+        ("接下来要写的梗概", "writer_artifact", "chapter_package", "chapter_package.json"),
+        ("草稿正文", "draft", "draft", "draft.md"),
     )
 
     _WRITER_STAGE_ORDER = {
@@ -353,14 +344,7 @@ class ArtifactTreeService:
         return runs
 
     def _writer_run_label(self, *, run_dir: Path, state: Mapping[str, Any], index: int) -> str:
-        chapter_title = self._writer_chapter_title(run_dir)
-        if chapter_title:
-            return chapter_title
-        if (run_dir / "draft.md").exists():
-            return f"续写草稿 {index}"
-        if (run_dir / "chapter_package.json").exists():
-            return f"章节规划 {index}"
-        return f"续写记录 {index}"
+        return "续写任务" if index == 1 else f"续写任务 {index}"
 
     def _writer_chapter_title(self, run_dir: Path) -> str:
         for name in ("chapter_brief.json", "chapter_execution_input.json"):

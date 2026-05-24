@@ -230,6 +230,7 @@ class CharacterRelationshipOutput:
     relation_type: str
     sentiment_state: str
     status_summary: str
+    address_terms: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

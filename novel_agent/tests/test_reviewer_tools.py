@@ -5,14 +5,19 @@ from pathlib import Path
 
 from novel_agent.app.reviewer.target_resolver import ReviewTargetResolver
 from novel_agent.app.reviewer.tools import ReviewerArtifactTool, ReviewerKBTool, ReviewerMemoryTool
-from novel_agent.app.schemas.creative_kb_schema import CreativeKBRetrievalResult, ExpandedReferenceFragment, RerankResult
+from novel_agent.app.schemas.creative_kb_schema import (
+    CreativeKBRetrievalResult,
+    ExpandedReferenceFragment,
+    RerankResult,
+)
+from novel_agent.app.schemas.narrative_inquiry_schema import AnalyzerBudget, EvidenceBundle, NarrativeInquiryRequest
 from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget, MemoryQueryState
 from novel_agent.app.schemas.reviewer_schema import (
     ReviewBudget,
     ReviewContextPolicy,
+    ReviewerToolCall,
     ReviewRequest,
     ReviewTarget,
-    ReviewerToolCall,
 )
 
 
@@ -59,6 +64,42 @@ class _FakeRetrievalFacade:
         )
 
 
+class _FakeInquiryBroker:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def resolve_requests(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        requests: list[NarrativeInquiryRequest],
+        budget: AnalyzerBudget,
+    ) -> tuple[list[EvidenceBundle], dict[str, int]]:
+        self.calls.append({"book_id": book_id, "requests": requests, "budget": budget})
+        return (
+            [
+                EvidenceBundle(
+                    request_id=requests[0].request_id,
+                    request_type=requests[0].request_type,
+                    query=requests[0].query,
+                    evidence_items=[{"card_id": "scene-card-1", "card_type": "narrative_scene", "summary": "关键场景"}],
+                    sources=[{"card_id": "scene-card-1", "card_type": "narrative_scene"}],
+                    trace=[{"operation": "narrative_index_search", "consumer": "reviewer"}],
+                ),
+                EvidenceBundle(
+                    request_id=requests[1].request_id,
+                    request_type=requests[1].request_type,
+                    query=requests[1].query,
+                    evidence_items=[{"page_id": "outline-segment-1", "page_type": "outline_segment", "summary": "连续剧情压缩"}],
+                    sources=[{"path": "memory:outline_segment:outline-segment-1", "type": "outline_segment"}],
+                    trace=[{"operation": "narrative_inquiry_outline_segment_scan"}],
+                ),
+            ],
+            {"total_requests_used": 2, "raw_requests_used": 0},
+        )
+
+
 def _tool_call(tool: str) -> ReviewerToolCall:
     return ReviewerToolCall(
         tool_call_id=f"call-{tool}",
@@ -68,9 +109,9 @@ def _tool_call(tool: str) -> ReviewerToolCall:
     )
 
 
-def test_reviewer_memory_tool_uses_narrative_memory_query_service() -> None:
-    fake_service = _FakeMemoryQueryService()
-    tool = ReviewerMemoryTool(query_service=fake_service)  # type: ignore[arg-type]
+def test_reviewer_memory_tool_uses_narrative_inquiry_broker_scene_cards_and_outline_segments() -> None:
+    fake_broker = _FakeInquiryBroker()
+    tool = ReviewerMemoryTool(inquiry_broker=fake_broker)  # type: ignore[arg-type]
     conn = sqlite3.connect(":memory:")
 
     result = tool.query(
@@ -82,9 +123,11 @@ def test_reviewer_memory_tool_uses_narrative_memory_query_service() -> None:
     )
 
     assert result.status == "success"
-    assert fake_service.calls[0]["query"] == "人物关系状态"
-    assert result.evidence_items[0]["id"] == "event-summary-1"
-    assert any(item["operation"] == "root_scan" for item in result.trace)
+    request_types = [request.request_type for request in fake_broker.calls[0]["requests"]]  # type: ignore[index]
+    assert request_types == ["narrative_scene_card_search", "story_detail"]
+    assert result.evidence_items[0]["evidence"]["card_id"] == "scene-card-1"
+    assert result.evidence_items[1]["evidence"]["page_type"] == "outline_segment"
+    assert any(item["operation"] == "narrative_inquiry_outline_segment_scan" for item in result.trace)
 
 
 def test_reviewer_memory_tool_blocks_unauthorized_memory_query() -> None:
