@@ -3,13 +3,13 @@
 ## Reading Rules
 
 - `spec.md` 与 `design.md` 现在主要作为总览和索引页使用；做具体任务时，优先只读任务下方标注的文档。
-- 只有涉及用户草稿决策对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
+- 只有涉及用户草稿决策、Draft Research 决策或 DraftRewritePlan 对象时才读 [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)。
 - 只有涉及跨层输入对象时才读 [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)。
 - 当前尚未拆出的规划域与人物补充域，暂时继续以 [spec.md](.trae/specs/writer-agent-layered-generation/spec.md) 和 [design.md](.trae/specs/writer-agent-layered-generation/design.md) 为主。
 - 涉及 terminal 展示、artifact review gate、用户草稿决策与恢复时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
-- 涉及正文草稿审阅、`draft.md` 预览和草稿决策分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
+- 涉及 Draft Research Loop、Draft Prose Executor、正文草稿审阅、`draft.md` 预览和草稿决策分支时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)。
 - 涉及 `NarrativeStructurePattern` / `ArcPatternCard` 如何进入 Writer 输入，或 `SourceArcMap` 如何作为源作品定位事实可选进入上下文时，优先读 [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md) 与 [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)。
-- 本文件中部分已完成历史任务仍记录旧流程实现状态；新增实现必须以当前 `spec.md` / `design.md` / `contracts.md` 的 Agent Loop 与 artifact review gate 语义为准，旧式独立长度确认和写作材料确认由 Group L 负责迁移移除。
+- 本文件中部分已完成历史任务仍记录旧流程实现状态；新增实现必须以当前 `spec.md` / `design.md` / `contracts.md` 的 Agent Loop 与 artifact review gate 语义为准，旧式独立长度确认、写作材料确认和固定 prompt 草稿正文 Writer 由 Group L / Group M 负责迁移移除。
 
 ## Group A: 主总览 / 待拆分规划域
 
@@ -99,17 +99,17 @@
   - [ ] 支持退回批次层重规划
 
 - [ ] Task 7A: 建立章节梗概通过后的 WritingGuidance 内部组装层
-  - `来源`: 当前 `spec.md` / `design.md` 中 `ChapterPackage review -> supplement_text -> chapter writing guidance -> draft generation` 的 Agent Loop 要求
+  - `来源`: 当前 `spec.md` / `design.md` 中 `ChapterPackage review -> supplement_text -> Draft Research Loop -> Draft Prose Executor` 的 Agent Loop 要求
   - `建议只读`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
   - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [ ] 定义 `ChapterWritingGuidance` 与单章 `ChapterLengthBudget` 运行时 schema，明确其为内部派生产物而非独立用户确认节点
   - [ ] 在用户通过 `ChapterPackage` / `ChapterBrief` review gate 后，收集并落盘原始 `supplement_text`
-  - [ ] 基于章节梗概、用户补充、上游规划、Memory / KB evidence 和风格参考生成 `chapter_writing_guidance.json`
+  - [ ] 基于章节梗概、用户补充、上游规划、Draft Research Loop evidence 和风格参考生成 `chapter_writing_guidance.json`
   - [ ] 内部输出默认章节长度、重点展开段落、节奏偏好、风格要求与禁止项
-  - [ ] 将 `chapter_writing_guidance.json` 与 `chapter_length_budget.json` 装配进 `chapter_execution_input.json`
-  - [ ] 正文执行 prompt 消费已通过章节 brief、用户补充原文和派生写作指导，而不是临时猜测目标长度或风格
+  - [ ] 将 `draft_context_notebook.json`、`chapter_writing_guidance.json` 与 `chapter_length_budget.json` 装配进 `chapter_execution_input.json`
+  - [ ] Draft Prose Executor prompt 消费已通过章节 brief、用户补充原文、Draft Research Loop 笔记和派生写作指导，而不是临时猜测目标长度或风格
   - [ ] 不再在 Assist / Batch 模式下进入独立长度确认或写作材料确认主状态
-  - [ ] 增加 `ChapterPackage approved + supplement_text -> writing guidance -> draft generation` 的最小流程测试
+  - [ ] 增加 `ChapterPackage approved + supplement_text -> Draft Research Loop -> writing guidance -> draft generation` 的最小流程测试
   - [ ] 增加用户在 `supplement_text` 中提出字数 / 风格要求后被写入 prompt 输入的回归测试
 
 - [x] Task 13: 支持三种产品模式
@@ -147,8 +147,9 @@
   - [ ] 在 `WriterInputBundle` 或结构参考输入中装配相关 `NarrativeStructurePattern` / `ArcPatternCard` 片段，包含 `pattern_id`、结构功能、节奏类型、过渡功能、铺垫目标与回收目标
   - [ ] 在需要源作品定位时，可在事实上下文中装配相关 `SourceArcMap` 片段，包含 `source_arc_id`、`source_arc_role`、源作品阶段定位与未回收线索
 
-- [x] Task 9: 重构 Writer Agent 为“受限执行器”
+- [x] Task 9: 历史任务：将旧正文层约束为“受限执行器”
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [novel-continuation-mvp/contracts.md](.trae/specs/novel-continuation-mvp/contracts.md)
+  - `备注`: 该任务记录旧固定 prompt 正文 Writer 的已完成约束；新流程由 Group M 的 Draft Research Loop + Draft Prose Executor 替代主路径。
   - [x] 将正文层改为只消费冻结 brief
   - [x] 禁止正文层直接补大型设定
   - [x] 禁止正文层跳过关系桥接
@@ -161,7 +162,7 @@
   - `建议只读`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [writer-agent-layered-generation/contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
   - [x] 复用并扩展 `ContinuityReport`
   - [x] 提取 `StateDelta`
-  - [x] 回写人物状态、关系状态、时间线事件、世界状态
+  - [x] 回写人物状态、关系状态、剧情时间线 / 关键经历更新、世界状态
   - [x] 标记本章是否成为可继续消费的 canon
   - [x] 当计划角色首次正式登场并通过校验后，将其转写为正式 Character Memory
 
@@ -591,13 +592,13 @@
   - `来源`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md) 的 `Story Detail Resolver`
   - `建议只读`: [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md), [narrative-memory-context/spec.md](.trae/specs/narrative-memory-context/spec.md)
   - `建议只关注代码文件`: `novel_agent/app/services/outline_service.py`, `novel_agent/app/repos/`, `novel_agent/app/runner/close_read_runner.py`, `novel_agent/tests/test_writer_outline_research.py`
-  - [x] 定义最低可用的 `ChapterSummaryIndex`，每条摘要保存人物、概念、事件概要、结果和 source document 位置
-  - [x] 设计可升级的 `HistoricalOutlineEventIndex` 事件卡结构
-  - [x] 实现 query understanding，将 `story_detail.query` 解析为人物、概念、事件意图、时间提示和 facts facets
-  - [x] 使用章节摘要 / 事件卡检索候选
-  - [x] 对候选事件执行 rerank，返回 matches、confidence、covered_facets、missing_facets
+  - [x] 定义最低可用的 `ChapterSummaryIndex`，每条摘要保存人物、概念、剧情概要、结果和 source document 位置
+  - [x] 设计可升级到 Narrative Memory `outline_root / segment_group -> outline_segment -> chapter -> document` 的剧情段落索引结构
+  - [x] 实现 query understanding，将 `story_detail.query` 解析为人物、概念、剧情细节意图、时间提示和 facts facets
+  - [x] 使用章节摘要 / outline segment 候选检索
+  - [x] 对候选剧情段落执行 rerank，返回 matches、confidence、covered_facets、missing_facets
   - [x] 只展开高相关候选的详细材料
-  - [x] 增加测试覆盖“最近一次信任冲突”“某伏笔来源”“某事件结果”等自然语言 query
+  - [x] 增加测试覆盖“最近一次信任冲突”“某伏笔来源”“某段剧情结果”等自然语言 query
 
 - [x] Task 52: 实现 Outline Research Loop 控制器与预算门禁
   - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
@@ -653,7 +654,7 @@
   - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/repos/`, `novel_agent/tests/test_writer_outline_research.py`
   - [ ] `story_detail` 不再用一次性 historical outline rerank 作为主路径，而是调用 `NarrativeMemoryQueryService`
   - [ ] Context Broker 只做 facade、预算、去重和 evidence 归一化，不保存新的 canon Memory
-  - [ ] 支持 event_summary -> event -> chapter -> document 的逐层候选返回
+  - [ ] 支持 `segment_group / outline_root -> outline_segment -> chapter -> document` 的逐层候选返回
   - [ ] 返回 `StoryDetailResult` 时包含最终 evidence、source ids、status、`memory_query_trace`
   - [ ] 保留旧 resolver 作为缺少 BTree index 的兼容 fallback，并在 trace 中标记 fallback reason
 
@@ -778,19 +779,20 @@
 
 - [ ] Task 66: 重构章节梗概通过后的正文准备链路
   - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
-  - `依赖`: Task 7A, Task 65
+  - `依赖`: Task 7A, Task 65, Task 75, Task 76
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
-  - [ ] `ChapterPackage` / `ChapterBrief` 通过后直接组装 `chapter_writing_guidance.json` 与 `chapter_execution_input.json`
+  - [ ] `ChapterPackage` / `ChapterBrief` 通过后先组装 `draft_seed_packet.json` 并运行 Draft Research Loop
+  - [ ] Draft Research Loop 完成后组装 `draft_context_notebook.json`、`chapter_writing_guidance.json` 与 `chapter_execution_input.json`
   - [ ] 字数、风格、节奏和重点展开要求从 `supplement_text` 进入正文 prompt
   - [ ] 不再要求用户单独审阅长度计划或写作材料后才生成正文
-  - [ ] 测试覆盖通过章节梗概后直接进入正文生成准备
+  - [ ] 测试覆盖通过章节梗概后进入 Draft Research Loop，再进入 Draft Prose Executor
 
 - [ ] Task 67: 重构章节草稿决策分支
   - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
-  - `依赖`: Task 64, Task 66
+  - `依赖`: Task 64, Task 66, Task 77
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/cli/decisions.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [ ] 将 `GenerationReviewDecision` 分支对齐为 `accepted / rewrite_requested / replan_requested / discarded`
-  - [ ] `rewrite_requested` 使用用户反馈和当前已通过 brief 重写正文，不正式回写
+  - [ ] `rewrite_requested` 先运行 Draft Research Loop，生成 `draft_rewrite_plan.json` 后再决定重写或回章节梗概 review
   - [ ] `replan_requested` 使用用户反馈修订章节梗概，并回到章节梗概 review gate
   - [ ] 字数不足、风格不符和节奏问题都通过 `feedback_text` 交给 Agent Loop，而不是进入独立长度分支
   - [ ] 测试覆盖不接受草稿不会写回、accepted-only writeback 仍成立
@@ -805,12 +807,13 @@
   - [ ] 技术详情继续保留 raw stage、artifact path、run id 和 action payload
 
 - [ ] Task 69: Agent Loop 简化流程验收测试
-  - `来源`: Group L
-  - `依赖`: Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74
+  - `来源`: Group L / Group M
+  - `依赖`: Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74, Task 75, Task 76, Task 77, Task 78
   - `建议只关注代码文件`: `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_web_action_service.py`, `novel_agent/tests/test_run_interactive_pipeline.py`
   - [ ] 测试用户通过章节梗概并输入补充信息后，补充原文进入正文输入
+  - [ ] 测试章节正文生成前先落盘 `draft_seed_packet.json`、`draft_context_notebook.json` 和 `draft_research_trace.json`
   - [ ] 测试用户拒绝章节梗概后，模型修订 artifact 并回到同一 review gate
-  - [ ] 测试用户不接受草稿时不会触发正式写回
+  - [ ] 测试用户不接受草稿时先生成 `draft_rewrite_plan.json`，不会触发正式写回
   - [ ] 测试普通聊天消息不会绕过 `needs_user_input`
   - [ ] 测试 Web / CLI 主状态不展示内部技术字段
 
@@ -818,7 +821,7 @@
   - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md) 的核心流程
   - `依赖`: Task 64
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/tests/test_writer_execution_workflow.py`
-  - [ ] 定义 `WriterLoopEvent` / `WriterLoopStep` 或等价内部对象，覆盖 local tool call、user question、artifact generated、artifact review、draft review、writeback review
+  - [ ] 定义 `WriterLoopEvent` / `WriterLoopStep` 或等价内部对象，覆盖 local tool call、user question、artifact generated、artifact review、draft research、draft execution、draft review、writeback review
   - [ ] Agent Loop 每一步都能落盘 trace，供恢复和 debug 使用
   - [ ] 模型返回信息不足时只允许走结构化 tool call：本地查询或 `WriterQuestionSet`
   - [ ] 普通用户消息只能成为下一轮 prompt 输入或 review feedback，不得直接改 workflow state
@@ -830,6 +833,7 @@
   - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [ ] `approved + supplement_text` 组装为下一阶段模型输入，包含 artifact 摘要、上游约束、planning notebook 和用户补充原文
   - [ ] `revision_requested + revision_feedback` 组装为 artifact 修订 prompt，要求模型输出同类型 artifact
+  - [ ] `rewrite_requested + feedback_text` 组装为 Draft Research Loop 输入，不得直接拼接进 Draft Prose Executor prompt
   - [ ] 修订 prompt 不允许 Web / CLI 直接拼接；只能由 Writer 层统一装配
   - [ ] 模型修订后必须重新校验 schema、保存新版 artifact、回到同一 review gate
   - [ ] 测试覆盖用户补充进入下一阶段 prompt、用户反馈进入修订 prompt、修订后不自动继续
@@ -859,18 +863,68 @@
   - `依赖`: Task 67, Task 72, Task 73
   - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/runs/writer.py`, `novel_agent/tests/test_writer_execution_workflow.py`
   - [ ] 新 contract 不再要求 `LengthPlanUpdate` / `ChapterReplanRequest` 作为正式跨层对象
-  - [ ] 如保留旧 schema，必须标记为 legacy / migration-only，不进入新流程主路径
-  - [ ] runs 写入目标更新为 `artifact_review_decision.json`、`user_supplement.json`、`chapter_writing_guidance.json`
+  - [ ] 如保留旧 schema 或旧固定 prompt 草稿 Writer，必须标记为 legacy / migration-only，不进入新流程主路径
+  - [ ] runs 写入目标更新为 `artifact_review_decision.json`、`user_supplement.json`、`draft_seed_packet.json`、`draft_context_notebook.json`、`chapter_writing_guidance.json`
   - [ ] 测试覆盖旧 artifact 存在时不会被误当作新流程主决策
+
+## Group M: Draft Research Loop And Draft Prose Executor
+
+- [ ] Task 75: 定义 Draft Research Loop schema 与状态出口
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 定义 `DraftSeedPacket`，只携带已通过 brief、用户补充、上游摘要、最近章节梗概、人物索引、关系门禁、禁止项和可查询资源目录
+  - [ ] 定义 `DraftResearchDecision`，覆盖 `ready_for_draft / needs_user_input / replan_requested / blocked`
+  - [ ] 定义 `DraftContextNotebook`，包含 character/story/scene/world/style notes、unresolved risks 和 evidence trace
+  - [ ] Draft Research Loop 输出 `needs_user_input` 时必须绑定结构化问题集，普通聊天消息不得绕过
+  - [ ] Draft Research Loop 输出 `replan_requested` 时必须指向对应上游 artifact review gate
+  - [ ] 测试覆盖四类出口与 artifact 落盘
+
+- [ ] Task 76: 实现 Draft Research Loop 查询与摘取
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [`../narrative-memory-context/spec.md`](.trae/specs/narrative-memory-context/spec.md)
+  - `依赖`: Task 55, Task 56, Task 75
+  - `建议只关注代码文件`: `novel_agent/app/services/`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 支持 `character_profile` 查询，优先按 `character_id` 返回基础属性、当前状态、关系、称谓、能力边界和可展开的关键经历索引
+  - [ ] 支持 `character_experience` 按 `experience_id`、`outline_segment_id`、`source_doc_ids` 或 `source_doc_range` 展开人物关键经历
+  - [ ] 支持 `story_detail`、`chapter_excerpt`、`scene_card`、`world_concept` 和 `structure_pattern` 查询
+  - [ ] 查询结果必须由模型或等价 Agent 摘取进 `draft_context_notebook.json`，不得把完整检索上下文直接塞入最终正文 prompt
+  - [ ] 当 confirmed Memory 与当前 `ChapterBrief` 冲突时，返回 `needs_user_input` 或 `replan_requested`
+  - [ ] 落盘 `draft_research_trace.json`，包含请求、来源、裁剪、选择理由和 unresolved risks
+  - [ ] 测试覆盖早期人物设定通过人物关键经历的 `outline_segment_id` 回源到 document excerpt
+
+- [ ] Task 77: 实现 DraftRewritePlan 与草稿反馈重写循环
+  - `来源`: [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 75, Task 76
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] `GenerationReviewDecision.status = rewrite_requested` 保留 `feedback_text` 原文并进入 Draft Research Loop
+  - [ ] 对反馈归类为 `prose_only / scene_emphasis / continuity_fix / character_voice_fix / structure_fix / upstream_conflict`
+  - [ ] 对连续性、人物声音、早期设定或世界规则反馈触发必要 Memory / KB 查询
+  - [ ] 输出 `draft_rewrite_plan.json`，包含 `rewrite_mode`、preserve、remove/change、constraints、requires_replan
+  - [ ] `requires_replan = true` 时不得调用 Draft Prose Executor，必须回到章节梗概 review 或用户补充
+  - [ ] 测试覆盖表达层重写、人物设定重写、上游冲突退回梗概三条路径
+
+- [ ] Task 78: 替换旧固定 prompt 草稿正文 Writer 为 Draft Prose Executor
+  - `来源`: [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 66, Task 75, Task 76, Task 77
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/app/services/continuation_generation_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] 移除新流程中直接由固定 `chapter_execution_input.json` prompt 调用旧正文 Writer 的主路径
+  - [ ] Draft Prose Executor 只在 `DraftResearchDecision.status = ready_for_draft` 后运行
+  - [ ] Draft Prose Executor prompt 只消费已通过 brief、用户补充、长度预算、`draft_context_notebook.json`、事实/风格/禁止/关系/角色约束和可选 `draft_rewrite_plan.json`
+  - [ ] Draft Prose Executor 不得主动查询 Memory / KB、不得向用户提问、不得修改上游 artifact
+  - [ ] 旧固定 prompt 入口如保留，仅可用于 legacy migration / smoke compatibility，并必须显式标记 legacy
+  - [ ] 测试覆盖新 runs 不走旧固定 prompt 主路径
 
 - Task 64 depends on Task 7A, Task 60, Task 61
 - Task 65 depends on Task 64
-- Task 66 depends on Task 7A, Task 65
-- Task 67 depends on Task 64, Task 66
+- Task 66 depends on Task 7A, Task 65, Task 75, Task 76
+- Task 67 depends on Task 64, Task 66, Task 77
 - Task 68 depends on Task 65, Task 67
-- Task 69 depends on Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74
+- Task 69 depends on Task 64, Task 65, Task 66, Task 67, Task 68, Task 70, Task 71, Task 72, Task 73, Task 74, Task 75, Task 76, Task 77, Task 78
 - Task 70 depends on Task 64
 - Task 71 depends on Task 65, Task 70
 - Task 72 depends on Task 64, Task 66, Task 67
 - Task 73 depends on Task 65, Task 67, Task 72
 - Task 74 depends on Task 67, Task 72, Task 73
+- Task 75 has no additional dependencies beyond current Writer contracts
+- Task 76 depends on Task 55, Task 56, Task 75
+- Task 77 depends on Task 75, Task 76
+- Task 78 depends on Task 66, Task 75, Task 76, Task 77

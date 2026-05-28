@@ -472,28 +472,27 @@ class AnalyzerSeedBuilder:
         conversation_history: Sequence[Mapping[str, str]] | None = None,
     ) -> AnalyzerSeedPacket:
         assets = self._assets(conn, book_id=book_id)
-        outline_path = self._asset_path(assets, "outline_markdown_path")
         world_path = self._asset_path(assets, "world_summary_path") or self._asset_path(assets, "world_markdown_path")
-        outline_text = self._read_text(outline_path)
         world_text = self._read_text(world_path)
         profiles = self._profiles(conn, book_id=book_id)
         roots = self._memory_roots(conn, book_id=book_id, question=question)
+        outline_segments_path = self.repo_root / ".memory" / "outlines" / f"{book_id}.outline_segments.json"
         source_arc_path = self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.json"
         scene_cards_path = self.repo_root / ".memory" / "index_cards" / f"{book_id}.scene_cards.json"
 
         sources = []
-        if outline_path:
-            sources.append({"source_type": "outline", "path": str(outline_path), "label": "故事大纲"})
+        if outline_segments_path.exists():
+            sources.append({"source_type": "outline_segments", "path": str(outline_segments_path), "label": "故事大纲索引"})
         if world_path:
             sources.append({"source_type": "world", "path": str(world_path), "label": "世界观摘要"})
         if profiles:
             sources.append({"source_type": "character_profile", "path": "sqlite:character_profiles", "label": "人物档案索引"})
         if roots:
-            sources.append({"source_type": "memory_page_root", "path": "memory:event_summary", "label": "Memory Page root"})
+            sources.append({"source_type": "memory_page_root", "path": "memory:outline_root", "label": "Memory Page root"})
         if scene_cards_path.exists():
             sources.append({"source_type": "narrative_scene_card", "path": str(scene_cards_path), "label": "叙事场景索引"})
 
-        story_overview = clamp_text(self._story_overview(outline_text, roots), self.max_story_overview_chars)
+        story_overview = clamp_text(self._story_overview(roots), self.max_story_overview_chars)
         return AnalyzerSeedPacket(
             book_id=book_id,
             user_question=question,
@@ -503,7 +502,7 @@ class AnalyzerSeedBuilder:
                 "close_read_ready": bool(roots),
                 "character_profiles_ready": bool(profiles),
                 "world_summary_ready": bool(world_text),
-                "story_outline_ready": bool(outline_text),
+                "story_outline_ready": bool(roots),
                 "source_arc_map_ready": source_arc_path.exists(),
                 "narrative_scene_cards_ready": scene_cards_path.exists(),
             },
@@ -562,7 +561,7 @@ class AnalyzerSeedBuilder:
         return [
             {
                 "page_id": str(item.get("page_id") or item.get("id") or ""),
-                "page_type": str(item.get("page_type") or "event_summary"),
+                "page_type": str(item.get("page_type") or "outline_root"),
                 "source_range": str(item.get("source_doc_range") or ""),
                 "summary": safe_excerpt(str(item.get("summary") or ""), 220),
                 "status": str(item.get("status") or "provisional"),
@@ -570,11 +569,11 @@ class AnalyzerSeedBuilder:
             for item in items[: self.max_root_pages]
         ]
 
-    def _story_overview(self, outline_text: str, roots: Sequence[Mapping[str, Any]]) -> str:
+    def _story_overview(self, roots: Sequence[Mapping[str, Any]]) -> str:
         root_overview = " ".join(str(item.get("summary") or "") for item in roots[:4]).strip()
         if root_overview:
             return safe_excerpt(root_overview, self.max_story_overview_chars)
-        return safe_excerpt(outline_text, self.max_story_overview_chars)
+        return ""
 
     def _outline_index(self, outline_text: str) -> list[dict[str, Any]]:
         threads: list[dict[str, Any]] = []

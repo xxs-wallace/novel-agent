@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -56,6 +57,52 @@ def test_json_model_client_raises_after_retry_exhaustion(monkeypatch: pytest.Mon
     with pytest.raises(TimeoutError):
         client.generate_text(system_prompt="system", user_prompt="user")
     assert model.calls == 2
+
+
+def test_json_model_client_applies_outer_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class HangingModel:
+        def generate(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            time.sleep(2)
+            return SimpleNamespace(content="too-late", raw=None)
+
+    monkeypatch.setattr(JsonModelClient, "_build_model", lambda _self: HangingModel())
+    client = JsonModelClient(
+        ModelSettings(
+            model_type="FakeModel",
+            model_name="fake",
+            timeout_seconds=1,
+            request_retry_attempts=1,
+            request_retry_backoff_seconds=0,
+        )
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(TimeoutError, match="timed out after 1s"):
+        client.generate_text(system_prompt="system", user_prompt="user")
+    assert time.monotonic() - started_at < 1.8
+
+
+def test_json_model_client_generate_text_allows_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_timeouts: list[int | None] = []
+
+    class RecordingClient(JsonModelClient):
+        def _generate_with_timeout(self, **kwargs: object) -> SimpleNamespace:  # type: ignore[override]
+            seen_timeouts.append(kwargs.get("timeout_seconds"))  # type: ignore[arg-type]
+            return SimpleNamespace(content="ok", raw=None)
+
+    monkeypatch.setattr(JsonModelClient, "_build_model", lambda _self: object())
+    client = RecordingClient(
+        ModelSettings(
+            model_type="FakeModel",
+            model_name="fake",
+            timeout_seconds=1,
+            request_retry_attempts=1,
+            request_retry_backoff_seconds=0,
+        )
+    )
+
+    assert client.generate_text(system_prompt="system", user_prompt="user", timeout_seconds=7) == "ok"
+    assert seen_timeouts == [7]
 
 
 def test_generate_json_does_not_replace_transport_failures_with_fallback(

@@ -37,20 +37,21 @@ from ..services.chapter_assembler_service import (
     ChapterAssemblerService,
     ChapterBatch,
 )
-from ..services.chapter_event_list_service import ChapterEventListService
-from ..services.chapter_event_summary_service import ChapterEventSummaryService
 from ..services.chapter_outline_segment_service import ChapterOutlineSegmentService
 from ..services.character_canonical_name_service import CharacterCanonicalNameService
 from ..services.character_evidence_batch_assembler_service import CharacterEvidenceBatchAssemblerService
 from ..services.character_evidence_validator import CharacterEvidenceValidator
+from ..services.character_identity_merge_service import CharacterIdentityMergeService
 from ..services.character_identity_resolution_service import CharacterIdentityResolutionService
 from ..services.character_mention_service import CharacterMentionService
+from ..services.character_profile_brief_service import CharacterProfileBriefService
 from ..services.character_profile_service import CharacterProfileService
 from ..services.character_roster_service import CharacterRosterService
 from ..services.debug_export_service import DebugExportService
 from ..services.memory_candidate_service import MemoryCandidateService
 from ..services.outline_segment_index_service import OutlineSegmentIndexService
 from ..services.outline_service import OutlineService
+from ..services.profile_update_gate_service import CharacterImportanceTracker, ProfileUpdateGateService
 from ..services.world_state_service import WorldStateService
 from ..utils.text_utils import clamp_text, safe_excerpt, split_sentences
 
@@ -159,6 +160,16 @@ class InvalidChapterSynopsisError(RuntimeError):
         super().__init__(message)
 
 
+class CloseReadIdentityMergeBlocked(RuntimeError):
+    def __init__(self, candidates: list[dict[str, Any]]) -> None:
+        self.candidates = candidates
+        labels = ", ".join(
+            f"{item.get('left_name', '')}/{item.get('right_name', '')}:{item.get('same_person_score', 0)}"
+            for item in candidates[:3]
+        )
+        super().__init__(f"Close-read paused for character identity merge review: {labels}")
+
+
 class CloseReadRunner:
     def __init__(
         self,
@@ -179,6 +190,17 @@ class CloseReadRunner:
         self.memory_candidate_service = MemoryCandidateService(
             character_mention_service=self.character_mention_service,
         )
+        self.profile_update_gate_service = ProfileUpdateGateService(
+            tracker=CharacterImportanceTracker(
+                detailed_min_doc_count=self.config.runtime.profile_update_detailed_min_doc_count,
+                detailed_min_total_chars=self.config.runtime.profile_update_detailed_min_total_chars,
+                name_normalizer=lambda value, character=None: self.memory_candidate_service.clean_evidence_name(
+                    value,
+                    character=character,
+                ),
+            )
+        )
+        self.profile_brief_service = CharacterProfileBriefService()
         self._summary_review_lock = threading.Lock()
 
     def _emit_progress(self, event: dict[str, Any]) -> None:
@@ -211,6 +233,7 @@ class CloseReadRunner:
         chapters_repo = ChaptersRepo()
         profiles_repo = CharacterProfilesRepo()
         profile_service = CharacterProfileService(profiles_repo=profiles_repo)
+        identity_merge_service = CharacterIdentityMergeService(profiles_repo=profiles_repo)
         identity_resolution_service = CharacterIdentityResolutionService(profiles_repo=profiles_repo)
         canonical_name_service = CharacterCanonicalNameService(profiles_repo=profiles_repo)
         roster_service = CharacterRosterService(profiles_repo=profiles_repo)
@@ -222,7 +245,7 @@ class CloseReadRunner:
         )
         world_service = WorldStateService(repo_root=self.repo_root, model_client=model_client)
         outline_service = OutlineService(repo_root=self.repo_root)
-        outline_segment_index_service = OutlineSegmentIndexService(repo_root=self.repo_root)
+        outline_segment_index_service = OutlineSegmentIndexService(repo_root=self.repo_root, model_client=model_client)
         processed_batches = 0
         batch_metrics: list[dict[str, Any]] = []
         export_path: Path | None = None
@@ -358,7 +381,9 @@ class CloseReadRunner:
                             model_client=model_client,
                             documents_repo=documents_repo,
                             chapters_repo=chapters_repo,
+                            progress_repo=progress_repo,
                             profile_service=profile_service,
+                            identity_merge_service=identity_merge_service,
                             identity_resolution_service=identity_resolution_service,
                             canonical_name_service=canonical_name_service,
                             world_service=world_service,
@@ -464,6 +489,30 @@ class CloseReadRunner:
             (book_id, int(progress["last_completed_doc_id"] or 0)),
         ).fetchone()
         return int(row[0] or 0) if row is not None else 0
+
+    @staticmethod
+    def _last_completed_doc_id(conn, *, book_id: str) -> int | None:
+        row = conn.execute(
+            "SELECT last_completed_doc_id FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+            (book_id, DEFAULT_CLOSE_READING_STAGE),
+        ).fetchone()
+        return int(row["last_completed_doc_id"]) if row is not None and row["last_completed_doc_id"] is not None else None
+
+    @staticmethod
+    def _last_completed_title_index(conn, *, book_id: str) -> int | None:
+        row = conn.execute(
+            "SELECT last_completed_title_index FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+            (book_id, DEFAULT_CLOSE_READING_STAGE),
+        ).fetchone()
+        return int(row["last_completed_title_index"]) if row is not None and row["last_completed_title_index"] is not None else None
+
+    @staticmethod
+    def _last_completed_chapter_id(conn, *, book_id: str) -> int | None:
+        row = conn.execute(
+            "SELECT last_completed_chapter_id FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+            (book_id, DEFAULT_CLOSE_READING_STAGE),
+        ).fetchone()
+        return int(row["last_completed_chapter_id"]) if row is not None and row["last_completed_chapter_id"] is not None else None
 
     def _prepare_extraction(
         self,
@@ -732,9 +781,27 @@ class CloseReadRunner:
         if conn is not None and profile_service is not None:
             prompt_dict = self._with_character_profiles_for_evidence(
                 conn=conn,
+                model_client=model_client,
                 prompt_input=prompt_dict,
                 evidence_payload=evidence_payload,
                 profile_service=profile_service,
+                batch=batch,
+            )
+        current_outline_segment: dict[str, Any] = {}
+        if not batch.is_multi_chapter:
+            summary_md = str(summary_payload.get("chapter_summary_md") or "").strip()
+            summary_short = str(summary_payload.get("chapter_summary_short") or "").strip()
+            generated_outline_update = self._generate_chapter_outline_segment(
+                model_client=model_client,
+                batch=batch,
+                summary_md=summary_md,
+                summary_short=summary_short,
+                outline_update={},
+            )
+            current_outline_segment = self._enrich_outline_segment_update(
+                batch=batch,
+                outline_update=generated_outline_update,
+                summary_short=summary_short,
             )
         character_reduce_payload = self._run_character_reduce_agents(
             model_client=model_client,
@@ -742,6 +809,7 @@ class CloseReadRunner:
             prompt_input=prompt_dict,
             summary_payload=summary_payload,
             evidence_payload=evidence_payload,
+            current_outline_segment=current_outline_segment,
         )
         global_memory_payload = self._generate_agent_payload(
             model_client=model_client,
@@ -761,6 +829,7 @@ class CloseReadRunner:
             evidence_payload=evidence_payload,
             character_reduce_payload=character_reduce_payload,
             global_memory_payload=global_memory_payload,
+            current_outline_segment=current_outline_segment,
         )
 
     def _result_or_retry(self, future, *, batch: ChapterBatch) -> dict[str, Any]:
@@ -831,6 +900,7 @@ class CloseReadRunner:
                     "doc_ids": doc_ids,
                     "document_title_indexes": title_indexes,
                     "characters": payload.get("characters", []),
+                    "identity_revelations": payload.get("identity_revelations", []),
                 }
             )
         doc_ids = [int(doc.doc_id) for doc in batch.documents]
@@ -838,20 +908,25 @@ class CloseReadRunner:
             "doc_ids": doc_ids,
             "document_title_indexes": batch.title_indexes,
             "character_evidence_batches": evidence_batches,
+            "identity_revelations": self._flatten_identity_revelations({"character_evidence_batches": evidence_batches}),
         }
 
     def _with_character_profiles_for_evidence(
         self,
         *,
         conn,
+        model_client: JsonModelClient,
         prompt_input: dict[str, Any],
         evidence_payload: dict[str, Any],
         profile_service: CharacterProfileService,
+        batch: ChapterBatch | None = None,
     ) -> dict[str, Any]:
         profile_contexts = self._load_character_profile_contexts_for_evidence(
             conn=conn,
+            model_client=model_client,
             evidence_payload=evidence_payload,
             profile_service=profile_service,
+            current_total_chars=batch.total_chars if batch is not None else 0,
         )
         if not profile_contexts:
             return prompt_input
@@ -872,9 +947,12 @@ class CloseReadRunner:
         self,
         *,
         conn,
+        model_client: JsonModelClient,
         evidence_payload: dict[str, Any],
         profile_service: CharacterProfileService,
+        current_total_chars: int = 0,
     ) -> list[dict[str, Any]]:
+        _ = model_client
         character_ids: list[int] = []
         names: list[str] = []
         for character in self._flatten_character_evidence_items(evidence_payload):
@@ -902,6 +980,10 @@ class CloseReadRunner:
             *repo.list_by_ids(conn, book_id=self.config.book_id, character_ids=character_ids),
             *repo.list_by_names(conn, book_id=self.config.book_id, names=names),
         ]
+        profile_gates = self._profile_update_gates_for_evidence(
+            evidence_payload=evidence_payload,
+            current_total_chars=current_total_chars,
+        )
         contexts: list[dict[str, Any]] = []
         seen_ids: set[int] = set()
         seen_names: set[str] = set()
@@ -915,27 +997,111 @@ class CloseReadRunner:
             if row_id is not None:
                 seen_ids.add(row_id)
             seen_names.add(row_name)
-            contexts.append(self._profile_context_from_row(row))
+            full_profile = self._profile_context_from_row(row)
+            if not full_profile.get("profile_brief"):
+                self._emit_progress(
+                    {
+                        "stage": DEFAULT_CLOSE_READING_STAGE,
+                        "agent": "profile_brief_bootstrap",
+                        "event": "prompt_start",
+                        "character_id": full_profile["character_id"],
+                        "canonical_name": full_profile["canonical_name"],
+                        "reason": "missing_profile_brief",
+                    }
+                )
+                started_at = time.perf_counter()
+                brief_payload = self.profile_brief_service.bootstrap_from_row(
+                    model_client=model_client,
+                    row=row,
+                )
+                compacted_until = self._profile_brief_compacted_until(brief_payload.get("profile_brief"))
+                repo.update_profile_brief(
+                    conn,
+                    book_id=self.config.book_id,
+                    character_id=row_id,
+                    canonical_name=row_name,
+                    profile_brief=brief_payload["profile_brief"],
+                    profile_brief_status=brief_payload["profile_brief_status"],
+                    compacted_until_doc_id=compacted_until["doc_id"],
+                    compacted_until_segment_id=compacted_until["outline_segment_id"],
+                    updated_at=_utc_now(),
+                )
+                full_profile["profile_brief"] = brief_payload["profile_brief"]
+                full_profile["profile_brief_status"] = brief_payload["profile_brief_status"]
+                self._emit_progress(
+                    {
+                        "stage": DEFAULT_CLOSE_READING_STAGE,
+                        "agent": "profile_brief_bootstrap",
+                        "event": "prompt_end",
+                        "character_id": full_profile["character_id"],
+                        "canonical_name": full_profile["canonical_name"],
+                        "duration_seconds": round(time.perf_counter() - started_at, 3),
+                        "profile_brief_status": brief_payload["profile_brief_status"],
+                    }
+                )
+            update_gate = self._profile_update_gate_for_profile(
+                full_profile,
+                profile_gates=profile_gates,
+            )
+            contexts.append(
+                {
+                    "character_id": full_profile["character_id"],
+                    "canonical_name": full_profile["canonical_name"],
+                    "aliases": full_profile["aliases"],
+                    "profile_brief": full_profile.get("profile_brief") or {},
+                    "profile_brief_status": full_profile.get("profile_brief_status") or "missing",
+                    "character_update_gate": update_gate,
+                }
+            )
         return contexts
 
+    def _profile_update_gates_for_evidence(
+        self,
+        *,
+        evidence_payload: dict[str, Any],
+        current_total_chars: int = 0,
+    ) -> dict[str, dict[str, Any]]:
+        return self.profile_update_gate_service.gates_for_evidence(
+            evidence_payload=evidence_payload,
+            current_total_chars=current_total_chars,
+        )
+
+    def _profile_update_gate_for_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        profile_gates: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self.profile_update_gate_service.gate_for_profile(
+            profile,
+            profile_gates=profile_gates,
+        )
+
     def _profile_context_from_row(self, row) -> dict[str, Any]:
+        profile_brief = (
+            self._load_json_dict(row["profile_brief_json"])
+            if self._row_has_column(row, "profile_brief_json")
+            else {}
+        )
         return {
             "character_id": str(row["character_id"]),
             "canonical_name": str(row["canonical_name"] or "").strip(),
             "aliases": self._load_json_list(row["aliases_json"]),
-            "profile_summary_md": clamp_text(str(row["profile_summary_md"] or ""), 1200),
+            "profile_brief": profile_brief,
+            "profile_brief_status": (
+                str(row["profile_brief_status"] or "").strip()
+                if self._row_has_column(row, "profile_brief_status")
+                else ""
+            ) or ("ready" if profile_brief else "missing"),
             "speaking_character_status": str(row["speaking_character_status"] or "unknown"),
             "personhood_evidence_summary": str(row["personhood_evidence_summary"] or ""),
             "evidence_level": str(row["evidence_level"] or "inferred"),
-            "personality": self._load_json_list(row["personality_json"])[:8],
-            "occupations": self._load_json_list(row["occupations_json"])[:8],
-            "abilities": self._load_json_list(row["abilities_json"])[:8],
-            "recent_activity": self._load_json_list(row["recent_activity_json"])[-8:],
-            "relationships": self._load_json_list(row["relationships_json"]),
-            "story_events": self._load_json_list(row["story_events_json"])[-12:],
-            "chapter_indexes": self._load_json_list(row["chapter_indexes_json"]),
+            "story_events": self._load_json_list(row["story_events_json"]),
+            "mentioned_doc_ids": self._load_json_list(row["mentioned_doc_ids_json"]),
+            "speaking_doc_ids": self._load_json_list(row["speaking_doc_ids_json"]),
             "last_seen_doc_id": row["last_seen_doc_id"],
             "last_seen_title_index": row["last_seen_title_index"],
+            "importance_score": int(row["importance_score"] or 0),
         }
 
     def _profile_context_identity_key(self, profile: dict[str, Any]) -> str:
@@ -963,16 +1129,34 @@ class CloseReadRunner:
         prompt_input: dict[str, Any],
         summary_payload: dict[str, Any],
         evidence_payload: dict[str, Any],
+        current_outline_segment: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         reduce_inputs = self.memory_candidate_service.build_character_reduce_inputs(
             prompt_input=prompt_input,
             summary_payload=summary_payload,
             evidence_payload=evidence_payload,
+            current_outline_segment=current_outline_segment or {},
         )
         if not reduce_inputs:
             return {"character_updates": []}
-        max_workers = max(1, min(int(self.config.runtime.character_reduce_max_workers), len(reduce_inputs)))
         outputs: list[dict[str, Any]] = []
+        index_only_inputs = [
+            reduce_input
+            for reduce_input in reduce_inputs
+            if str((reduce_input.get("reduce_policy") or {}).get("detail_level") or "").strip() == "index_only"
+            or str((reduce_input.get("profile_update_gate") or {}).get("update_policy") or "").strip()
+            in {"defer_index_only", "drop_for_profile"}
+        ]
+        model_reduce_inputs = [reduce_input for reduce_input in reduce_inputs if reduce_input not in index_only_inputs]
+        for reduce_input in index_only_inputs:
+            outputs.append(
+                self.memory_candidate_service.build_index_only_reduce_output(
+                    reduce_input=reduce_input,
+                )
+            )
+        if not model_reduce_inputs:
+            return self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
+        max_workers = max(1, min(int(self.config.runtime.character_reduce_max_workers), len(model_reduce_inputs)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -988,11 +1172,48 @@ class CloseReadRunner:
                         )
                     ),
                 )
-                for reduce_input in reduce_inputs
+                for reduce_input in model_reduce_inputs
             ]
             for future in futures:
                 outputs.append(future.result())
         return self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
+
+    def _prompt_input_metrics(self, prompt_input: dict[str, Any]) -> dict[str, int]:
+        metrics: dict[str, int] = {}
+        existing_profile = prompt_input.get("existing_profile")
+        if isinstance(existing_profile, dict):
+            profile_brief = existing_profile.get("profile_brief")
+            if isinstance(profile_brief, dict):
+                metrics["profile_brief_chars"] = len(
+                    json.dumps(profile_brief, ensure_ascii=False, separators=(",", ":"))
+                )
+            metrics["existing_profile_chars"] = len(
+                json.dumps(existing_profile, ensure_ascii=False, separators=(",", ":"))
+            )
+        chapter_context = prompt_input.get("chapter_context_text")
+        if chapter_context is None and isinstance(prompt_input.get("chapter_summary"), dict):
+            chapter_context = prompt_input["chapter_summary"].get("chapter_context_text")
+        if chapter_context is not None:
+            metrics["chapter_context_chars"] = len(str(chapter_context))
+        if isinstance(prompt_input.get("current_outline_segment"), dict):
+            metrics["current_outline_segment_chars"] = len(
+                json.dumps(prompt_input["current_outline_segment"], ensure_ascii=False, separators=(",", ":"))
+            )
+        if isinstance(prompt_input.get("ordered_character_evidence"), list):
+            metrics["ordered_character_evidence_chars"] = len(
+                json.dumps(prompt_input["ordered_character_evidence"], ensure_ascii=False, separators=(",", ":"))
+            )
+        return metrics
+
+    def _profile_brief_compacted_until(self, profile_brief: object) -> dict[str, Any]:
+        if not isinstance(profile_brief, dict):
+            return {"doc_id": None, "outline_segment_id": ""}
+        compacted_until = profile_brief.get("compacted_until")
+        compacted = dict(compacted_until) if isinstance(compacted_until, dict) else {}
+        return {
+            "doc_id": self._safe_int(compacted.get("doc_id")),
+            "outline_segment_id": str(compacted.get("outline_segment_id") or "").strip(),
+        }
 
     def _generate_character_evidence_payload(
         self,
@@ -1264,6 +1485,7 @@ class CloseReadRunner:
         fallback_factory,
     ) -> dict[str, Any]:
         system_prompt, user_prompt = prompt_builder(prompt_input)
+        prompt_metrics = self._prompt_input_metrics(prompt_input)
         started_at = time.perf_counter()
         self._emit_progress(
             {
@@ -1273,6 +1495,10 @@ class CloseReadRunner:
                 "document_title_indexes": batch.title_indexes,
                 "doc_count": len(batch.documents),
                 "total_chars": batch.total_chars,
+                "prompt_chars": len(system_prompt) + len(user_prompt),
+                "system_prompt_chars": len(system_prompt),
+                "user_prompt_chars": len(user_prompt),
+                **prompt_metrics,
             }
         )
         payload, _ = model_client.generate_json(
@@ -1289,6 +1515,10 @@ class CloseReadRunner:
                 "document_title_indexes": batch.title_indexes,
                 "doc_count": len(batch.documents),
                 "total_chars": batch.total_chars,
+                "prompt_chars": len(system_prompt) + len(user_prompt),
+                "system_prompt_chars": len(system_prompt),
+                "user_prompt_chars": len(user_prompt),
+                **prompt_metrics,
                 "duration_seconds": round(time.perf_counter() - started_at, 3),
             }
         )
@@ -1344,95 +1574,6 @@ class CloseReadRunner:
         merged.update({key: value for key, value in generated.items() if value not in (None, "", [], {})})
         return merged
 
-    def _generate_chapter_event_list(
-        self,
-        *,
-        model_client: JsonModelClient,
-        batch: ChapterBatch,
-        summary_md: str,
-        summary_short: str,
-        outline_update: object,
-    ) -> dict[str, Any]:
-        existing_outline_update = outline_update if isinstance(outline_update, dict) else {}
-        started_at = time.perf_counter()
-        self._emit_progress(
-            {
-                "stage": DEFAULT_CLOSE_READING_STAGE,
-                "agent": "chapter_event_list",
-                "event": "prompt_start",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-            }
-        )
-        generated = ChapterEventListService(model_client=model_client).build_outline_update(
-            book_id=self.config.book_id,
-            document_title_index=batch.document_title_index,
-            chapter_title=batch.chapter_title,
-            summary_md=summary_md,
-            chapter_summary_short=summary_short,
-            source_doc_range=self._doc_range_text([doc.doc_id for doc in batch.documents]),
-            existing_outline_update=existing_outline_update,
-        )
-        self._emit_progress(
-            {
-                "stage": DEFAULT_CLOSE_READING_STAGE,
-                "agent": "chapter_event_list",
-                "event": "prompt_end",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-                "duration_seconds": round(time.perf_counter() - started_at, 3),
-            }
-        )
-        merged = dict(existing_outline_update)
-        merged.update({key: value for key, value in generated.items() if value not in (None, "", [], {})})
-        return merged
-
-    def _generate_chapter_event_summary(
-        self,
-        *,
-        model_client: JsonModelClient,
-        batch: ChapterBatch,
-        summary_md: str,
-        summary_short: str,
-        outline_update: object,
-    ) -> str:
-        raw_events = outline_update.get("timeline_events") if isinstance(outline_update, dict) else []
-        timeline_events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-        started_at = time.perf_counter()
-        self._emit_progress(
-            {
-                "stage": DEFAULT_CLOSE_READING_STAGE,
-                "agent": "chapter_event_summary",
-                "event": "prompt_start",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-            }
-        )
-        event_summary = ChapterEventSummaryService(model_client=model_client).summarize(
-            book_id=self.config.book_id,
-            document_title_index=batch.document_title_index,
-            chapter_title=batch.chapter_title,
-            summary_md=summary_md,
-            chapter_summary_short=summary_short,
-            source_doc_range=self._doc_range_text([doc.doc_id for doc in batch.documents]),
-            chapter_event_list=timeline_events,
-        )
-        self._emit_progress(
-            {
-                "stage": DEFAULT_CLOSE_READING_STAGE,
-                "agent": "chapter_event_summary",
-                "event": "prompt_end",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-                "duration_seconds": round(time.perf_counter() - started_at, 3),
-            }
-        )
-        return event_summary
-
     def _generate_chapter_summary_payload(
         self,
         *,
@@ -1450,6 +1591,9 @@ class CloseReadRunner:
                 "document_title_indexes": batch.title_indexes,
                 "doc_count": len(batch.documents),
                 "total_chars": batch.total_chars,
+                "prompt_chars": len(system_prompt) + len(user_prompt),
+                "system_prompt_chars": len(system_prompt),
+                "user_prompt_chars": len(user_prompt),
             }
         )
         payload, _ = model_client.generate_json(
@@ -1466,6 +1610,9 @@ class CloseReadRunner:
                 "document_title_indexes": batch.title_indexes,
                 "doc_count": len(batch.documents),
                 "total_chars": batch.total_chars,
+                "prompt_chars": len(system_prompt) + len(user_prompt),
+                "system_prompt_chars": len(system_prompt),
+                "user_prompt_chars": len(user_prompt),
                 "duration_seconds": round(time.perf_counter() - started_at, 3),
             }
         )
@@ -1487,6 +1634,7 @@ class CloseReadRunner:
         evidence_payload: dict[str, Any],
         character_reduce_payload: dict[str, Any],
         global_memory_payload: dict[str, Any],
+        current_outline_segment: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chapter_summary_md": "",
@@ -1497,7 +1645,7 @@ class CloseReadRunner:
             "document_character_mentions": [],
             "character_updates": [],
             "world_update": {"should_update": False, "changes": []},
-            "outline_update": {"chapter_line": "", "timeline_events": []},
+            "outline_update": {"chapter_line": ""},
         }
         for key in ("chapter_summary_md", "chapter_summary_short"):
             value = summary_payload.get(key)
@@ -1524,10 +1672,11 @@ class CloseReadRunner:
             batch=batch,
             evidence_payload=evidence_payload,
         )
+        payload["identity_revelations"] = self._flatten_identity_revelations(evidence_payload)
         fallback_memory = self._fallback_memory_candidate_output(batch, summary_payload, evidence_payload)
         payload["character_updates"] = character_reduce_payload.get("character_updates", fallback_memory["character_updates"])
         payload["world_update"] = global_memory_payload.get("world_update", fallback_memory["world_update"])
-        payload["outline_update"] = global_memory_payload.get("outline_update", fallback_memory["outline_update"])
+        payload["outline_update"] = current_outline_segment or global_memory_payload.get("outline_update", fallback_memory["outline_update"])
         return payload
 
     def _normalize_model_chapter_summaries(
@@ -1656,7 +1805,6 @@ class CloseReadRunner:
             "character_updates": character_updates,
             "outline_update": {
                 "chapter_line": f"[{batch.document_title_index}] {batch.chapter_title}: {short_summary}",
-                "timeline_events": [],
             },
         }
         if batch.is_multi_chapter:
@@ -1964,6 +2112,36 @@ class CloseReadRunner:
                         flattened.append(character)
         return flattened
 
+    def _flatten_identity_revelations(self, evidence_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        revelations = evidence_payload.get("identity_revelations")
+        if isinstance(revelations, list):
+            batch_doc_ids = self._safe_int_list(evidence_payload.get("doc_ids"))
+            batch_title_indexes = self._safe_int_list(evidence_payload.get("document_title_indexes"))
+            flattened = []
+            for item in revelations:
+                if not isinstance(item, dict):
+                    continue
+                revelation = dict(item)
+                revelation.setdefault("source_doc_ids", batch_doc_ids)
+                revelation.setdefault("source_title_indexes", batch_title_indexes)
+                flattened.append(revelation)
+            return flattened
+        batches = evidence_payload.get("character_evidence_batches")
+        flattened: list[dict[str, Any]] = []
+        if isinstance(batches, list):
+            for evidence_batch in batches:
+                if not isinstance(evidence_batch, dict):
+                    continue
+                batch_doc_ids = self._safe_int_list(evidence_batch.get("doc_ids"))
+                batch_title_indexes = self._safe_int_list(evidence_batch.get("document_title_indexes"))
+                for item in evidence_batch.get("identity_revelations", []):
+                    if isinstance(item, dict):
+                        revelation = dict(item)
+                        revelation.setdefault("source_doc_ids", batch_doc_ids)
+                        revelation.setdefault("source_title_indexes", batch_title_indexes)
+                        flattened.append(revelation)
+        return flattened
+
     def _excerpt_around_name(self, *, name: str, text: str) -> str:
         index = text.find(name)
         if index < 0:
@@ -2232,7 +2410,7 @@ class CloseReadRunner:
             )
             raise InvalidChapterSynopsisError("low_signal summary missing noise_documents", review_path=review_path)
         copied = self._first_copied_source_span(batch=batch, summary_md=summary_md)
-        if copied:
+        if copied and not self._looks_like_low_signal_summary(batch=batch, summary_md=f"{summary_md}\n{summary_short}"):
             review_path = self._write_summary_review_markdown(
                 batch=batch,
                 reason=f"low_signal summary appears to copy source text: {copied}",
@@ -2362,7 +2540,7 @@ class CloseReadRunner:
         if not isinstance(normalized.get("world_update"), dict):
             normalized["world_update"] = {"should_update": False, "changes": []}
         if not isinstance(normalized.get("outline_update"), dict):
-            normalized["outline_update"] = {"chapter_line": "", "timeline_events": []}
+            normalized["outline_update"] = {"chapter_line": ""}
         self._validate_single_plot_synopsis(batch=batch, payload=normalized)
         required_text_fields = ["chapter_summary_md", "chapter_summary_short", "importance_reason"]
         for field in required_text_fields:
@@ -2390,7 +2568,9 @@ class CloseReadRunner:
         model_client: JsonModelClient,
         documents_repo: DocumentsRepo,
         chapters_repo: ChaptersRepo,
+        progress_repo: ReadingProgressRepo,
         profile_service: CharacterProfileService,
+        identity_merge_service: CharacterIdentityMergeService,
         identity_resolution_service: CharacterIdentityResolutionService,
         canonical_name_service: CharacterCanonicalNameService,
         world_service: WorldStateService,
@@ -2401,6 +2581,47 @@ class CloseReadRunner:
             book_id=self.config.book_id,
             document_title_index=batch.document_title_index,
         )
+        identity_candidate_results = identity_merge_service.review_revelations(
+            conn,
+            book_id=self.config.book_id,
+            model_client=model_client,
+            revelations=payload.get("identity_revelations", []),
+        )
+        for candidate in identity_candidate_results:
+            self._emit_progress(
+                {
+                    "stage": DEFAULT_CLOSE_READING_STAGE,
+                    "event": "identity_merge_candidate",
+                    **candidate.to_dict(),
+                }
+            )
+        blocking_identity_candidates = [candidate for candidate in identity_candidate_results if candidate.blocks_close_read]
+        if blocking_identity_candidates:
+            candidate_payloads = [candidate.to_dict() for candidate in blocking_identity_candidates]
+            progress_repo.upsert(
+                conn,
+                {
+                    "book_id": self.config.book_id,
+                    "agent_stage": DEFAULT_CLOSE_READING_STAGE,
+                    "current_doc_id": batch.documents[0].doc_id,
+                    "current_document_title_index": batch.documents[0].document_title_index,
+                    "current_source_path": batch.documents[0].source_path,
+                    "current_source_offset": batch.documents[0].source_start_offset,
+                    "last_completed_doc_id": self._last_completed_doc_id(conn, book_id=self.config.book_id),
+                    "last_completed_title_index": self._last_completed_title_index(conn, book_id=self.config.book_id),
+                    "last_completed_chapter_id": self._last_completed_chapter_id(conn, book_id=self.config.book_id),
+                    "status": {
+                        "state": "blocked_identity_merge_review",
+                        "reason": "high-confidence character identity candidate requires user confirmation",
+                        "candidate_ids": [item["candidate_id"] for item in candidate_payloads],
+                        "candidates": candidate_payloads,
+                    },
+                    "checkpoint_token": f"{batch.documents[0].document_title_index}:{batch.documents[0].doc_id}:identity_merge_review",
+                    "updated_at": _utc_now(),
+                },
+            )
+            conn.commit()
+            raise CloseReadIdentityMergeBlocked(candidate_payloads)
         existing_summary_md = str(existing["summary_md"] or "") if existing else ""
         summary_intermediate = self._load_json_list(existing["summary_intermediate_json"]) if existing else []
         if self._should_seed_existing_summary_intermediate(
@@ -2439,13 +2660,16 @@ class CloseReadRunner:
         elif not summary_short:
             summary_short = self._compute_short_summary(current_summary)
         summary_for_outline = final_summary or current_summary
-        generated_outline_update = self._generate_chapter_outline_segment(
-            model_client=model_client,
-            batch=batch,
-            summary_md=summary_for_outline,
-            summary_short=summary_short,
-            outline_update=payload.get("outline_update", {}),
-        )
+        if self._has_usable_outline_segment(payload.get("outline_update")):
+            generated_outline_update = dict(payload.get("outline_update") or {})
+        else:
+            generated_outline_update = self._generate_chapter_outline_segment(
+                model_client=model_client,
+                batch=batch,
+                summary_md=summary_for_outline,
+                summary_short=summary_short,
+                outline_update=payload.get("outline_update", {}),
+            )
         document_mentions = self._normalize_document_character_mentions(batch=batch, payload=payload)
         speaking_mentions = self._normalize_document_speaking_mentions(batch=batch, payload=payload)
         for doc_id, names in speaking_mentions.items():
@@ -2557,20 +2781,107 @@ class CloseReadRunner:
             updates=raw_character_updates,
             mentioned_doc_ids_by_name=self._invert_mentions(document_mentions),
             speaking_doc_ids_by_name=self._invert_mentions(speaking_mentions),
-            story_events_by_name=self._story_experiences_by_character(
-                current_outline_update,
-                mentioned_characters=mentioned_characters,
-            ),
+            story_events_by_name={},
+        )
+        self._apply_profile_brief_compacts(
+            conn=conn,
+            model_client=model_client,
+            documents_repo=documents_repo,
+            profile_service=profile_service,
+            updates=raw_character_updates,
+            chapter_summary={
+                "chapter_summary_short": summary_short,
+                "chapter_summary_md": summary_for_outline,
+                "document_title_index": batch.document_title_index,
+                "chapter_title": batch.chapter_title,
+            },
+            current_outline_segment=outline_update,
         )
         world_service.apply_update(book_id=self.config.book_id, world_update=payload.get("world_update", {}))
-        if isinstance(outline_update, dict):
-            outline_service.apply_update(
-                book_id=self.config.book_id,
-                chapter_line=str(outline_update.get("chapter_line", "")),
-                timeline_events=[],
-                importance_score=merged_importance_score,
-            )
         return chapter_id
+
+    def _apply_profile_brief_compacts(
+        self,
+        *,
+        conn,
+        model_client: JsonModelClient,
+        documents_repo: DocumentsRepo,
+        profile_service: CharacterProfileService,
+        updates: list[dict[str, Any]],
+        chapter_summary: dict[str, Any],
+        current_outline_segment: dict[str, Any],
+    ) -> None:
+        repo = profile_service.profiles_repo
+        seen: set[int | str] = set()
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            character_id = self._safe_int(update.get("character_id"))
+            canonical_name = str(update.get("canonical_name") or "").strip()
+            row = None
+            seen_key: int | str | None = None
+            if character_id is not None and character_id > 0:
+                row = repo.get_by_id(conn, book_id=self.config.book_id, character_id=character_id)
+                seen_key = character_id
+            if row is None and canonical_name:
+                row = repo.get(conn, book_id=self.config.book_id, canonical_name=canonical_name)
+                seen_key = canonical_name
+            if row is None or seen_key in seen:
+                continue
+            seen.add(seen_key)
+            current_brief = self._load_json_dict(row["profile_brief_json"]) if self._row_has_column(row, "profile_brief_json") else {}
+            if not self.profile_brief_service.should_compact(row=row, current_update=update):
+                continue
+            missing_brief = not current_brief
+            agent_name = "profile_brief_bootstrap" if missing_brief else "profile_brief_compact"
+            self._emit_progress(
+                {
+                    "stage": DEFAULT_CLOSE_READING_STAGE,
+                    "agent": agent_name,
+                    "event": "prompt_start",
+                    "character_id": str(row["character_id"]),
+                    "canonical_name": str(row["canonical_name"] or ""),
+                    "reason": "missing_profile_brief" if missing_brief else "brief_compact_gate",
+                }
+            )
+            started_at = time.perf_counter()
+            if missing_brief:
+                brief_payload = self.profile_brief_service.bootstrap_from_row(
+                    model_client=model_client,
+                    row=row,
+                )
+            else:
+                brief_payload = self.profile_brief_service.compact_loop(
+                    conn=conn,
+                    model_client=model_client,
+                    documents_repo=documents_repo,
+                    row=row,
+                    current_update=update,
+                    chapter_summary=chapter_summary,
+                    current_outline_segment=current_outline_segment,
+                )
+            compacted_until = self._profile_brief_compacted_until(brief_payload.get("profile_brief"))
+            repo.update_profile_brief(
+                conn,
+                book_id=self.config.book_id,
+                character_id=int(row["character_id"]),
+                profile_brief=brief_payload["profile_brief"],
+                profile_brief_status=brief_payload["profile_brief_status"],
+                compacted_until_doc_id=compacted_until["doc_id"],
+                compacted_until_segment_id=compacted_until["outline_segment_id"],
+                updated_at=_utc_now(),
+            )
+            self._emit_progress(
+                {
+                    "stage": DEFAULT_CLOSE_READING_STAGE,
+                    "agent": agent_name,
+                    "event": "prompt_end",
+                    "character_id": str(row["character_id"]),
+                    "canonical_name": str(row["canonical_name"] or ""),
+                    "duration_seconds": round(time.perf_counter() - started_at, 3),
+                    "profile_brief_status": brief_payload["profile_brief_status"],
+                }
+            )
 
     def _augment_character_updates_from_source_verified_names(
         self,
@@ -2637,6 +2948,11 @@ class CloseReadRunner:
             "source_chapter_range": self._doc_range_text(title_indexes),
             "status": "provisional",
         }
+
+    def _has_usable_outline_segment(self, outline_update: object) -> bool:
+        if not isinstance(outline_update, dict):
+            return False
+        return bool(str(outline_update.get("outline_segment") or "").strip())
 
     def _story_experiences_by_character(
         self,
@@ -2706,7 +3022,7 @@ class CloseReadRunner:
         if prefer_current_segment and current_segment:
             outline_segment = current_segment
         else:
-            outline_segment = self._join_distinct_event_summaries([existing_segment, current_segment])
+            outline_segment = self._join_distinct_outline_segments([existing_segment, current_segment])
         merged["outline_segment"] = outline_segment
         merged["source_doc_ids"] = source_doc_ids
         merged["source_doc_range"] = self._doc_range_text(source_doc_ids)
@@ -2717,228 +3033,13 @@ class CloseReadRunner:
         merged["status"] = str(current.get("status") or existing.get("status") or "provisional")
         return merged
 
-    def _enrich_outline_update_with_sources(
-        self,
-        *,
-        batch: ChapterBatch,
-        outline_update: object,
-        summary_short: str,
-        event_summary: str = "",
-        fallback_participants: list[str] | None = None,
-    ) -> dict[str, Any]:
-        raw = dict(outline_update) if isinstance(outline_update, dict) else {}
-        event_summary = str(event_summary or "").strip()
-        doc_ids = [doc.doc_id for doc in batch.documents]
-        doc_range = self._doc_range_text(doc_ids)
-        title_indexes = sorted({doc.document_title_index for doc in batch.documents})
-        fallback_participants = self.character_mention_service.clean_names(fallback_participants or [])
-        raw_events = raw.get("timeline_events")
-        event_items = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
-        fallback_event_summary = event_summary or summary_short
-        if not event_items and fallback_event_summary:
-            event_items = [
-                {
-                    "label": f"{batch.chapter_title}剧情进展",
-                    "participants": [],
-                    "summary": fallback_event_summary,
-                }
-            ]
-        enriched_events: list[dict[str, Any]] = []
-        for index, event in enumerate(event_items, start=1):
-            label = str(event.get("label") or "").strip()
-            summary = str(event.get("summary") or "").strip()
-            participants = self.character_mention_service.clean_names(
-                event.get("participants", []) if isinstance(event.get("participants"), list) else []
-            )
-            if not participants:
-                participants = list(fallback_participants)
-            event_id = str(event.get("event_id") or "").strip() or self._outline_event_id(
-                document_title_index=batch.document_title_index,
-                order=index,
-                label=label,
-                summary=summary,
-                source_doc_range=doc_range,
-            )
-            enriched_events.append(
-                {
-                    **event,
-                    "event_id": event_id,
-                    "label": label or summary[:24] or f"{batch.chapter_title}事件{index}",
-                    "participants": participants,
-                    "summary": summary or label,
-                    "document_title_index": batch.document_title_index,
-                    "source_title_indexes": title_indexes,
-                    "source_doc_ids": doc_ids,
-                    "source_doc_start_id": doc_ids[0] if doc_ids else 0,
-                    "source_doc_end_id": doc_ids[-1] if doc_ids else 0,
-                    "source_doc_range": doc_range,
-                    "source_chapter_range": self._doc_range_text(title_indexes),
-                    "status": "provisional",
-                    "event_summary_level": "chapter_event",
-                }
-            )
-        raw["timeline_events"] = enriched_events
-        raw["event_summary"] = event_summary or self._outline_event_summary(enriched_events, fallback=summary_short)
-        raw["source_doc_ids"] = doc_ids
-        raw["source_doc_range"] = doc_range
-        raw["source_title_indexes"] = title_indexes
-        return raw
-
-    def _story_events_by_character(self, outline_update: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for event in outline_update.get("timeline_events", []) or []:
-            if not isinstance(event, dict):
-                continue
-            raw_participants = event.get("participants", [])
-            participants = raw_participants if isinstance(raw_participants, list) else []
-            for name in self.character_mention_service.clean_names(participants):
-                grouped.setdefault(name, []).append(
-                    {
-                        "event_id": event.get("event_id", ""),
-                        "label": event.get("label", ""),
-                        "summary": event.get("summary", ""),
-                        "source_chapter_indexes": [event.get("document_title_index")],
-                        "source_chapter_range": event.get("source_chapter_range", ""),
-                        "source_doc_ids": event.get("source_doc_ids", []),
-                        "source_doc_range": event.get("source_doc_range", ""),
-                        "participants": event.get("participants", []),
-                        "status": event.get("status", "provisional"),
-                    }
-                )
-        return grouped
-
-    def _merge_outline_updates(
-        self,
-        *,
-        existing: dict[str, Any],
-        current: dict[str, Any],
-        prefer_current_event_summary: bool = False,
-    ) -> dict[str, Any]:
-        if not existing:
-            return dict(current)
-        if not current:
-            return dict(existing)
-
-        merged = dict(existing)
-        for key, value in current.items():
-            if key in {
-                "timeline_events",
-                "source_doc_ids",
-                "source_title_indexes",
-                "source_doc_range",
-                "event_summary",
-            }:
-                continue
-            if value not in (None, "", [], {}):
-                merged[key] = value
-
-        timeline_events: list[dict[str, Any]] = []
-        by_key: dict[str, dict[str, Any]] = {}
-        raw_events = [*(existing.get("timeline_events") if isinstance(existing.get("timeline_events"), list) else [])]
-        raw_events.extend(current.get("timeline_events") if isinstance(current.get("timeline_events"), list) else [])
-        for raw_event in raw_events:
-            if not isinstance(raw_event, dict):
-                continue
-            event = dict(raw_event)
-            doc_ids = sorted(set(self._safe_int_list(event.get("source_doc_ids"))))
-            if doc_ids:
-                event["source_doc_ids"] = doc_ids
-                event["source_doc_range"] = self._doc_range_text(doc_ids)
-            key = self._outline_event_key(event)
-            if key in by_key:
-                by_key[key].update(
-                    {
-                        item_key: item_value
-                        for item_key, item_value in event.items()
-                        if item_value not in (None, "", [], {})
-                    }
-                )
-                continue
-            by_key[key] = event
-            timeline_events.append(event)
-
-        source_doc_ids = sorted(
-            {
-                doc_id
-                for source in (existing, current)
-                for doc_id in self._safe_int_list(source.get("source_doc_ids"))
-            }
-        )
-        if not source_doc_ids:
-            for event in timeline_events:
-                source_doc_ids.extend(self._safe_int_list(event.get("source_doc_ids")))
-            source_doc_ids = sorted(set(source_doc_ids))
-
-        source_title_indexes = sorted(
-            {
-                title_index
-                for source in (existing, current)
-                for title_index in self._safe_int_list(source.get("source_title_indexes"))
-            }
-        )
-        merged["timeline_events"] = timeline_events
-        merged["source_doc_ids"] = source_doc_ids
-        merged["source_doc_range"] = self._doc_range_text(source_doc_ids)
-        merged["source_title_indexes"] = source_title_indexes
-        existing_event_summary = str(existing.get("event_summary") or "").strip()
-        current_event_summary = str(current.get("event_summary") or "").strip()
-        if prefer_current_event_summary and current_event_summary:
-            merged_event_summary = current_event_summary
-        else:
-            merged_event_summary = self._join_distinct_event_summaries(
-                [existing_event_summary, current_event_summary],
-            )
-        merged["event_summary"] = merged_event_summary or self._outline_event_summary(timeline_events, fallback="")
-        return merged
-
-    def _outline_event_key(self, event: dict[str, Any]) -> str:
-        doc_ids = self._safe_int_list(event.get("source_doc_ids"))
-        doc_key = str(event.get("source_doc_range") or "").strip()
-        if not doc_key:
-            doc_key = ",".join(str(item) for item in sorted(set(doc_ids)))
-        label = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(event.get("label") or "")).lower()
-        summary = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(event.get("summary") or "")).lower()
-        raw_participants = event.get("participants", [])
-        participants = (
-            ",".join(sorted(str(item).strip() for item in raw_participants if str(item).strip()))
-            if isinstance(raw_participants, list)
-            else ""
-        )
-        if doc_key:
-            return "docs||" + "||".join([label or summary, participants, doc_key])
-        event_id = str(event.get("event_id") or "").strip()
-        if event_id:
-            return f"event||{event_id}"
-        return "text||" + "||".join([label or summary, participants])
-
-    def _outline_event_id(
-        self,
-        *,
-        document_title_index: int,
-        order: int,
-        label: str,
-        summary: str,
-        source_doc_range: str = "",
-    ) -> str:
-        base = re.sub(r"[^\w\u4e00-\u9fff]+", "-", label or summary[:24]).strip("-").lower()
-        suffix = base[:32] or f"event-{order:02d}"
-        source_suffix = re.sub(r"[^\w\u4e00-\u9fff]+", "-", source_doc_range).strip("-").lower()
-        if source_suffix:
-            return f"chapter-{document_title_index}:event-{order:02d}-{suffix}-docs-{source_suffix}"
-        return f"chapter-{document_title_index}:event-{order:02d}-{suffix}"
-
     def _outline_segment_id(self, *, document_title_index: int, source_doc_range: str = "") -> str:
         source_suffix = re.sub(r"[^\w\u4e00-\u9fff]+", "-", str(source_doc_range or "")).strip("-").lower()
         if source_suffix:
             return f"outline-segment:chapter-{document_title_index}:docs-{source_suffix}"
         return f"outline-segment:chapter-{document_title_index}"
 
-    def _outline_event_summary(self, events: list[dict[str, Any]], *, fallback: str) -> str:
-        summaries = [str(item.get("summary") or item.get("label") or "").strip() for item in events]
-        joined = "；".join(item for item in summaries if item)
-        return joined or fallback
-
-    def _join_distinct_event_summaries(self, summaries: list[str]) -> str:
+    def _join_distinct_outline_segments(self, summaries: list[str]) -> str:
         parts: list[str] = []
         seen: set[str] = set()
         for summary in summaries:
@@ -3211,6 +3312,13 @@ class CloseReadRunner:
         except json.JSONDecodeError:
             return {}
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _row_has_column(row: Any, column: str) -> bool:
+        try:
+            return column in row.keys()
+        except AttributeError:
+            return False
 
     def _load_character_profiles_with_budget(
         self,

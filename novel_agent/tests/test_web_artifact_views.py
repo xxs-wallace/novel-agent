@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +103,17 @@ def _seed_close_read_db(repo_root: Path, task_id: str) -> None:
                 json.dumps([{"value": "克制、谨慎", "field_type": "inference"}], ensure_ascii=False),
                 json.dumps([{"value": "调查者", "field_type": "fact"}], ensure_ascii=False),
                 json.dumps([{"name": "线索整合", "summary": "擅长把碎片证据连起来"}], ensure_ascii=False),
-                json.dumps([{"value": "正在追查匿名信来源"}], ensure_ascii=False),
+                json.dumps(
+                    [
+                        {
+                            "value": "正在追查匿名信来源",
+                            "field_type": "fact",
+                            "source_chapter_indexes": [1],
+                            "source_doc_ids": [1, 2],
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
                 json.dumps(
                     [
                         {
@@ -116,6 +127,45 @@ def _seed_close_read_db(repo_root: Path, task_id: str) -> None:
                 95,
                 "2026-01-01T00:00:00Z",
                 "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.commit()
+
+
+def _seed_writer_memory_character(repo_root: Path, task_id: str, name: str) -> None:
+    source_db_path = repo_root / ".indexes" / f"{task_id}.db"
+    writer_db_path = repo_root / ".indexes" / "writer" / f"{task_id}.db"
+    writer_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(source_db_path)) as source_conn, sqlite3.connect(str(writer_db_path)) as writer_conn:
+        source_conn.backup(writer_conn)
+
+    db = NovelAgentDB(writer_db_path)
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO character_profiles (
+                book_id, canonical_name, aliases_json, profile_summary_md, speaking_character_status,
+                personhood_evidence_summary, personality_json, occupations_json, abilities_json,
+                recent_activity_json, relationships_json, importance_score, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                name,
+                "[]",
+                "Writer 写回中新出现的人物，已经进入人物档案。",
+                "speaking",
+                "由已写回章节提供出场证据。",
+                json.dumps([{"value": "冷静", "field_type": "inference"}], ensure_ascii=False),
+                json.dumps([{"value": "联络人", "field_type": "fact"}], ensure_ascii=False),
+                "[]",
+                json.dumps([{"value": "在 Writer 生成章节中首次承担行动功能"}], ensure_ascii=False),
+                "[]",
+                45,
+                "2026-01-02T00:00:00Z",
+                "2026-01-02T00:00:00Z",
             ),
         )
         conn.commit()
@@ -142,8 +192,32 @@ def test_close_read_tree_and_person_encyclopedia_view(tmp_path: Path) -> None:
     assert section_titles == ["基本信息", "当前目标", "关系网络", "性格与说话方式", "已知秘密", "禁止误写点", "最近变化"]
     rendered = json.dumps(payload, ensure_ascii=False)
     assert "调查旧案" in rendered
+    current_goal = next(section for section in payload["sections"] if section["title"] == "当前目标")["body"]
+    assert "正在追查匿名信来源（章节：1；documents：1, 2）" in current_goal
+    assert "value" not in current_goal
+    assert "source_doc_ids" not in current_goal
     assert "raw_json" not in payload
     assert "{" not in "".join(section["body"] for section in payload["sections"])
+
+
+def test_close_read_people_include_writer_generated_characters(tmp_path: Path) -> None:
+    task_id = "book-one"
+    generated_name = "林澈"
+    _seed_close_read_db(tmp_path, task_id)
+    _seed_writer_memory_character(tmp_path, task_id, generated_name)
+    client = TestClient(create_app(repo_root=tmp_path))
+    client.post("/api/tasks", json={"task_id": task_id, "source_path": ""})
+
+    tree = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=close-read").json()
+    assert _find_node(tree, "沈青")
+    generated_person = _find_node(tree, generated_name)
+    assert generated_person
+
+    view = client.get(f"/api/artifacts/{generated_person['id']}/view")
+    assert view.status_code == 200
+    rendered = json.dumps(view.json(), ensure_ascii=False)
+    assert "Writer 写回中新出现的人物" in rendered
+    assert "在 Writer 生成章节中首次承担行动功能" in rendered
 
 
 def test_chapter_view_is_user_readable_not_raw_json(tmp_path: Path) -> None:
@@ -159,6 +233,12 @@ def test_chapter_view_is_user_readable_not_raw_json(tmp_path: Path) -> None:
     rendered = json.dumps(view, ensure_ascii=False)
     assert "剧情概括" in rendered
     assert "匿名信来源未明" in rendered
+    actions = view["actions"]
+    assert [action["label"] for action in actions] == ["分析原文"]
+    assert actions[0]["payload"]["reviewer_id"] == "source_chapter_literary_diagnostic"
+    assert actions[0]["payload"]["target_type"] == "source_chapter"
+    assert actions[0]["payload"]["document_ids"] == ["1", "2"]
+    assert actions[0]["payload"]["target_raw_chars"] == 3200
     assert "raw_json" not in view
     assert "mentioned_characters_json" not in rendered
 
@@ -199,12 +279,39 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
             {
                 "data": {
                     "desired_actions": ["让主角根据匿名信继续追查旧案。"],
+                    "raw_user_prompt": "让主角根据匿名信继续追查旧案。",
                     "story_scale": {
                         "target_chapter_count": 3,
                         "target_total_chars": 9000,
                         "default_chapter_target_chars": 3000,
                     },
                     "climax_plan": {"conflict_climax": "在旧码头发现真正的幕后联系人。"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "outline_research_question_set.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "question_set_id": "outline-research-run-1-needs-input",
+                    "questions": [{"question_id": "q1", "prompt": "下一批的主要氛围是什么？", "required": True}],
+                    "actions": {"submit": "continue_after_outline_research_input"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "outline_research_answer_submission.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "question_set_id": "outline-research-run-1-needs-input",
+                    "answer_text": "下一批先写过渡日常，再引出新的晚宴邀请。",
+                    "user_answers": [],
                 }
             },
             ensure_ascii=False,
@@ -299,7 +406,10 @@ def test_writer_tree_and_views_convert_artifacts_without_raw_dump(tmp_path: Path
     intent_view = client.get(f"/api/artifacts/{intent_node['id']}/view").json()
     intent_rendered = json.dumps(intent_view, ensure_ascii=False)
     assert intent_view["kind"] == "writer_continuation_intent"
+    assert "完整提交上下文" in intent_rendered
     assert "让主角根据匿名信继续追查旧案" in intent_rendered
+    assert "顾迟是否新增" in intent_rendered
+    assert "下一批先写过渡日常" in intent_rendered
     assert "目标章节数：3" in intent_rendered
     assert "desired_actions" not in intent_rendered
 

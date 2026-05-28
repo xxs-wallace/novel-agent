@@ -3,7 +3,7 @@
 ## Source Of Truth
 
 - 产品级核心流程、总编排、用户接口、UI 交互与用户可见状态文案，以 [`../spec.md`](../spec.md) 为准。
-- 本 spec 只定义 Writer 分层生成模型、Agent Loop、artifact review gate、人物补充、批次规划、章节梗概、正文执行边界与写回规则。
+- 本 spec 只定义 Writer 分层生成模型、Agent Loop、artifact review gate、人物补充、批次规划、章节梗概、Draft Research Loop、Draft Prose Executor、正文执行边界与写回规则。
 - Writer 新流程不再以 `Freeze A/B/C/D/E`、`wait_length_review` 或 `freeze_d_review` 作为主编排模型；运行期 SHALL 使用小状态机 + artifact review record 表达暂停、恢复和回滚。
 - `checkpoint`、artifact path、workflow stage/action 等技术细节只能用于恢复、debug drawer、日志和结构化 action，不得作为普通 UI 的主状态展示。
 
@@ -31,7 +31,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - `agent_running`：Agent 正在 research、查询本地资料、修订规划或生成正文。
 - `reviewing_artifact`：等待用户审阅一个可见 artifact，例如全书规划、批次计划、章节标题与梗概、章节草稿或写回摘要。
 - `needs_user_input`：模型明确返回信息不足或授权边界不足，需要结构化问题集。
-- `generating_draft`：正在基于已通过的章节梗概、用户补充和装配上下文生成正文。
+- `generating_draft`：正在基于已通过的章节梗概、用户补充、Draft Research Loop 装配上下文和执行输入生成正文。
 - `reviewing_draft`：等待用户验收当前章节草稿。
 - `writeback_review`：等待用户确认写回摘要。
 - `completed` / `halted` / `error`：正常完成、用户暂停或异常停止。
@@ -46,7 +46,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 本地查询 tool call：`story_detail`、`character_profile`、`world_concept`、`structure_pattern` 或 artifact lookup，由本地 Agent 翻译为 Memory / KB / runs 查询。
 - 面向用户的 tool call：`WriterQuestionSet`，由 Web / CLI / TUI 展示为结构化问题集，并通过对应 action 提交回答。
 
-章节梗概通过后，系统 SHALL 直接进入正文准备与生成：Agent 内部可派生长度预算、写作指导或 `chapter_execution_input.json`，但 `ChapterLengthPlan`、`wait_length_review` 和 `freeze_d_review` 不再是用户必须单独确认的流程节点。若用户对字数或风格有要求，应在通过章节梗概时通过 `supplement_text` 输入；若用户不认可章节梗概，应走“不通过 + 修订反馈”分叉。
+章节梗概通过后，系统 SHALL 进入正文 writer 的两阶段流程：先运行 `Draft Research Loop`，再由 `Draft Prose Executor` 生成正文。Agent 内部可派生长度预算、写作指导、`draft_seed_packet.json`、`draft_context_notebook.json` 或 `chapter_execution_input.json`，但 `ChapterLengthPlan`、`wait_length_review` 和 `freeze_d_review` 不再是用户必须单独确认的流程节点。若用户对字数或风格有要求，应在通过章节梗概时通过 `supplement_text` 输入；若用户不认可章节梗概，应走“不通过 + 修订反馈”分叉。
 
 普通 UI 应在 review gate 中提示用户下一步如何操作，例如：
 
@@ -158,7 +158,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 本地 Agent SHALL 将语义请求转换为 SQLite / Markdown / Memory / KB 可理解的查询，并返回带来源的 evidence
 - 对 `story_detail`，本地 Agent SHOULD 优先调用 Memory 层提供的 BTree descent / page query 接口，而不是由 Writer 直接读取 SQLite、扫描 Markdown 或拼接原文
 - Writer 模型 SHALL 负责在每层 Memory candidates 中选择需要继续展开的节点，并返回 `selected_ids`、`query_suffix`、`reason`、`confidence`；Memory 层 SHALL 负责确定性展开 selected ids 到下一层 Page 或 document
-- Writer 层不得重定义 Memory Page schema、event summary 压缩规则、chapter summary 回源规则或 document excerpt 裁剪规则
+- Writer 层不得重定义 Memory Page schema、outline segment / segment group 压缩规则、chapter summary 回源规则或 document excerpt 裁剪规则
 - 模型 MAY 发起多轮请求，但必须受 `ResearchBudget` 限制
 - 每轮 research 必须维护或更新 `planning_notebook`
 - 若达到预算上限仍缺少关键授权边界，系统 SHALL 向用户提出少量阻塞问题，而不是静默假设高风险剧情
@@ -172,8 +172,8 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 #### Memory / Writer 分工
 
 - Memory 层负责：
-  - 构建并维护 `event_summary -> event -> chapter -> document` 的 Page 索引
-  - 提供 root scan、drill down、event/chapter/document resolver 和 evidence bundle
+  - 构建并维护 `segment_group / outline_root -> outline_segment -> chapter -> document` 的 Page 索引
+  - 提供 root scan、drill down、outline_segment/chapter/document resolver 和 evidence bundle
   - 对候选节点做预算裁剪、状态标注和回源 trace
   - 保证不把 reference-only 或未授权未来信息泄漏给 Writer
 - Writer 层负责：
@@ -351,7 +351,23 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 ### Layer 4: 正文扩写层
 
-本层负责基于已通过的章节 brief、用户补充信息与正文执行输入扩写正文。
+本层负责基于已通过的章节 brief、用户补充信息与正文执行输入扩写正文。旧的固定 prompt 正文 Writer 不再是目标架构；正文 writer SHALL 拆为 `Draft Research Loop` 与 `Draft Prose Executor`。
+
+`Draft Research Loop` 负责在写正文前主动判断信息是否足够。它 SHALL 从轻量 `DraftSeedPacket` 开始，只携带本章 brief、用户补充、上游规划摘要、最近章节梗概、人物索引、关系门禁、禁止项和可查询资源目录。模型 MAY 通过结构化请求查询：
+
+- 人物档案、人物关键经历索引和可按 `outline_segment_id` 回源的人物关键经历
+- `story_detail`、segment group / outline root、outline segment、章节摘要、原始正文摘录
+- Narrative SceneCard、SourceArcMap、Creative KB 结构模式或风格参考
+- 世界观概念、规则、限制和禁止突破点
+- 用户补充问题集
+
+Draft Research Loop SHALL 将查询结果摘取为 `draft_context_notebook.json`，记录人物事实、关系约束、早期设定、场景索引、世界规则、风格参考、未解决风险和 evidence trace。该 notebook 是当前草稿的临时写作上下文，不是正式 Memory，也不得写入 canon。
+
+若 Draft Research Loop 发现本章 brief、用户补充或上游规划与 confirmed Memory 冲突，系统 SHALL 返回 `needs_user_input`、`replan_requested` 或 `blocked`，不得把冲突输入交给正文执行器硬写。
+
+`Draft Prose Executor` 是受限正文执行器。它只在 Draft Research Loop 判定 `ready_for_draft` 后运行，只消费已通过的章节 brief、用户补充、长度预算、`draft_context_notebook.json`、事实约束、风格参考、禁止项、关系门禁、计划角色约束和可选 `draft_rewrite_plan.json`。它不得主动查询 Memory、不得与用户对话、不得修改上游 artifact、不得新增关键设定或关键人物。
+
+当用户请求重写草稿时，`GenerationReviewDecision.feedback_text` SHALL 先进入 Draft Research Loop。Loop SHALL 判断反馈是表达层问题、场景重点问题、连续性问题、人物声音/关系问题、结构问题还是上游冲突；必要时重新查询 Memory / KB 或请求用户授权，并输出 `draft_rewrite_plan.json`。只有当重写计划判定可在当前 brief 内完成时，Draft Prose Executor 才能生成新版草稿；否则 workflow SHALL 回到章节梗概 review gate 或进入 `needs_user_input`。
 
 详细输入边界、输入分类与 `ChapterBrief -> SceneBrief` 对齐规则见：
 
@@ -360,10 +376,10 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 在主 spec 中仅保留摘要：
 
-- Writer 层只消费已通过的章节 brief、用户补充信息和装配后的正文输入
+- Draft Prose Executor 只消费已通过的章节 brief、用户补充信息、Draft Research Loop 笔记和装配后的正文输入
 - 风格参考不得覆盖事实约束
-- 当前分层 Writer 的直接执行输入为 `chapter_execution_input.json`
-- 正文扩写层 SHOULD 主要关注文笔、风格、节奏、场景呈现和细节表达，而不是重做大纲或梗概层的剧情决策
+- 当前分层 Writer 的直接执行输入包括 `draft_context_notebook.json` 和 `chapter_execution_input.json`
+- 正文扩写层 SHOULD 通过 Draft Research Loop 补齐必要事实，使 Draft Prose Executor 主要关注文笔、风格、节奏、场景呈现和细节表达，而不是重做大纲或梗概层的剧情决策
 
 ### Layer 5: 回写与校验层
 
@@ -402,9 +418,10 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 在主 spec 中仅保留摘要：
 
-- Writer Agent 是受限执行器，而不是自由写作者
-- Writer Agent 必须消费已通过的 brief、用户补充信息与装配后的输入包
-- Writer Agent 不得越权修改上游规划或事实边界
+- 正文 writer 由 Draft Research Loop 和 Draft Prose Executor 组成
+- Draft Research Loop 可主动查询当前章所需 Memory / KB / 用户补充，但不得修改上游规划或正式 Memory
+- Draft Prose Executor 是受限执行器，必须消费已通过的 brief、用户补充信息、Draft Research 笔记与装配后的输入包
+- Draft Prose Executor 不得越权修改上游规划或事实边界
 
 ## Requirements
 
@@ -523,17 +540,17 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 
 #### Scenario: 查询理解
 - **WHEN** 本地 Agent 收到 `story_detail`
-- **THEN** 系统使用 query understanding 流程解析人物、概念、事件意图、时间线提示和需要的事实侧面
+- **THEN** 系统使用 query understanding 流程解析人物、概念、剧情细节意图、时间位置提示和需要的事实侧面
 - **AND** 输出结构化检索计划
 
 #### Scenario: 历史大纲索引到源文档
 - **WHEN** 系统从历史大纲中返回候选故事细节
-- **THEN** 候选结果必须能追溯到 document、chapter 或 segment 位置
+- **THEN** 候选结果必须能追溯到 `outline_segment`、chapter 或 document 位置
 - **AND** 最低可用版本可以用章节摘要索引
-- **AND** 完整版本 SHOULD 使用事件级 `HistoricalOutlineEventIndex`
+- **AND** 完整版本 SHOULD 使用 Narrative Memory 提供的 `outline_root / segment_group -> outline_segment -> chapter -> document` Page 查询链路
 
-#### Scenario: 候选事件 rerank
-- **WHEN** 初步检索得到多个候选事件或章节摘要
+#### Scenario: 候选剧情段落 rerank
+- **WHEN** 初步检索得到多个候选 outline segment 或章节摘要
 - **THEN** 系统应根据原始 query、purpose 和候选卡片执行 rerank
 - **AND** 返回最相关 evidence、覆盖的事实侧面、缺失侧面和来源引用
 
@@ -579,16 +596,17 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - **THEN** 当前分层执行输入必须能追溯到已通过的 `ChapterBrief`、用户补充信息、派生 `SceneBrief`、事实约束、风格参考和长度预算
 - **AND** 若测试或跨层主链路需要构造 `WriterInputBundle`，不得改变 `WriterInputBundle` 与 `ContextAssemblyPayload` 的 contract 语义
 
-### Requirement: 章节梗概通过后由 Agent 组装正文输入
+### Requirement: 章节梗概通过后进入 Draft Research Loop
 
-系统 SHALL 在用户通过 `ChapterPackage` / `ChapterBrief` 后，由 Agent 将章节标题、梗概、上游规划、用户补充信息、Memory / KB evidence、风格参考和长度偏好组装为正文生成输入。系统不得要求用户再经过独立的长度确认或写作材料确认流程。
+系统 SHALL 在用户通过 `ChapterPackage` / `ChapterBrief` 后，由 Agent 先构建轻量 `DraftSeedPacket` 并运行 Draft Research Loop，再将章节标题、梗概、上游规划、用户补充信息、Memory / KB evidence、风格参考和长度偏好组装为正文生成输入。系统不得要求用户再经过独立的长度确认或写作材料确认流程。
 
 #### Scenario: 通过章节梗概并补充写作要求
 - **WHEN** 用户审阅章节标题与梗概后点击通过
 - **THEN** 用户 MAY 在同一动作中输入 `supplement_text`
 - **AND** `supplement_text` 原文必须保留，并作为模型 prompt 输入之一
 - **AND** 用户对字数、风格、节奏、重点段落、禁止项和人物关系的要求均应通过该补充文本表达
-- **AND** Agent MAY 内部派生 `ChapterWritingGuidance`、`chapter_length_budget` 或 `chapter_execution_input.json`
+- **AND** Agent MAY 内部派生 `DraftSeedPacket`、`ChapterWritingGuidance`、`chapter_length_budget` 或 `chapter_execution_input.json`
+- **AND** Draft Research Loop SHALL 判断是否需要查询人物档案、人物经历、story detail、outline segment、scene card、章节摘录、世界观概念或用户补充
 
 #### Scenario: 不通过章节梗概并要求调整
 - **WHEN** 用户审阅章节标题与梗概后点击不通过
@@ -601,6 +619,17 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - **WHEN** 用户已经通过章节梗概 review gate
 - **THEN** workflow 不得进入 `wait_length_review` 或 `freeze_d_review` 作为普通用户必须处理的主状态
 - **AND** 如果需要调整字数或风格，用户应通过通过动作中的 `supplement_text` 或草稿决策反馈表达
+
+#### Scenario: Draft Research Loop 生成正文上下文笔记
+- **WHEN** Draft Research Loop 完成当前章正文前研究
+- **THEN** 系统 SHALL 落盘 `draft_context_notebook.json` 或等价 artifact
+- **AND** 该 notebook SHALL 记录人物事实、关系约束、早期设定、场景索引、世界规则、风格参考、未解决风险和 evidence trace
+- **AND** 该 notebook 不得作为正式 Memory / KB 写回对象
+
+#### Scenario: 正文前发现上游冲突
+- **WHEN** Draft Research Loop 发现已通过的 `ChapterBrief`、用户补充或上游规划与 confirmed Memory 冲突
+- **THEN** 系统 SHALL 返回 `needs_user_input`、`replan_requested` 或 `blocked`
+- **AND** 不得把冲突上下文交给 Draft Prose Executor 继续生成正式草稿
 
 ### Requirement: Writer 规划必须消费结构模式以改善铺垫
 
@@ -657,13 +686,34 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - **THEN** Layer 2 仅生成当前批次的章节包
 - **AND** 后续批次可在不推翻全书方向的前提下重规划
 
-### Requirement: Writer Agent 只消费已通过 brief
+### Requirement: Draft Prose Executor 只消费已确认执行输入
 
-系统 SHALL 要求 Writer Agent 在正文扩写时只消费已经通过 review 的单章 brief、用户补充信息以及已装配的正文执行输入。
+系统 SHALL 要求 Draft Prose Executor 在正文扩写时只消费已经通过 review 的单章 brief、用户补充信息、Draft Research Loop 产出的 `draft_context_notebook.json` 以及已装配的正文执行输入。Draft Prose Executor 不得主动查询 Memory / KB、不得向用户提问、不得修改上游 artifact。
 
 该 requirement 的详细输入边界已迁移到：
 
 - [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+
+### Requirement: 草稿重写必须先经过 Draft Research Loop
+
+系统 SHALL 在用户不接受草稿并请求重写时，将 `GenerationReviewDecision.feedback_text` 原文交给 Draft Research Loop，而不是直接拼接进正文执行 prompt。
+
+#### Scenario: 表达层重写
+- **WHEN** 用户反馈只涉及字数、节奏、文风、对白密度、详略或场景表现
+- **THEN** Draft Research Loop MAY 复用上一轮 `draft_context_notebook.json`
+- **AND** 输出 `draft_rewrite_plan.json`
+- **AND** Draft Prose Executor 基于同一 `ChapterBrief` 生成新版草稿
+
+#### Scenario: 连续性或人物设定重写
+- **WHEN** 用户反馈指出人物声音、关系、身份、早期设定、时间线、伏笔或世界规则冲突
+- **THEN** Draft Research Loop SHOULD 发起 `character_profile`、`character_experience`、`story_detail`、`chapter_excerpt`、`scene_card` 或 `world_concept` 查询
+- **AND** 将新 evidence 摘取进 `draft_context_notebook.json`
+- **AND** 再输出 `draft_rewrite_plan.json`
+
+#### Scenario: 上游梗概不可执行
+- **WHEN** Draft Research Loop 判断用户反馈证明当前 `ChapterBrief` 本身与 canon 或上游规划冲突
+- **THEN** workflow SHALL 返回章节梗概 review gate 或进入 `needs_user_input`
+- **AND** 不得让 Draft Prose Executor 用同一 brief 硬重写
 
 ### Requirement: 世界观补全与剧情规划分离
 

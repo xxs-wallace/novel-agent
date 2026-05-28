@@ -303,6 +303,51 @@ class EmptyDocumentsModelClient:
         return {"documents": []}, ""
 
 
+class SplitAfterHeadingModelClient:
+    def __init__(self) -> None:
+        self.settings = SimpleNamespace(dry_run=False)
+        self.prompts: list[str] = []
+
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory,
+        use_fallback_on_error: bool = False,
+    ):
+        _ = system_prompt, fallback_factory, use_fallback_on_error
+        self.prompts.append(user_prompt)
+        segment_ids = [int(match.group(1)) for match in re.finditer(r'"segment_id":\s*(\d+)', user_prompt)]
+        return {
+            "documents": [
+                {
+                    "document_local_id": 1,
+                    "document_title": "第九幕",
+                    "document_title_index": 9,
+                    "inferred_chapter_no": 9,
+                    "segment_ids": segment_ids[:1],
+                    "character_keywords": [],
+                    "content_tags": [],
+                    "segmentation_reason": "confirmed_heading",
+                    "continuity_hint": "",
+                },
+                {
+                    "document_local_id": 2,
+                    "document_title": "第一幕 卡塞尔之门",
+                    "document_title_index": 10,
+                    "inferred_chapter_no": 9,
+                    "segment_ids": segment_ids[1:],
+                    "character_keywords": [],
+                    "content_tags": [],
+                    "segmentation_reason": "continuation_split",
+                    "continuity_hint": "",
+                },
+            ],
+            "batch_summary": {"chapter_count": 1, "document_count": 2, "new_characters": []},
+        }, ""
+
+
 def test_ingest_batches_splits_model_grouped_parenthesized_chapter_titles(tmp_path: Path) -> None:
     db_path = tmp_path / "grouped_parenthesized_titles.db"
     db = NovelAgentDB(db_path)
@@ -366,6 +411,62 @@ def test_ingest_batches_splits_model_grouped_parenthesized_chapter_titles(tmp_pa
     assert all(row["boundary_confidence"] >= 0.82 for row in rows)
     assert [row["boundary_status"] for row in rows] == ["confirmed", "confirmed", "confirmed"]
     assert all(row["boundary_candidate_id"] for row in rows)
+
+
+def test_ingest_batches_continuation_after_confirmed_heading_uses_new_chapter_title(tmp_path: Path) -> None:
+    db_path = tmp_path / "heading_continuity.db"
+    db = NovelAgentDB(db_path)
+    model_client = SplitAfterHeadingModelClient()
+    service = DocumentIngestService(
+        model_client=model_client,  # type: ignore[arg-type]
+        documents_repo=DocumentsRepo(),
+        progress_repo=ReadingProgressRepo(),
+        preferred_document_chars_min=800,
+        preferred_document_chars_max=1600,
+    )
+    text = "第九幕\n龙墓\n" + "第九幕内容继续推进，人物在新的章节里行动。" * 220
+    batch = TextBatch(
+        batch_no=1,
+        chars=len(text),
+        spans=[
+            ChunkFileSpan(
+                source_path=(tmp_path / "chapter_nine.txt").as_posix(),
+                source_file_name="chapter_nine.txt",
+                start_offset=0,
+                end_offset=len(text),
+                text=text,
+            )
+        ],
+    )
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        result = service.ingest_batches(
+            conn=conn,
+            repo_root=tmp_path,
+            book_id="heading_continuity",
+            batches=[batch],
+            run_id="heading-continuity-run",
+            reset_book=False,
+            initial_title_index=9,
+            continued_title="第一幕 卡塞尔之门",
+            continued_title_index=8,
+        )
+        rows = conn.execute(
+            """
+            SELECT document_title, document_title_index, raw_heading, boundary_status
+            FROM documents
+            WHERE book_id = 'heading_continuity'
+            ORDER BY doc_id
+            """
+        ).fetchall()
+
+    assert result.inserted_documents == 2
+    assert [row["document_title"] for row in rows] == ["第九幕", "第九幕"]
+    assert [row["document_title_index"] for row in rows] == [9, 9]
+    assert rows[0]["raw_heading"] == "第九幕"
+    assert rows[0]["boundary_status"] == "confirmed"
+    assert rows[1]["boundary_status"] == "uncertain"
 
 
 def test_ingest_batches_includes_resume_context_and_trims_overlap(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-import type { ConversationMessage, JobEventView, WriterArtifactReview, WriterDraftReview, WriterQuestionSet } from "../../api/types";
+import type { ConversationMessage, WriterArtifactReview, WriterDraftReview, WriterQuestionSet } from "../../api/types";
 import { toPublicStatusText } from "../../utils/status";
 import { DraftReviewCard } from "./DraftReviewCard";
 import { WriterArtifactReviewCard } from "./WriterArtifactReviewCard";
@@ -6,7 +6,6 @@ import { WriterQuestionCard } from "./WriterQuestionCard";
 
 interface MessageListProps {
   messages: ConversationMessage[];
-  jobEvents: JobEventView[];
   pending?: boolean;
   activeQuestionSetId?: string;
   activeArtifactReview?: { reviewId: string; mode: "supplement" | "revision" } | null;
@@ -37,7 +36,6 @@ const ROLE_LABELS: Record<string, string> = {
 
 export function MessageList({
   messages,
-  jobEvents,
   pending = false,
   activeQuestionSetId = "",
   activeArtifactReview = null,
@@ -58,7 +56,7 @@ export function MessageList({
 }: MessageListProps) {
   return (
     <div className="message-list" role="log" aria-live="polite">
-      {messages.length === 0 && jobEvents.length === 0 ? <div className="empty-state">选择任务后，可以在这里和 Agent 交流。</div> : null}
+      {messages.length === 0 ? <div className="empty-state">选择任务后，可以在这里和 Agent 交流。</div> : null}
       {messages.map((message) => (
         <div key={message.message_id} className={`message-bubble role-${message.role}`}>
           <span className="message-role">{ROLE_LABELS[message.role] ?? message.role}</span>
@@ -109,13 +107,6 @@ export function MessageList({
               onOpenDetail={onOpenArtifactDetail}
             />
           ) : null}
-        </div>
-      ))}
-      {jobEvents.map((event) => (
-        <div key={`${event.job_id}:${event.event_id}`} className={`message-bubble role-job event-${event.kind}`}>
-          <span className="message-role">进度</span>
-          <p>{toPublicStatusText(event.message, "")}</p>
-          {event.payload?.recovery_suggestion ? <p className="recovery-text">{String(event.payload.recovery_suggestion)}</p> : null}
         </div>
       ))}
     </div>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,8 @@ from ..schemas import (
     WriterReviewAction,
     WriterStartPreflight,
 )
+from ...constants import DEFAULT_CLOSE_READING_STAGE
+from ...repos.db import NovelAgentDB
 from .artifact_ids import encode_artifact_id
 from .reviewer_action_specs import reviewer_specs_for_stage, writer_reviewer_actions
 
@@ -238,14 +241,34 @@ class WebSessionService:
         snapshot = snapshot or self.facade.task_snapshot(book_id=task_id)
         modeling_status = self.facade.modeling_status(book_id=snapshot.book_id, db_path=snapshot.db_path)
         writer_state = self.latest_writer_state(snapshot.book_id)
+        batch_complete_needs_new_plan = self._writer_batch_complete_needs_new_plan(writer_state)
+        identity_block = self._identity_merge_block(snapshot.book_id, db_path=snapshot.db_path)
         internal_status = self._derive_public_status_source(snapshot=snapshot, writer_state=writer_state)
         status = self.status_presenter.present(internal_status)
         return TaskProgress(
             task_id=snapshot.book_id,
             flow=status.flow,
-            step=status.step,
-            next_action=status.next_action,
-            message=status.message,
+            step=(
+                "确认人物身份合并候选"
+                if identity_block
+                else "继续提交下一批章节的续写规划"
+                if batch_complete_needs_new_plan
+                else status.step
+            ),
+            next_action=(
+                "在会话卡片中确认、拒绝或转为记忆修正"
+                if identity_block
+                else "在输入框补充下一批方向后开始新一轮规划"
+                if batch_complete_needs_new_plan
+                else status.next_action
+            ),
+            message=(
+                "阅读已暂停，等待你确认高置信人物身份候选，避免错误合并污染记忆。"
+                if identity_block
+                else "上一批章节已完成并写回。下一批尚未创建，请先提交新的续写规划。"
+                if batch_complete_needs_new_plan
+                else status.message
+            ),
             read_progress={
                 "completed": snapshot.segmentation_completed_doc_id,
                 "total": snapshot.max_doc_id,
@@ -293,6 +316,7 @@ class WebSessionService:
         )
 
     def messages(self, task_id: str) -> list[ConversationMessage]:
+        self.sync_identity_merge_messages(task_id)
         self.sync_writer_question_messages(task_id)
         self.sync_writer_review_messages(task_id)
         self.sync_writer_recovery_message(task_id)
@@ -334,19 +358,27 @@ class WebSessionService:
             question_set_id = str(payload.get("question_set_id") or "")
             answer_text = str(payload.get("answer_text") or content).strip()
             if run_id and question_set_id and answer_text:
+                question_set = self._find_writer_question_set(task_id, run_id=run_id, question_set_id=question_set_id)
+                submit_action = (
+                    self._public_writer_question_submit_action(question_set)
+                    if question_set is not None
+                    else "submit_outline_research_answers"
+                )
+                is_draft_research = bool(question_set and question_set.stage == "draft_research_user_input")
+                research_label = "正文研究" if is_draft_research else "大纲研究"
                 self.append_message(
                     task_id,
                     role="assistant",
-                    content="已收到你的回答。点击提交后，Writer 会带着这段补充继续大纲研究。",
+                    content=f"已收到你的回答。点击提交后，Writer 会带着这段补充继续{research_label}。",
                     payload={"input_message_id": message.message_id, "channel": "writer_question_answer_received"},
                     decision_cards=[
                         DecisionCard(
-                            card_id=f"{task_id}:submit-outline-answer:{question_set_id}",
-                            title="继续大纲研究",
+                            card_id=f"{task_id}:submit-writer-answer:{question_set_id}",
+                            title=f"继续{research_label}",
                             body="将这段回答提交给 Writer，继续生成下一条可审阅内容。",
                             actions=[
                                 {
-                                    "action": "submit_outline_research_answers",
+                                    "action": submit_action,
                                     "label": "提交回答并继续研究",
                                     "variant": "primary",
                                     "payload": {
@@ -427,14 +459,25 @@ class WebSessionService:
         question_set_model = self._coerce_writer_question_set(question_set)
         if question_set_model is None:
             raise ValueError("问题集 payload 无效。")
+        submit_action = self._public_writer_question_submit_action(question_set_model)
+        defer_action = self._public_writer_question_defer_action(question_set_model)
+        if submit_action:
+            question_set_model.submit_action = submit_action
+        if defer_action:
+            question_set_model.defer_action = defer_action
         for message in self._messages.get(task_id, []):
             existing = message.writer_question_set
             if existing is not None and existing.question_set_id == question_set_model.question_set_id:
                 return message
+        content = (
+            "正文研究需要你补充几个关键问题。"
+            if question_set_model.stage == "draft_research_user_input"
+            else "大纲研究需要你补充几个关键问题。"
+        )
         return self.append_message(
             task_id,
             role="assistant",
-            content="大纲研究需要你补充几个关键问题。",
+            content=content,
             payload={
                 "channel": "writer_question_set",
                 "run_id": question_set_model.run_id,
@@ -442,6 +485,39 @@ class WebSessionService:
             },
             writer_question_set=question_set_model,
         )
+
+    def _public_writer_question_submit_action(self, question_set: WriterQuestionSet) -> str:
+        if question_set.stage == "draft_research_user_input":
+            return "submit_draft_research_answers"
+        action = str((question_set.actions or {}).get("submit") or question_set.submit_action or "").strip()
+        if action in {"", "continue_after_outline_research_input"}:
+            return "submit_outline_research_answers"
+        return action
+
+    def _public_writer_question_defer_action(self, question_set: WriterQuestionSet) -> str:
+        if question_set.stage == "draft_research_user_input":
+            return "defer_draft_research_answers"
+        action = str((question_set.actions or {}).get("defer") or question_set.defer_action or "").strip()
+        if action in {"", "defer_outline_research_input"}:
+            return "defer_outline_research_answers"
+        return action
+
+    def _find_writer_question_set(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        question_set_id: str,
+    ) -> WriterQuestionSet | None:
+        for existing_message in reversed(self._messages.get(task_id, [])):
+            existing = existing_message.writer_question_set
+            if (
+                existing is not None
+                and existing.run_id == run_id
+                and existing.question_set_id == question_set_id
+            ):
+                return existing
+        return None
 
     def sync_writer_question_messages(self, task_id: str) -> None:
         writer_state = self.latest_writer_state(task_id)
@@ -453,13 +529,18 @@ class WebSessionService:
             or writer_state.get("current_stage")
             or ""
         )
-        if active_stage != "outline_research_user_input":
+        if active_stage not in {"outline_research_user_input", "draft_research_user_input"}:
             return
         run_id = str(writer_state.get("run_id") or "")
         run_dir = Path(str(writer_state.get("run_dir") or ""))
         if not run_id or not run_dir.exists():
             return
-        payload = self._load_json_data(run_dir / "outline_research_question_set.json")
+        artifact_name = (
+            "draft_research_question_set.json"
+            if active_stage == "draft_research_user_input"
+            else "outline_research_question_set.json"
+        )
+        payload = self._load_json_data(run_dir / artifact_name)
         if not payload:
             return
         self.append_writer_question_message(task_id, payload)
@@ -524,7 +605,7 @@ class WebSessionService:
             writer_state.get("pending_checkpoint") if isinstance(writer_state.get("pending_checkpoint"), Mapping) else {}
         )
         active_stage = str((pending_checkpoint or {}).get("stage") or writer_state.get("current_stage") or "")
-        if active_stage == "outline_research_user_input":
+        if active_stage in {"outline_research_user_input", "draft_research_user_input"}:
             return
         if active_stage == "writeback_review" and self._writer_state_writeback_blocked(writer_state):
             review = self._writer_draft_review_from_state(task_id=task_id, writer_state=writer_state)
@@ -566,6 +647,7 @@ class WebSessionService:
             return
         if active_stage in {
             "outline_research_user_input",
+            "draft_research_user_input",
             "freeze_a_review",
             "batch_review",
             "chapter_review",
@@ -590,6 +672,8 @@ class WebSessionService:
             return
         active_stage = self._active_writer_stage(writer_state)
         terminal_stage = str(writer_state.get("terminal_stage") or "")
+        if active_stage == "draft_research_user_input":
+            return
         if active_stage not in {"completed", "writeback_committed"} and "completed" not in terminal_stage:
             return
         next_chapter_id = self._next_chapter_id_from_writer_state(writer_state)
@@ -631,12 +715,14 @@ class WebSessionService:
             card = DecisionCard(
                 card_id=f"{task_id}:writer-batch-completed:{run_id}",
                 title="本批次已写完",
-                body="请先在输入框补充下一批续写方向，再开始新一轮规划。",
+                body="请先在输入框补充下一批续写方向，再提交创建新的 Writer 批次。",
                 actions=[
                     {
                         "action": "start_writer",
-                        "label": "开始新一轮规划",
+                        "label": "提交下一批续写规划",
                         "variant": "primary",
+                        "requires_input": True,
+                        "input_role": "writer_new_batch_direction",
                         "payload": {
                             "requested_from": "writer_new_batch",
                             "previous_run_id": run_id,
@@ -646,7 +732,7 @@ class WebSessionService:
                     }
                 ],
             )
-            content = "本批次章节已经全部写回续写记忆。请先补充下一批方向，再开始新一轮规划。"
+            content = "本批次章节已经全部写回续写记忆。请先补充下一批方向，再提交创建新的 Writer 批次。"
         self.append_message(
             task_id,
             role="assistant",
@@ -674,6 +760,15 @@ class WebSessionService:
             index = chapter_ids.index(current_chapter_id)
             return chapter_ids[index + 1] if index + 1 < len(chapter_ids) else ""
         return chapter_ids[0]
+
+    def _writer_batch_complete_needs_new_plan(self, writer_state: Mapping[str, Any]) -> bool:
+        if not writer_state:
+            return False
+        active_stage = self._active_writer_stage(writer_state)
+        terminal_stage = str(writer_state.get("terminal_stage") or "")
+        if active_stage not in {"completed", "writeback_committed"} and "completed" not in terminal_stage:
+            return False
+        return not bool(self._next_chapter_id_from_writer_state(writer_state))
 
     def append_writer_recovery_message(
         self,
@@ -847,11 +942,30 @@ class WebSessionService:
         if not run_dir.exists() or not (run_dir / "draft.md").exists():
             return False
         active_stage = self._active_writer_stage(writer_state)
+        agent_state = str(writer_state.get("agent_state") or writer_state.get("current_state") or "").strip()
+        if agent_state in {"agent_running", "generating_draft"}:
+            return False
+        if active_stage in {"freeze_d", "ready_for_freeze_d", "draft_research_user_input"}:
+            return False
         if active_stage in {"writeback_review", "completed", "writeback_committed", "halted"}:
+            return False
+        if not self._draft_matches_current_chapter(run_dir=run_dir, writer_state=writer_state):
             return False
         generation_review = self._load_json_data(run_dir / "generation_review_decision.json")
         status = str(generation_review.get("status") or "").strip()
         return not status
+
+    def _draft_matches_current_chapter(self, *, run_dir: Path, writer_state: Mapping[str, Any]) -> bool:
+        current_chapter_id = str(writer_state.get("current_chapter_id") or "").strip()
+        if not current_chapter_id:
+            return True
+        generation_review = self._load_json_data(run_dir / "generation_review_decision.json")
+        draft_chapter_id = str(generation_review.get("chapter_id") or "").strip()
+        if not draft_chapter_id:
+            continuity_report = self._load_json_data(run_dir / "continuity_report.json")
+            state_delta = continuity_report.get("state_delta") if isinstance(continuity_report.get("state_delta"), Mapping) else {}
+            draft_chapter_id = str(continuity_report.get("chapter_id") or state_delta.get("chapter_id") or "").strip()
+        return not draft_chapter_id or draft_chapter_id == current_chapter_id
 
     def _writer_state_writeback_blocked(self, writer_state: Mapping[str, Any]) -> bool:
         run_dir = Path(str(writer_state.get("run_dir") or ""))
@@ -937,6 +1051,148 @@ class WebSessionService:
     def has_writer_gate_message(self, task_id: str, run_id: str, *, active_stage: str = "") -> bool:
         return self._has_writer_gate_message(task_id, run_id, active_stage=active_stage)
 
+    def sync_identity_merge_messages(self, task_id: str) -> None:
+        for candidate in self.identity_merge_candidates(task_id, statuses=["pending_user_confirmation"]):
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if not candidate_id:
+                continue
+            if self._has_identity_merge_message(task_id, candidate_id):
+                continue
+            self.append_message(
+                task_id,
+                role="assistant",
+                content="阅读已暂停：发现高置信人物身份候选，需要你确认后再继续。",
+                payload={"channel": "identity_merge_review", "candidate_id": candidate_id},
+                decision_cards=[self._identity_merge_decision_card(task_id, candidate)],
+            )
+
+    def identity_merge_candidates(self, task_id: str, *, statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        snapshot = self.facade.task_snapshot(book_id=task_id)
+        db_path = snapshot.db_path or self.facade.db_path_for_book(task_id)
+        if not db_path.exists():
+            return []
+        db = NovelAgentDB(db_path)
+        with db.connect() as conn:
+            db.init_schema(conn)
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM character_identity_merge_candidates
+                    WHERE book_id = ? AND status IN ({placeholders})
+                    ORDER BY updated_at DESC
+                    """,
+                    [task_id, *statuses],
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM character_identity_merge_candidates
+                    WHERE book_id = ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (task_id,),
+                ).fetchall()
+            return [self._identity_candidate_from_row(row) for row in rows]
+
+    def _has_identity_merge_message(self, task_id: str, candidate_id: str) -> bool:
+        for message in self._messages.get(task_id, []):
+            if message.payload.get("channel") == "identity_merge_review" and message.payload.get("candidate_id") == candidate_id:
+                return True
+        return False
+
+    def _identity_merge_decision_card(self, task_id: str, candidate: Mapping[str, Any]) -> DecisionCard:
+        candidate_id = str(candidate.get("candidate_id") or "")
+        left = str(candidate.get("left_name") or "")
+        right = str(candidate.get("right_name") or "")
+        score = candidate.get("same_person_score")
+        action = str(candidate.get("recommended_action") or "")
+        source_docs = ", ".join(str(item) for item in candidate.get("source_doc_ids") or [])
+        reason = str(candidate.get("reason") or "")
+        body = "\n".join(
+            item
+            for item in [
+                f"候选：{left} / {right}",
+                f"评分：{score}，建议：{action}",
+                f"来源 docs：{source_docs}" if source_docs else "",
+                reason,
+            ]
+            if item
+        )
+        payload = {"candidate_id": candidate_id}
+        return DecisionCard(
+            card_id=f"{task_id}:identity-merge:{candidate_id}",
+            title="待确认人物身份合并",
+            body=body,
+            actions=[
+                {"action": "confirm_identity_merge", "label": "确认合并", "variant": "primary", "payload": payload},
+                {"action": "reject_identity_merge", "label": "保持分离", "variant": "secondary", "payload": payload},
+                {"action": "request_identity_merge_more_evidence", "label": "需要更多证据", "variant": "secondary", "payload": payload},
+                {"action": "route_identity_merge_to_correction", "label": "转为记忆修正", "variant": "secondary", "payload": payload},
+            ],
+        )
+
+    def _identity_merge_block(self, task_id: str, *, db_path: Path | None) -> dict[str, Any]:
+        if db_path is None or not db_path.exists():
+            return {}
+        db = NovelAgentDB(db_path)
+        with db.connect() as conn:
+            db.init_schema(conn)
+            row = conn.execute(
+                "SELECT status_json FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+                (task_id, DEFAULT_CLOSE_READING_STAGE),
+            ).fetchone()
+            if row is None:
+                return {}
+            try:
+                payload = json.loads(row["status_json"] or "{}")
+            except json.JSONDecodeError:
+                return {}
+            return payload if str(payload.get("state") or "") == "blocked_identity_merge_review" else {}
+
+    @staticmethod
+    def _identity_candidate_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        def load_list(field_name: str) -> list[Any]:
+            try:
+                loaded = json.loads(row[field_name] or "[]")
+            except json.JSONDecodeError:
+                return []
+            return loaded if isinstance(loaded, list) else []
+
+        def load_dict(field_name: str) -> dict[str, Any]:
+            try:
+                loaded = json.loads(row[field_name] or "{}")
+            except json.JSONDecodeError:
+                return {}
+            return loaded if isinstance(loaded, dict) else {}
+
+        return {
+            "candidate_id": str(row["candidate_id"] or ""),
+            "book_id": str(row["book_id"] or ""),
+            "status": str(row["status"] or ""),
+            "gate_level": str(row["gate_level"] or ""),
+            "recommended_action": str(row["recommended_action"] or ""),
+            "same_person_score": int(row["same_person_score"] or 0),
+            "confidence": float(row["confidence"] or 0),
+            "reason": str(row["reason"] or ""),
+            "evidence_summary": str(row["evidence_summary"] or ""),
+            "left_character_id": row["left_character_id"],
+            "left_name": str(row["left_name"] or ""),
+            "right_character_id": row["right_character_id"],
+            "right_name": str(row["right_name"] or ""),
+            "survivor_canonical_name": str(row["survivor_canonical_name"] or ""),
+            "aliases_to_keep": load_list("aliases_to_keep_json"),
+            "source_doc_ids": load_list("source_doc_ids_json"),
+            "source_title_indexes": load_list("source_title_indexes_json"),
+            "outline_segment_ids": load_list("outline_segment_ids_json"),
+            "decision": load_dict("decision_json"),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+            "resolved_at": str(row["resolved_at"] or ""),
+        }
+
     @staticmethod
     def _active_writer_stage(writer_state: Mapping[str, Any]) -> str:
         pending = writer_state.get("pending_checkpoint") if isinstance(writer_state.get("pending_checkpoint"), Mapping) else {}
@@ -1015,36 +1271,52 @@ class WebSessionService:
             artifact_id=detail_artifact_id,
             title=title,
             summary=summary,
-            next_prompt=(
+        next_prompt=(
+            "提交后会把本章正文、历史梗概、outline 片段和人物档案更新作为同一个事务处理。"
+            if active_stage == "writeback_review"
+            else (
                 "通过时可以补充字数、风格、节奏、重点描写或禁止项；"
                 "不通过时请说明要调整的标题、因果、人物动机、场景顺序、关系推进或伏笔安排。"
-            ),
+            )
+        ),
             detail_artifact_id=detail_artifact_id,
-            actions=[
-                *reviewer_actions,
-                WriterReviewAction(
-                    action="approve_writer_artifact",
-                    label="通过并继续",
-                    payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
-                    description="保留可选补充原文，并交给 Writer 继续后续流程。",
-                    variant="primary",
-                    input_role="artifact_supplement",
-                ),
-                WriterReviewAction(
-                    action="request_writer_artifact_revision",
-                    label="不通过并调整",
-                    payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
-                    description="需要输入调整反馈，Writer 会修订当前产物并回到同一审阅点。",
-                    requires_input=True,
-                    input_role="artifact_revision_feedback",
-                ),
-                WriterReviewAction(
-                    action="defer_writer_artifact_review",
-                    label="稍后继续",
-                    payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
-                    description="保留当前审阅点，不推进流程。",
-                ),
-            ],
+            actions=(
+                [
+                    WriterReviewAction(
+                        action="approve_writeback",
+                        label="提交本章正文",
+                        payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
+                        description="把本章正文和续写记忆更新作为一个事务提交。",
+                        variant="primary",
+                    )
+                ]
+                if active_stage == "writeback_review"
+                else [
+                    *reviewer_actions,
+                    WriterReviewAction(
+                        action="approve_writer_artifact",
+                        label="通过并继续",
+                        payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
+                        description="保留可选补充原文，并交给 Writer 继续后续流程。",
+                        variant="primary",
+                        input_role="artifact_supplement",
+                    ),
+                    WriterReviewAction(
+                        action="request_writer_artifact_revision",
+                        label="不通过并调整",
+                        payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
+                        description="需要输入调整反馈，Writer 会修订当前产物并回到同一审阅点。",
+                        requires_input=True,
+                        input_role="artifact_revision_feedback",
+                    ),
+                    WriterReviewAction(
+                        action="defer_writer_artifact_review",
+                        label="稍后继续",
+                        payload={"run_id": run_id, "review_id": review_id, "artifact_kind": artifact_kind, "artifact_id": detail_artifact_id},
+                        description="保留当前审阅点，不推进流程。",
+                    ),
+                ]
+            ),
             technical_details={
                 "stage": active_stage,
                 "artifact_path": artifact_path,
@@ -1061,6 +1333,8 @@ class WebSessionService:
         run_id = str(writer_state.get("run_id") or "")
         run_dir = Path(str(writer_state.get("run_dir") or ""))
         if not run_id or not run_dir.exists():
+            return None
+        if not self._draft_matches_current_chapter(run_dir=run_dir, writer_state=writer_state):
             return None
         generation_review = self._load_json_data(run_dir / "generation_review_decision.json")
         chapter_id = str(generation_review.get("chapter_id") or writer_state.get("current_chapter_id") or "")
@@ -1105,9 +1379,9 @@ class WebSessionService:
                 *reviewer_actions,
                 WriterReviewAction(
                     action="accept_chapter",
-                    label="接受本章",
+                    label="提交本章正文",
                     payload=dict(common_payload),
-                    description="唯一会进入写回摘要审阅或正式写回候选的草稿分支。",
+                    description="确认使用这版草稿，并把正文与续写记忆更新作为一个事务提交。",
                     variant="primary",
                 ),
                 WriterReviewAction(
@@ -1157,7 +1431,7 @@ class WebSessionService:
         if stage in {"chapter_review", "wait_chapter_review"}:
             return "章节标题与梗概", "chapter_package", "chapter_package"
         if stage == "writeback_review":
-            return "写回摘要", "writeback_summary", "writeback"
+            return "提交本章正文", "writeback_summary", "writeback"
         path_name = Path(artifact_path).name
         return "Writer 审阅产物", path_name.removesuffix(".json") or "writer_artifact", "writer_artifact"
 
@@ -1221,6 +1495,8 @@ class WebSessionService:
             return "我整理好了本批剧情大纲，请看下面这版是否合适。"
         if title == "全书续写规划":
             return "我整理好了全书续写规划，请看下面这版是否符合你的续写目标。"
+        if title == "提交本章正文":
+            return "本章草稿已接受，可以继续提交正文并更新续写记忆。"
         return f"请审阅{title}。"
 
     def _writer_chapter_package_summary(self, payload: Mapping[str, Any]) -> str:
@@ -1344,8 +1620,20 @@ class WebSessionService:
                 f"{status.step or '上一次 Writer 运行可以继续'}。点击“{resumable_action.label}”继续。",
                 card,
             )
+        stage = str(writer_state.get("current_stage") or "")
+        if stage == "initialized":
+            return (
+                "上一次 Writer 创建只保存了初始状态，还没有生成可审阅的大纲或问题卡。"
+                "这通常表示后台生成在大纲研究前半段失败或被中断。请删除这次未完成的续写任务后重新提交。",
+                DecisionCard(
+                    card_id=f"{task_id}:writer-empty-recovery:{run_id}",
+                    title="续写任务未生成可审阅内容",
+                    body="当前 run 只有初始状态，没有问题集、审阅产物或草稿决策点。请删除这次续写任务后重试。",
+                    actions=[],
+                ),
+            )
         return (
-            "上一次 Writer 运行还没有保存到可审阅节点，当前没有可恢复的问题或审阅卡。"
+            "上一次 Writer 运行没有保存到可审阅节点，当前没有可恢复的问题或审阅卡。"
             "请重新点击“开始续写”提交方向；如需清理旧 run，可从任务菜单删除续写任务。",
             DecisionCard(
                 card_id=f"{task_id}:writer-empty-recovery:{run_id}",
@@ -1384,8 +1672,7 @@ class WebSessionService:
         raw_steps = payload.get("missing_modeling_steps")
         if isinstance(raw_steps, list):
             steps = [str(item).strip() for item in raw_steps if str(item).strip()]
-            if steps:
-                return steps
+            return steps
         checks = payload.get("checks")
         if not isinstance(checks, list):
             return []
@@ -1399,8 +1686,6 @@ class WebSessionService:
                 "character_profiles": "memory.character_profiles",
                 "story_outline": "memory.story_outline",
                 "world_summary": "memory.world_summary",
-                "creative_kb": "creative_kb.fragment_cards",
-                "source_arc_map": "memory.source_arc_map",
             }.get(name, "")
             if step:
                 mapped.append(step)

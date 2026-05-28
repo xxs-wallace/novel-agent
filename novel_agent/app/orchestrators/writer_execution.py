@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
+import os
 import re
 import sqlite3
 from copy import deepcopy
@@ -11,7 +13,6 @@ from typing import Any, Mapping
 
 from ...runs.writer import RunWriter
 from ...schemas.continuity import ContinuityIssue, ContinuityReport
-from ..utils.json_utils import extract_json_blob
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
@@ -24,9 +25,11 @@ from ..schemas.orchestration_schema import FreezeRecord, StateChange, StateDelta
 from ..services.character_mention_service import CharacterMentionService
 from ..services.character_profile_service import CharacterProfileService
 from ..services.coarse_retrieval_service import CoarseRetrievalService
-from ..services.outline_service import OutlineService
+from ..services.draft_research_service import DraftResearchService
+from ..services.outline_segment_index_service import OutlineSegmentIndexService
 from ..services.rerank_service import RerankService
 from ..services.world_state_service import WorldStateService
+from ..utils.json_utils import extract_json_blob
 
 
 NARRATION_CONSISTENCY_RULES = (
@@ -74,90 +77,6 @@ _REQUIREMENT_STOPWORDS = {
     "范围",
 }
 
-_REQUIREMENT_DEFAULT_ALIASES: dict[str, tuple[str, ...]] = {
-    "聚会": ("客厅", "圣诞树", "晚饭", "三个人", "沙发区"),
-    "朋友": ("小锋", "三个人", "舞伴"),
-    "音乐": ("爵士", "萨克斯", "圣诞曲", "专辑"),
-    "放松": ("慵懒", "暖黄色", "半明半暗"),
-    "暧昧": ("试探", "贴", "靠", "目光", "触"),
-    "邀舞": ("跳舞", "舞伴", "伸出手", "牵起"),
-    "坐近": ("坐下", "身边", "贴着", "靠"),
-    "轻触": ("碰", "擦过", "扶住", "贴", "按在"),
-    "近距离": ("贴", "靠", "扶", "抵", "抱"),
-    "内心": ("心跳", "思绪", "我该", "我想", "胸口"),
-    "独白": ("我该", "我想", "我没有", "我盯着"),
-    "保护欲": ("叫停", "不行", "界限", "边界"),
-    "关键": ("就在", "这歌", "让我来", "站起来"),
-    "触碰": ("摸", "扶", "碰", "擦过", "贴上"),
-    "私密": ("裙摆", "腰", "大腿", "腿根"),
-    "打断": ("叫停", "推开", "制止"),
-    "介入": ("站起来", "走到", "让我来", "接手"),
-    "话题": ("说", "问", "告诉"),
-    "肢体": ("揽", "抱", "扶", "拉", "吻"),
-    "边界": ("不行", "那种程度", "再往下", "界限"),
-    "不回避": ("没有躲", "没有退", "没有叫停", "看着"),
-    "默许": ("点了点头", "你们随意", "没有推开", "没有制止"),
-    "信任": ("只要你看着我", "我就能忍", "我们是一体"),
-    "犹豫": ("停住", "停顿", "想说什么", "说到一半", "终于说"),
-    "脸红": ("泛起", "脸上泛起", "耳廓", "红潮", "耳尖红"),
-    "握紧": ("攥", "绞紧", "骨节发白", "握住", "抓住"),
-    "落泪": ("眼泪", "泪痕", "哭", "呜咽", "睫毛沾湿"),
-    "绝对忠诚": ("从来没有变过", "从来没有想过要背叛", "唯一想嫁", "爱你爱到骨头"),
-    "忠诚": ("从来没有变过", "从来没有想过要背叛", "唯一想嫁", "爱你爱到骨头"),
-    "真实兴奋": ("我是兴奋", "真的享受", "喜欢被你看着", "喜欢被注视", "喜欢被你安排"),
-    "兴奋": ("我是兴奋", "真的享受", "喜欢被你看着", "喜欢被注视", "喜欢被你安排"),
-    "肯定": ("证明了一切", "接得住", "从来没觉得", "点了点头"),
-    "理解": ("我接得住", "不是对立", "我从来没觉得", "证明了一切"),
-    "感激": ("谢谢", "感激", "证明了一切"),
-    "调笑": ("挑了挑眉", "笑", "工具人", "不亏"),
-    "倾听者": ("没有起身", "没有低头", "我明白了", "坐在那里"),
-    "主导者": ("只是", "我明白了", "知道界限", "工具人"),
-    "界限": ("边界", "我明白了", "知道界限", "从头到尾你们都是一体的"),
-    "背叛": ("从来没有想过要背叛", "探索不等于背叛", "不是在给自己找借口"),
-    "欲望并存": ("忠诚与欲望", "又爱你，又这样", "两个都是我"),
-    "刺激感": ("真的享受", "我是兴奋", "喜欢被注视", "喜欢被你安排"),
-    "接纳": ("接得住", "证明了一切", "从来没觉得", "点了点头"),
-    "一体": ("从头到尾你们都是一体的", "我们是一体", "你是我的"),
-    "心理安全": ("信任", "安全感", "确认我是不是还在", "跟她站在同一条战线上"),
-    "互动升级": ("亲", "吻", "扶", "摸", "靠近", "贴近", "手贴", "手扶"),
-    "亲吻颈部": ("亲这里", "颈窝", "颈侧", "耳垂", "嘴唇碰上"),
-    "背部": ("后背", "脊柱", "脊椎", "后腰", "腰窝"),
-    "实质插入": ("再往下，不行", "停一下", "到此为止", "没有越过"),
-    "情绪波动": ("嫉妒", "针", "热流", "恐慌", "压住", "心跳"),
-    "高潮前": ("临界点", "再往下", "起了反应", "热流", "针刺"),
-    "嫉妒重新": ("嫉妒", "又涌", "尖锐", "细针", "胸腔"),
-    "信任压住": ("信任", "确认", "压住", "站在同一条战线上"),
-    "恐慌": ("针", "胸腔", "不安", "压住", "消失了"),
-    "刹车": ("停一下", "停", "叫停", "制止", "收回去", "喊停"),
-    "车瞬间": ("停一下", "停", "喊停", "收回去"),
-    "决定性刹": ("停一下", "停", "喊停", "握住"),
-    "眼神": ("看我", "视线", "对上", "确认"),
-    "交流确认": ("看我", "对上我的眼睛", "确认", "点头"),
-    "频率": ("同一条战线", "确认", "等我", "看我"),
-    "冷静": ("定几条规矩", "说清楚", "规则", "规矩", "放下杯子"),
-    "主导": ("我说", "我继续说", "我竖起", "我转过身", "我指了指"),
-    "逐条说出": ("第一条", "第二条", "第三条", "第四条"),
-    "今后": ("以后", "规矩", "规则", "任何事"),
-    "不可以": ("不行", "不能", "没有", "只是普通"),
-    "温馨": ("热可可", "圣诞快乐", "靠在", "倒可可", "暖"),
-    "余韵": ("喘息", "靠", "热可可", "圣诞快乐", "平稳"),
-    "喝东西": ("红酒", "热可可", "杯子", "喝了一口", "倒上"),
-    "整理衣物": ("拉平", "袖子拉下来", "整理", "遮住", "穿好"),
-    "日常亲密": ("靠在", "额头", "圣诞快乐", "倒可可", "坐到我身边"),
-    "情感高潮": ("临界点", "热流", "针刺", "嫉妒", "停一下"),
-    "相处规则": ("规矩", "规则", "第一条", "第二条", "第三条"),
-    "底线": ("不行", "不能", "没有我的点头", "只是普通", "范围"),
-    "高强度试": ("临界点", "再往下", "亲", "吻", "手贴", "腰窝"),
-    "共同经历": ("三人", "我们", "静", "小锋", "我"),
-    "决策权": ("我点头", "共同决定", "由我和静", "我们划好", "决定权"),
-    "公开确认": ("点了点头", "我听你们的", "同意", "好", "我知道"),
-    "具体规则": ("第一条", "第二条", "第三条", "第四条", "规矩"),
-    "在场": ("我在场", "我不在", "不在的场合", "必须在现场"),
-    "给出信号": ("我点头", "点了点头", "没有我的点头", "等我"),
-    "邀请": ("邀请", "被邀请", "肯让我", "允许"),
-    "第三者": ("第三者", "第三个人", "不是来抢"),
-}
-
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -191,6 +110,13 @@ def _safe_excerpt(text: str, *, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def _safe_tail_excerpt(text: str, *, limit: int = 160) -> str:
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "..." + text[-limit:].lstrip()
 
 
 def build_authorized_synopsis_execution_input(
@@ -746,13 +672,18 @@ class RestrictedWriterExecutor:
         self.character_profiles_repo = CharacterProfilesRepo()
         self.character_profile_service = CharacterProfileService(profiles_repo=self.character_profiles_repo)
         self.world_state_service = WorldStateService(repo_root=repo_root, model_client=model_client)
-        self.outline_service = OutlineService(repo_root=repo_root)
+        self.outline_segment_index_service = OutlineSegmentIndexService(repo_root=repo_root, model_client=model_client)
         self.fragment_cards_repo = FragmentCardsRepo()
         self.fragment_clusters_repo = FragmentClustersRepo()
         self.semantic_aliases_repo = SemanticAliasesRepo()
         self._runtime_requirement_aliases: dict[str, tuple[str, ...]] = {}
         self.coarse_retrieval_service = CoarseRetrievalService()
         self.rerank_service = RerankService(model_client=model_client)
+        self.draft_research_service = DraftResearchService(
+            repo_root=repo_root,
+            run_writer=run_writer,
+            model_client=model_client,
+        )
 
     def prepare_execution_input(
         self,
@@ -792,6 +723,11 @@ class RestrictedWriterExecutor:
             book_id=book_id,
             before_document_title_index=title_index,
         )
+        previous_accepted_chapter_tail_excerpt = self._build_previous_accepted_chapter_tail_excerpt(
+            conn,
+            book_id=book_id,
+            before_document_title_index=title_index,
+        )
         user_supplement = self._load_optional_run_payload(run_id, "user_supplement.json")
         if not isinstance(user_supplement, Mapping):
             user_supplement = {}
@@ -818,6 +754,13 @@ class RestrictedWriterExecutor:
             fact_inputs["memory_context_policy"] = (
                 "recent_story_synopses are compressed Memory history before the current generated chapter. "
                 "They are continuity context only; do not replay them as current chapter prose."
+            )
+        if previous_accepted_chapter_tail_excerpt:
+            fact_inputs["previous_accepted_chapter_tail_excerpt"] = previous_accepted_chapter_tail_excerpt
+            fact_inputs["previous_chapter_tail_policy"] = (
+                "previous_accepted_chapter_tail_excerpt is hard continuity context for the current opening: "
+                "continue location, body state, clothing, props, emotional residue, and unresolved actions from this tail. "
+                "Do not replay it as current chapter prose."
             )
         fact_inputs.update(character_fact_inputs)
         execution_input = FrozenChapterExecutionInput(
@@ -856,6 +799,13 @@ class RestrictedWriterExecutor:
                 *(
                     ["必须消费 user_supplement.supplement_text 中用户通过章节梗概时补充的字数、风格、节奏、重点段落和禁止项要求。"]
                     if user_supplement
+                    else []
+                ),
+                *(
+                    [
+                        "如果 fact_inputs.previous_accepted_chapter_tail_excerpt 非空，本章开场的人物位置、衣着、道具、身体状态、情绪余波和未完成动作必须优先承接该尾部摘录；recent_story_synopses 只作背景摘要。"
+                    ]
+                    if previous_accepted_chapter_tail_excerpt
                     else []
                 ),
             ],
@@ -959,6 +909,53 @@ class RestrictedWriterExecutor:
             }
             for row in selected
         ]
+
+    def _build_previous_accepted_chapter_tail_excerpt(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        before_document_title_index: int,
+        max_chars: int = 1800,
+    ) -> dict[str, Any]:
+        previous_rows = [
+            row
+            for row in self.chapters_repo.list_by_book(conn, book_id=book_id)
+            if 0 < int(row["document_title_index"] or 0) < int(before_document_title_index or 0)
+        ]
+        if not previous_rows:
+            return {}
+        chapter_row = previous_rows[-1]
+        doc_id = int(chapter_row["source_doc_end_id"] or 0)
+        if doc_id <= 0:
+            return {}
+        doc_row = conn.execute(
+            """
+            SELECT doc_id, document_title_index, title, document_title, content
+            FROM documents
+            WHERE book_id = ? AND doc_id = ?
+            LIMIT 1
+            """,
+            (book_id, doc_id),
+        ).fetchone()
+        if doc_row is None:
+            return {}
+        excerpt = _safe_tail_excerpt(str(doc_row["content"] or ""), limit=max(200, int(max_chars or 200)))
+        if not excerpt:
+            return {}
+        start_doc_id = int(chapter_row["source_doc_start_id"] or doc_id)
+        end_doc_id = int(chapter_row["source_doc_end_id"] or doc_id)
+        return {
+            "document_title_index": int(chapter_row["document_title_index"] or doc_row["document_title_index"] or 0),
+            "chapter_title": str(chapter_row["chapter_title"] or doc_row["title"] or doc_row["document_title"] or ""),
+            "source_doc_ids": list(range(start_doc_id, end_doc_id + 1)) if 0 < start_doc_id <= end_doc_id and end_doc_id - start_doc_id <= 24 else [doc_id],
+            "source_doc_range": str(doc_id) if start_doc_id == end_doc_id else f"{start_doc_id}-{end_doc_id}",
+            "tail_doc_id": doc_id,
+            "excerpt_scope": "tail",
+            "excerpt_chars": len(excerpt),
+            "excerpt": excerpt,
+            "scope": "past",
+        }
 
     def _relevant_character_profiles_for_prompt(
         self,
@@ -1133,6 +1130,52 @@ class RestrictedWriterExecutor:
     ) -> dict[str, Any]:
         self._require_frozen(run_id, "freeze_d")
         execution_input = self._load_frozen_payload(run_id, "freeze_d", "chapter_execution_input.json")
+        rewrite_feedback = dict(execution_input.get("draft_feedback") or {})
+        previous_draft_md = self._load_optional_run_text(run_id, "draft.md") if rewrite_feedback else ""
+        draft_research_decision, draft_context_notebook = self.draft_research_service.run(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            execution_input=execution_input,
+            rewrite_feedback=rewrite_feedback or None,
+            previous_draft_md=previous_draft_md,
+        )
+        if draft_research_decision.status != "ready_for_draft":
+            return {
+                "status": "draft_research_not_ready",
+                "draft_research_status": draft_research_decision.status,
+                "draft_research_decision": draft_research_decision.to_dict(),
+                "draft_research_decision_path": str(self.run_writer.layout.run_dir(run_id) / "draft_research_decision.json"),
+                "draft_context_notebook_path": str(self.run_writer.layout.run_dir(run_id) / "draft_context_notebook.json"),
+                "canon_ready": False,
+                "accepted_for_writeback": False,
+                "review_decision_status": "",
+                "writeback_committed": False,
+                "blocked_reason": draft_research_decision.blocked_reason,
+            }
+        execution_input = dict(execution_input)
+        execution_input["draft_context"] = dict(draft_context_notebook)
+        rewrite_plan = self._load_optional_run_payload(run_id, "draft_rewrite_plan.json")
+        if isinstance(rewrite_plan, Mapping):
+            execution_input["draft_rewrite_plan"] = dict(rewrite_plan)
+        self.run_writer.write_json(run_id, "chapter_execution_input.json", execution_input)
+        self.run_writer.write_freeze_record(
+            run_id,
+            FreezeRecord(
+                freeze_stage="freeze_d",
+                summary="受限执行输入已冻结，包含 Draft Research Loop 研究笔记。",
+                depends_on=["freeze_c"],
+            ),
+            artifact_payloads={
+                "chapter_brief.json": self._load_optional_run_payload(run_id, "chapter_brief.json") or {},
+                "chapter_length_budget.json": self._load_optional_run_payload(run_id, "chapter_length_budget.json") or {},
+                "style_reference_bundle.json": self._load_optional_run_payload(run_id, "style_reference_bundle.json") or {},
+                "draft_seed_packet.json": self._load_optional_run_payload(run_id, "draft_seed_packet.json") or {},
+                "draft_context_notebook.json": draft_context_notebook,
+                "draft_research_decision.json": draft_research_decision.to_dict(),
+                "chapter_execution_input.json": execution_input,
+            },
+        )
         draft_md = self._generate_draft(execution_input)
         base_report = self._check_continuity_extended(
             conn,
@@ -1208,6 +1251,8 @@ class RestrictedWriterExecutor:
         return {
             "draft_md": draft_md,
             "draft_path": str(self.run_writer.layout.run_dir(run_id) / "draft.md"),
+            "draft_research_decision": draft_research_decision.to_dict(),
+            "draft_context_notebook_path": str(self.run_writer.layout.run_dir(run_id) / "draft_context_notebook.json"),
             "continuity_report_path": str(self.run_writer.layout.run_dir(run_id) / "continuity_report.json"),
             "mentioned_character_profiles_path": str(
                 self.run_writer.layout.run_dir(run_id) / "mentioned_character_profiles.json"
@@ -1318,6 +1363,14 @@ class RestrictedWriterExecutor:
             },
         )
         state_delta_payload = dict(continuity_report.state_delta)
+        state_delta_payload["outline_update"] = self._writer_outline_segment_update(
+            state_delta=state_delta_payload,
+            execution_input=execution_input,
+            draft_md=draft_md,
+            document_title_index=document_title_index,
+            chapter_title=chapter_title,
+            doc_id=doc_id,
+        )
         chapter_db_id = self.chapters_repo.upsert(
             conn,
             {
@@ -1360,16 +1413,16 @@ class RestrictedWriterExecutor:
             chapter_index=document_title_index,
             doc_ids=[doc_id],
             updates=character_updates,
+            story_events_by_name=self._story_events_by_name_from_state_delta(
+                state_delta=state_delta_payload,
+                chapter_index=document_title_index,
+                doc_id=doc_id,
+            ),
         )
         world_update = dict(state_delta_payload.get("world_update") or {})
         outline_update = dict(state_delta_payload.get("outline_update") or {})
         self.world_state_service.apply_update(book_id=book_id, world_update=world_update)
-        self.outline_service.apply_update(
-            book_id=book_id,
-            chapter_line=str(outline_update.get("chapter_line") or ""),
-            timeline_events=[item for item in (outline_update.get("timeline_events") or []) if isinstance(item, dict)],
-            importance_score=80,
-        )
+        self.outline_segment_index_service.refresh(conn, book_id=book_id)
         registry = self._load_planned_character_registry(run_id)
         for name in activated_characters:
             registry[name] = {
@@ -1398,16 +1451,41 @@ class RestrictedWriterExecutor:
         prompt = self._build_execution_prompt(execution_input)
         if self.model_client is None:
             raise RuntimeError("Writer execution requires an available model_client")
-        text = self.model_client.generate_text(
-            system_prompt=prompt["system_prompt"],
-            user_prompt=prompt["user_prompt"],
-            fallback_text=self._fallback_draft(
+        generation_kwargs = {
+            "system_prompt": prompt["system_prompt"],
+            "user_prompt": prompt["user_prompt"],
+            "fallback_text": self._fallback_draft(
                 chapter_brief=chapter_brief,
                 style_bundle=style_bundle,
                 length_budget=length_budget,
             ),
-        )
+        }
+        if self._model_generate_text_accepts_timeout():
+            generation_kwargs["timeout_seconds"] = self._draft_prose_timeout_seconds()
+        text = self.model_client.generate_text(**generation_kwargs)
         return str(text).strip() + "\n"
+
+    def _model_generate_text_accepts_timeout(self) -> bool:
+        try:
+            signature = inspect.signature(self.model_client.generate_text)
+        except (TypeError, ValueError):
+            return False
+        return "timeout_seconds" in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+
+    def _draft_prose_timeout_seconds(self) -> int:
+        explicit = str(
+            os.getenv("NOVEL_AGENT_DRAFT_PROSE_TIMEOUT_SECONDS")
+            or os.getenv("NOVEL_AGENT_WEB_WRITER_DRAFT_TIMEOUT_SECONDS")
+            or ""
+        ).strip()
+        if explicit:
+            return max(1, int(explicit))
+        settings = getattr(self.model_client, "settings", None)
+        base_timeout = int(getattr(settings, "timeout_seconds", 0) or 0)
+        return max(base_timeout, 900)
 
     def _build_execution_prompt(self, execution_input: Mapping[str, Any]) -> dict[str, str]:
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
@@ -1457,6 +1535,8 @@ class RestrictedWriterExecutor:
                 "不得用前情回放、未授权旁支、后续设定讲解或下一章节事件凑字。"
             ),
             "history_rule": (
+                "fact_inputs.previous_accepted_chapter_tail_excerpt 是当前章节开场的硬连续性材料；"
+                "必须承接其中的人物位置、衣着、道具、身体状态、情绪余波和未完成动作。"
                 "fact_inputs.story_outline.current_position、timeline scope=past、recent_story_synopses "
                 "只用于理解上一章已经发生了什么。正文不得从这些历史文本的开头重新写起，"
                 "不得复述上一章正文；第一段应直接进入 combined_synopsis/coverage_plot_beats 指定的当前目标事件。"
@@ -1472,6 +1552,8 @@ class RestrictedWriterExecutor:
                 "历史上下文和上一章正文只用于承接，不得作为本章正文开头重写或复述。"
                 "长度预算是硬约束：不要超过 max_chars，不要为了凑字补写前情回放、原创支线、旅程过场或设定讲解。"
                 "chapter_brief.must_include 主要是连续性校验锚点，coverage_plot_beats 才是完整剧情覆盖目标。"
+                "如果输入包含 draft_context，必须优先使用其中摘取的 confirmed/candidate evidence 约束事实、人物和关系。"
+                "如果输入包含 draft_rewrite_plan，必须按 preserve/remove_or_change/must_not_change 受控重写。"
                 "如果输入包含 draft_feedback 或 draft_rewrite_requests，必须优先按反馈修订当前草稿。"
                 "只输出正文，不要解释。"
             ),
@@ -1483,12 +1565,14 @@ class RestrictedWriterExecutor:
                     "expansion_guidance": expansion_guidance,
                     "narration_consistency_rules": list(NARRATION_CONSISTENCY_RULES),
                     "fact_inputs": execution_input.get("fact_inputs"),
+                    "draft_context": execution_input.get("draft_context"),
                     "style_reference_bundle": execution_input.get("style_reference_bundle"),
                     "planned_character_constraints": execution_input.get("planned_character_constraints"),
                     "user_supplement": execution_input.get("user_supplement"),
                     "user_supplements": execution_input.get("user_supplements"),
                     "forbidden_inputs": execution_input.get("forbidden_inputs"),
                     "writer_rules": execution_input.get("writer_rules"),
+                    "draft_rewrite_plan": execution_input.get("draft_rewrite_plan"),
                     "draft_feedback": execution_input.get("draft_feedback"),
                     "draft_rewrite_requests": execution_input.get("draft_rewrite_requests"),
                 },
@@ -1715,6 +1799,75 @@ class RestrictedWriterExecutor:
         draft_text: str,
         blocked: bool,
     ) -> dict[str, Any]:
+        payload = self._extract_state_delta_payload_with_model(
+            execution_input=execution_input,
+            draft_text=draft_text,
+            blocked=blocked,
+        )
+        return self._normalize_state_delta_payload(
+            payload,
+            execution_input=execution_input,
+            blocked=blocked,
+        )
+
+    def _extract_state_delta_payload_with_model(
+        self,
+        *,
+        execution_input: Mapping[str, Any],
+        draft_text: str,
+        blocked: bool,
+    ) -> Mapping[str, Any]:
+        fallback = self._fallback_state_delta_payload(
+            execution_input=execution_input,
+            draft_text=draft_text,
+            blocked=blocked,
+        )
+        if self.model_client is None:
+            return fallback
+        settings = getattr(self.model_client, "settings", None)
+        use_fallback = bool(getattr(settings, "dry_run", False))
+        payload, _raw = self.model_client.generate_json(
+            system_prompt=(
+                "你是小说续写写回阶段的结构化审阅器。"
+                "只根据已生成正文和本章上下文抽取 Memory 写回增量。"
+                "mentioned_characters 只能是正文中已登场或被明确指称的人物/稳定群体名；"
+                "不要把剧情动作、场景、服装、情绪、写作要求或章节要点当成人物。"
+                "输出 JSON，字段包括 mentioned_characters、character_state_changes、"
+                "relationship_state_changes、world_update、outline_update。"
+                "outline_update 只包含 chapter_line 和 outline_segment；不要输出 timeline_events 或事件数组。"
+            ),
+            user_prompt=json.dumps(
+                {
+                    "known_character_index": self._state_delta_known_character_index(execution_input),
+                    "planned_character_constraints": [
+                        dict(item)
+                        for item in (execution_input.get("planned_character_constraints") or [])
+                        if isinstance(item, Mapping)
+                    ],
+                    "chapter_brief": dict(execution_input.get("chapter_brief") or {}),
+                    "chapter_title": str(execution_input.get("chapter_title") or ""),
+                    "document_title_index": execution_input.get("document_title_index"),
+                    "draft_text": _safe_excerpt(draft_text, limit=12_000),
+                    "fallback_shape": fallback,
+                },
+                ensure_ascii=False,
+            ),
+            fallback_factory=lambda: dict(fallback),
+            use_fallback_on_error=use_fallback,
+        )
+        if isinstance(payload, Mapping):
+            return payload
+        if use_fallback:
+            return fallback
+        raise RuntimeError("Writer state-delta extraction returned non-object JSON")
+
+    def _fallback_state_delta_payload(
+        self,
+        *,
+        execution_input: Mapping[str, Any],
+        draft_text: str,
+        blocked: bool,
+    ) -> dict[str, Any]:
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
         chapter_id = str(execution_input.get("chapter_id") or "")
         planned_names = [
@@ -1722,10 +1875,20 @@ class RestrictedWriterExecutor:
             for item in execution_input.get("planned_character_constraints", [])
             if isinstance(item, dict) and str(item.get("canonical_name") or "")
         ]
-        mentioned_characters = self.mention_service.clean_names(
+        mentioned_characters = self._clean_character_names(
             [
-                *_normalize_string_list(chapter_brief.get("must_include")),
                 *planned_names,
+                *self._known_character_names_mentioned_in_text(
+                    execution_input=execution_input,
+                    text="\n".join(
+                        [
+                            draft_text,
+                            str(chapter_brief.get("goal") or ""),
+                            str(chapter_brief.get("emotional_goal") or ""),
+                            str(chapter_brief.get("conflict_goal") or ""),
+                        ]
+                    ),
+                ),
             ]
         )
         relationship_changes: list[StateChange] = []
@@ -1749,7 +1912,7 @@ class RestrictedWriterExecutor:
             chapter_id=chapter_id,
             character_state_changes=character_changes,
             relationship_state_changes=relationship_changes,
-            timeline_events=[f"{timeline_label}：{_safe_excerpt(str(chapter_brief.get('goal') or ''), limit=80)}"],
+            timeline_events=[],
             world_state_changes=[],
             outline_progress=[str(chapter_brief.get("goal") or "")],
             canon_ready=not blocked,
@@ -1764,15 +1927,109 @@ class RestrictedWriterExecutor:
             },
             "outline_update": {
                 "chapter_line": f"[{execution_input.get('document_title_index')}] {timeline_label}: {_safe_excerpt(str(chapter_brief.get('goal') or ''), limit=72)}",
-                "timeline_events": [
-                    {
-                        "label": timeline_label,
-                        "participants": mentioned_characters[:4],
-                        "summary": _safe_excerpt(str(chapter_brief.get("goal") or ""), limit=80),
-                    }
-                ],
+                "outline_segment": _safe_excerpt(str(chapter_brief.get("goal") or ""), limit=260),
             },
         }
+
+    def _normalize_state_delta_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        execution_input: Mapping[str, Any],
+        blocked: bool,
+    ) -> dict[str, Any]:
+        fallback = self._fallback_state_delta_payload(
+            execution_input=execution_input,
+            draft_text="",
+            blocked=blocked,
+        )
+        chapter_brief = dict(execution_input.get("chapter_brief") or {})
+        chapter_id = str(payload.get("chapter_id") or fallback.get("chapter_id") or "")
+        timeline_label = str(
+            execution_input.get("chapter_title")
+            or chapter_brief.get("title")
+            or chapter_id
+            or "新章节"
+        )
+        outline_update = dict(payload.get("outline_update") or {})
+        mentioned_candidates = _normalize_string_list(payload.get("mentioned_characters"))
+        mentioned_characters = self._clean_character_names(mentioned_candidates)
+        return {
+            "chapter_id": chapter_id,
+            "character_state_changes": [
+                dict(item) for item in (payload.get("character_state_changes") or []) if isinstance(item, Mapping)
+            ],
+            "relationship_state_changes": [
+                dict(item) for item in (payload.get("relationship_state_changes") or []) if isinstance(item, Mapping)
+            ],
+            "timeline_events": [],
+            "world_state_changes": _normalize_string_list(payload.get("world_state_changes")),
+            "outline_progress": _normalize_string_list(payload.get("outline_progress")),
+            "canon_ready": not blocked,
+            "sources": [dict(item) for item in (payload.get("sources") or []) if isinstance(item, Mapping)],
+            "mentioned_characters": mentioned_characters,
+            "world_update": dict(payload.get("world_update") or fallback.get("world_update") or {}),
+            "outline_update": {
+                "chapter_line": str(
+                    outline_update.get("chapter_line")
+                    or fallback.get("outline_update", {}).get("chapter_line")
+                    or f"[{execution_input.get('document_title_index')}] {timeline_label}"
+                ),
+                "outline_segment": _safe_excerpt(
+                    str(outline_update.get("outline_segment") or fallback.get("outline_update", {}).get("outline_segment") or ""),
+                    limit=360,
+                ),
+            },
+        }
+
+    def _clean_character_names(self, items: object) -> list[str]:
+        return [
+            name
+            for name in self.mention_service.clean_names(_normalize_string_list(items))
+            if self._looks_like_character_name(name)
+        ]
+
+    @staticmethod
+    def _looks_like_character_name(name: str) -> bool:
+        text = str(name or "").strip()
+        if not text or len(text) > 32:
+            return False
+        if re.search(r"[\n\r，。；;！？!?：:、（）()《》“”\"']", text):
+            return False
+        if len(text) > 16 and re.search(r"\s", text):
+            return False
+        return True
+
+    def _state_delta_known_character_index(self, execution_input: Mapping[str, Any]) -> list[dict[str, Any]]:
+        profiles = dict(execution_input.get("fact_inputs") or {}).get("character_profiles") or []
+        index = []
+        for profile in profiles:
+            if not isinstance(profile, Mapping):
+                continue
+            name = str(profile.get("canonical_name") or "").strip()
+            if not name:
+                continue
+            index.append(
+                {
+                    "canonical_name": name,
+                    "aliases": _normalize_string_list(profile.get("aliases"))[:12],
+                    "matched_names": _normalize_string_list(profile.get("matched_names"))[:12],
+                }
+            )
+        return index
+
+    def _known_character_names_mentioned_in_text(self, *, execution_input: Mapping[str, Any], text: str) -> list[str]:
+        mentioned: list[str] = []
+        compact = str(text or "")
+        for profile in self._state_delta_known_character_index(execution_input):
+            canonical = str(profile.get("canonical_name") or "")
+            aliases = _normalize_string_list(profile.get("aliases")) + _normalize_string_list(profile.get("matched_names"))
+            if canonical and canonical in compact:
+                mentioned.append(canonical)
+                continue
+            if any(alias and alias in compact for alias in aliases):
+                mentioned.append(canonical)
+        return mentioned
 
     def _write_mentioned_character_profiles(
         self,
@@ -1882,10 +2139,15 @@ class RestrictedWriterExecutor:
         state_delta: Mapping[str, Any],
     ) -> tuple[list[dict[str, Any]], list[str]]:
         mentioned_characters = _normalize_string_list(state_delta.get("mentioned_characters"))
-        known_names = {
-            str(row["canonical_name"])
-            for row in self.character_profiles_repo.list_by_book(conn, book_id=book_id)
-        }
+        profile_rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
+        known_names = {str(row["canonical_name"]) for row in profile_rows}
+        known_names_and_aliases = set(known_names)
+        for row in profile_rows:
+            try:
+                aliases = json.loads(str(row["aliases_json"] or "[]"))
+            except json.JSONDecodeError:
+                aliases = []
+            known_names_and_aliases.update(_normalize_string_list(aliases))
         planned_constraints = [
             dict(item)
             for item in (execution_input.get("planned_character_constraints") or [])
@@ -1895,6 +2157,11 @@ class RestrictedWriterExecutor:
         updates: list[dict[str, Any]] = []
         activated: list[str] = []
         for name in mentioned_characters:
+            recent_activity = self._recent_activity_for_character(
+                name=name,
+                state_delta=state_delta,
+                fallback=str(execution_input.get("chapter_title") or ""),
+            )
             planned = planned_by_name.get(name)
             if planned is not None:
                 updates.append(
@@ -1903,7 +2170,7 @@ class RestrictedWriterExecutor:
                         "aliases": [],
                         "personality": [str(x) for x in planned.get("core_personality", [])] if isinstance(planned.get("core_personality"), list) else [],
                         "occupations": [str(planned.get("narrative_role") or "")] if planned.get("narrative_role") else [],
-                        "recent_activity": str(execution_input.get("chapter_title") or ""),
+                        "recent_activity": recent_activity,
                         "relationships": [
                             {
                                 "target_character": str(item.get("target_character") or ""),
@@ -1918,18 +2185,112 @@ class RestrictedWriterExecutor:
                 if name not in known_names:
                     activated.append(name)
                 continue
-            if name in known_names:
+            if name in known_names_and_aliases:
                 updates.append(
                     {
                         "canonical_name": name,
                         "aliases": [],
                         "personality": [],
                         "occupations": [],
-                        "recent_activity": str(execution_input.get("chapter_title") or ""),
+                        "recent_activity": recent_activity,
                         "relationships": [],
                     }
                 )
+                continue
+            updates.append(
+                {
+                    "canonical_name": name,
+                    "aliases": [],
+                    "personality": [],
+                    "occupations": [],
+                    "recent_activity": recent_activity,
+                    "relationships": [],
+                    "personhood_evidence_summary": "人物在已通过审阅并写回的 Writer 生成章节中明确登场。",
+                    "evidence_level": "explicit",
+                    "speaking_character_status": "personhood_supported",
+                }
+            )
+            activated.append(name)
         return updates, activated
+
+    def _recent_activity_for_character(
+        self,
+        *,
+        name: str,
+        state_delta: Mapping[str, Any],
+        fallback: str,
+    ) -> str:
+        outline_update = dict(state_delta.get("outline_update") or {})
+        outline_segment = str(outline_update.get("outline_segment") or "").strip()
+        if outline_segment:
+            return outline_segment
+        chapter_line = str(outline_update.get("chapter_line") or "").strip()
+        return chapter_line or fallback
+
+    def _story_events_by_name_from_state_delta(
+        self,
+        *,
+        state_delta: Mapping[str, Any],
+        chapter_index: int,
+        doc_id: int,
+    ) -> dict[str, list[dict[str, Any]]]:
+        events_by_name: dict[str, list[dict[str, Any]]] = {}
+        outline_update = dict(state_delta.get("outline_update") or {})
+        outline_segment_id = str(outline_update.get("outline_segment_id") or "").strip()
+        summary = str(outline_update.get("outline_segment") or outline_update.get("chapter_line") or "").strip()
+        if not outline_segment_id or not summary:
+            return events_by_name
+        label = str(outline_update.get("chapter_line") or summary[:24]).strip()
+        participants = _normalize_string_list(state_delta.get("mentioned_characters"))
+        story_event = {
+            "event_id": f"char-exp:writer:{outline_segment_id}",
+            "outline_segment_id": outline_segment_id,
+            "role_in_segment": "supporting",
+            "compression_level": "medium",
+            "label": label,
+            "summary": summary,
+            "source_chapter_indexes": [chapter_index],
+            "source_doc_ids": [doc_id],
+            "source_doc_range": str(doc_id),
+            "participants": participants,
+        }
+        for name in participants:
+            events_by_name.setdefault(name, []).append(story_event)
+        return events_by_name
+
+    def _writer_outline_segment_update(
+        self,
+        *,
+        state_delta: Mapping[str, Any],
+        execution_input: Mapping[str, Any],
+        draft_md: str,
+        document_title_index: int,
+        chapter_title: str,
+        doc_id: int,
+    ) -> dict[str, Any]:
+        raw_outline = dict(state_delta.get("outline_update") or {})
+        chapter_brief = dict(execution_input.get("chapter_brief") or {})
+        chapter_line = str(raw_outline.get("chapter_line") or "").strip()
+        if not chapter_line:
+            chapter_line = (
+                f"[{document_title_index}] {chapter_title}: "
+                f"{_safe_excerpt(str(chapter_brief.get('goal') or ''), limit=72)}"
+            ).rstrip(": ")
+        outline_segment = str(raw_outline.get("outline_segment") or "").strip()
+        if not outline_segment:
+            outline_segment = _safe_excerpt(str(chapter_brief.get("goal") or draft_md), limit=320)
+        return {
+            "chapter_line": chapter_line,
+            "outline_segment": outline_segment,
+            "outline_segment_id": f"outline-segment:chapter-{document_title_index}:docs-{doc_id}",
+            "source_doc_ids": [doc_id],
+            "source_doc_range": str(doc_id),
+            "source_doc_start_id": doc_id,
+            "source_doc_end_id": doc_id,
+            "source_title_indexes": [document_title_index],
+            "source_chapter_range": str(document_title_index),
+            "status": "provisional",
+        }
 
     def _build_style_reference_bundle(self, conn: sqlite3.Connection, chapter_brief: Mapping[str, Any]) -> StyleReferenceBundle:
         scene_brief = SceneBrief(
@@ -2228,8 +2589,7 @@ class RestrictedWriterExecutor:
         if keyword in draft_text:
             return True
         aliases = self._runtime_requirement_aliases.get(keyword, ())
-        default_aliases = _REQUIREMENT_DEFAULT_ALIASES.get(keyword, ())
-        return any(alias and alias in draft_text for alias in (*aliases, *default_aliases))
+        return any(alias and alias in draft_text for alias in aliases)
 
     def _load_requirement_aliases(self, conn: sqlite3.Connection, *, book_id: str) -> dict[str, tuple[str, ...]]:
         try:
@@ -2249,9 +2609,6 @@ class RestrictedWriterExecutor:
     def _requirement_keywords(self, requirement: str) -> list[str]:
         keywords: list[str] = []
         for canonical_key in sorted(self._runtime_requirement_aliases, key=len, reverse=True):
-            if canonical_key in requirement and canonical_key not in keywords:
-                keywords.append(canonical_key)
-        for canonical_key in sorted(_REQUIREMENT_DEFAULT_ALIASES, key=len, reverse=True):
             if canonical_key in requirement and canonical_key not in keywords:
                 keywords.append(canonical_key)
         normalized = re.sub(r"[，。！？；：、“”‘’《》（）()\[\]{}]", " ", requirement)
@@ -2429,6 +2786,12 @@ class RestrictedWriterExecutor:
         if not path.exists():
             return None
         return self._load_run_json(run_id, name)
+
+    def _load_optional_run_text(self, run_id: str, name: str) -> str:
+        path = self.run_writer.layout.run_dir(run_id) / name
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8")
 
     def _load_frozen_payload(self, run_id: str, freeze_stage: str, artifact_name: str) -> dict[str, Any]:
         record = self.run_writer.get_freeze_record(run_id, freeze_stage)

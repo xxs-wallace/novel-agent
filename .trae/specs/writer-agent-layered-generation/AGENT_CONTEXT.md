@@ -6,7 +6,7 @@ This summary routes agents to the right source docs. It is not a replacement for
 ## Owns
 
 - Writer Agent Loop and layered continuation generation.
-- Modeling baseline checks, story scale/climax inputs, plan generation, world/character supplementation, batch planning, chapter synopsis, draft generation, review gates, rollback, and writeback.
+- Modeling baseline checks, story scale/climax inputs, plan generation, world/character supplementation, batch planning, chapter synopsis, Draft Research Loop, Draft Prose Executor, draft generation, review gates, rollback, and writeback.
 - Artifact review gates and user confirmation/resume semantics.
 - Outline Research Loop and runtime boundaries under this module's subdirectories.
 
@@ -22,8 +22,8 @@ This summary routes agents to the right source docs. It is not a replacement for
 - `AGENT_CONTEXT.md` for routing.
 - `spec.md` for Writer layer requirements and agent-loop semantics.
 - `design.md` for implementation flow, review gates, rollback, and artifacts.
-- `contracts.md` before changing review/user-input JSON.
-- `specs/runtime-boundaries.spec.md` for draft execution, recovery, and writeback boundaries.
+- `contracts.md` before changing review/user-input JSON or Draft Research / rewrite decision JSON.
+- `specs/runtime-boundaries.spec.md` for Draft Research Loop, Draft Prose Executor, draft execution, recovery, and writeback boundaries.
 - `designs/outline-research-loop.design.md` for Outline Research Loop details.
 - `tasks.md` only for task/QA/acceptance work.
 
@@ -33,6 +33,8 @@ Read `contracts.md` before changing:
 
 - `ArtifactReviewDecision`
 - `GenerationReviewDecision`
+- `DraftResearchDecision`
+- `DraftRewritePlan`
 - `OutlineResearchQuestionSet`
 - `OutlineResearchAnswerSubmission`
 
@@ -59,4 +61,5 @@ cross-layer inputs such as `WriterInputBundle`, `SceneBrief`, or
 - Technical artifact ids, checkpoints, stage names, and workflow actions are debug/log/action details, not main UI status text.
 - User-approved or user-edited planning material becomes downstream input.
 - Chapter synopsis approval should flow into draft preparation/generation; separate length confirmation is not a mandatory user gate unless the active spec says otherwise.
+- New draft generation should flow through Draft Research Loop before Draft Prose Executor; the old fixed-prompt draft writer is legacy-only for migration or smoke compatibility.
 - Upstream edits must trigger appropriate downstream rollback/revision.

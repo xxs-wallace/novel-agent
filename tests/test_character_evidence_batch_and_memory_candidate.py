@@ -209,7 +209,17 @@ def test_character_reduce_inputs_prefer_character_id_and_existing_profile_by_id(
                 {"character_id": "7", "canonical_name": "旧名", "aliases": ["阿衡"], "profile_summary_md": "旧档案"}
             ],
         },
-        summary_payload={"chapter_summary_short": "阿衡重新出现。"},
+        summary_payload={
+            "chapter_summary_md": "这段完整章节摘要不应进入 character reduce 输入。",
+            "chapter_summary_short": "短摘要唯一文本不应在已有 outline segment 时进入上下文。",
+        },
+        current_outline_segment={
+            "outline_segment_id": "outline-segment:chapter-4:docs-7-8",
+            "outline_segment": "阿衡在当前剧情段重新出现并留下线索。",
+            "source_doc_range": "7-8",
+            "source_doc_ids": [7, 8],
+            "compression_notes": "这段内部说明不需要进入人物归并。",
+        },
         evidence_payload={
             "characters": [
                 {
@@ -235,8 +245,168 @@ def test_character_reduce_inputs_prefer_character_id_and_existing_profile_by_id(
 
     assert len(reduce_inputs) == 1
     assert reduce_inputs[0]["character_id"] == "7"
-    assert reduce_inputs[0]["existing_profile"]["profile_summary_md"] == "旧档案"
+    assert reduce_inputs[0]["existing_profile"]["canonical_name"] == "旧名"
+    assert reduce_inputs[0]["existing_profile"]["profile_brief_status"] == "missing"
     assert [item["canonical_name"] for item in reduce_inputs[0]["ordered_character_evidence"]] == ["周衡", "阿衡"]
+
+
+def test_character_reduce_inputs_use_profile_brief_when_available() -> None:
+    service = MemoryCandidateService()
+    reduce_inputs = service.build_character_reduce_inputs(
+        prompt_input={
+            "book_id": "book-1",
+            "character_profiles": [
+                {
+                    "character_id": "7",
+                    "canonical_name": "旧名",
+                    "aliases": ["阿衡"],
+                    "profile_summary_md": "这段旧 Markdown 不应进入 reduce。",
+                    "profile_brief": {
+                        "identity": {"character_id": "7", "canonical_name": "旧名", "aliases": ["阿衡"]},
+                        "current_state": "持久化人物简档。",
+                    },
+                    "profile_brief_status": "ready",
+                }
+            ],
+        },
+        summary_payload={
+            "chapter_summary_md": "这段完整章节摘要不应进入 character reduce 输入。",
+            "chapter_summary_short": "短摘要唯一文本不应在已有 outline segment 时进入上下文。",
+        },
+        current_outline_segment={
+            "outline_segment_id": "outline-segment:chapter-4:docs-7-8",
+            "outline_segment": "阿衡在当前剧情段重新出现并留下线索。",
+            "source_doc_range": "7-8",
+            "source_doc_ids": [7, 8],
+            "compression_notes": "这段内部说明不需要进入人物归并。",
+        },
+        evidence_payload={
+            "characters": [
+                {
+                    "character_id": "7",
+                    "canonical_name": "周衡",
+                    "aliases": ["阿衡"],
+                    "personhood_evidence": "阿衡被称呼并行动。",
+                    "activity_or_state_evidence": "阿衡重新进入场景。",
+                    "candidate_type": "character",
+                    "confidence": 0.9,
+                }
+            ]
+        },
+    )
+
+    existing_profile = reduce_inputs[0]["existing_profile"]
+    assert "profile_summary_md" not in existing_profile
+    assert existing_profile["profile_brief"]["current_state"] == "持久化人物简档。"
+    assert "chapter_summary_md" not in reduce_inputs[0]["chapter_summary"]
+    assert "完整章节摘要" not in json.dumps(reduce_inputs[0], ensure_ascii=False)
+    assert "短摘要唯一文本" not in reduce_inputs[0]["chapter_context_text"]
+    assert "outline-segment:chapter-4:docs-7-8" in reduce_inputs[0]["chapter_context_text"]
+    assert "compression_notes" not in reduce_inputs[0]["current_outline_segment"]
+
+
+def test_character_reduce_context_falls_back_to_short_summary_without_outline_segment() -> None:
+    service = MemoryCandidateService()
+    reduce_inputs = service.build_character_reduce_inputs(
+        prompt_input={"book_id": "book-1", "character_profiles": []},
+        summary_payload={"chapter_summary_short": "只有短摘要可用。"},
+        current_outline_segment={"outline_segment_id": "outline-segment:chapter-4:docs-7-8"},
+        evidence_payload={
+            "characters": [
+                {
+                    "character_id": "7",
+                    "canonical_name": "周衡",
+                    "personhood_evidence": "周衡被称呼并行动。",
+                    "activity_or_state_evidence": "周衡重新进入场景。",
+                    "candidate_type": "character",
+                    "confidence": 0.9,
+                }
+            ]
+        },
+    )
+
+    assert reduce_inputs[0]["chapter_context_text"] == "短摘要：只有短摘要可用。"
+
+
+def test_character_reduce_context_prefers_multi_chapter_outline_segments_and_falls_back_per_item() -> None:
+    service = MemoryCandidateService()
+
+    context_text = service._character_reduce_chapter_context_text(  # noqa: SLF001
+        summary_short="顶层短摘要不应在当前 segment 可用时重复。",
+        current_outline_segment={
+            "outline_segment_id": "outline-segment:chapter-1:docs-1-2",
+            "outline_segment": "第一章 outline segment。",
+            "source_doc_range": "1-2",
+        },
+        chapter_summaries=service._compact_chapter_summaries(  # noqa: SLF001
+            [
+                {
+                    "document_title_index": 2,
+                    "chapter_title": "第二章",
+                    "chapter_summary_short": "第二章短摘要不应出现。",
+                    "outline_segment_id": "outline-segment:chapter-2:docs-3-4",
+                    "outline_segment": "第二章 outline segment。",
+                    "source_doc_range": "3-4",
+                },
+                {
+                    "document_title_index": 3,
+                    "chapter_title": "第三章",
+                    "chapter_summary_short": "第三章缺 segment，使用短摘要。",
+                },
+            ]
+        ),
+    )
+
+    assert "第一章 outline segment" in context_text
+    assert "第二章 outline segment" in context_text
+    assert "第三章缺 segment，使用短摘要。" in context_text
+    assert "顶层短摘要不应" not in context_text
+    assert "第二章短摘要不应出现" not in context_text
+
+
+def test_character_reduce_inputs_carry_profile_update_detail_gate() -> None:
+    service = MemoryCandidateService()
+    reduce_inputs = service.build_character_reduce_inputs(
+        prompt_input={
+            "book_id": "book-1",
+            "character_profiles": [
+                {
+                    "character_id": "7",
+                    "canonical_name": "周衡",
+                    "aliases": [],
+                    "profile_brief": {"identity": {"character_id": "7", "canonical_name": "周衡"}},
+                    "profile_brief_status": "ready",
+                    "character_update_gate": {
+                        "detail_level": "index_only",
+                        "reason": "low_frequency_or_background_role",
+                        "current_doc_frequency": 0.25,
+                    },
+                }
+            ],
+        },
+        summary_payload={"chapter_summary_short": "周衡在远处短暂出现。"},
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [11],
+                    "document_title_indexes": [4],
+                    "characters": [
+                        {
+                            "character_id": "7",
+                            "canonical_name": "周衡",
+                            "personhood_evidence": "周衡被提及。",
+                            "activity_or_state_evidence": "",
+                            "candidate_type": "character",
+                            "confidence": 0.8,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert reduce_inputs[0]["reduce_policy"]["detail_level"] == "index_only"
+    assert reduce_inputs[0]["profile_update_gate"]["reason"] == "low_frequency_or_background_role"
 
 
 def test_memory_candidate_prompt_input_uses_batch_level_evidence() -> None:
@@ -426,6 +596,12 @@ def test_close_read_runner_accepts_batch_level_character_evidence_and_filters_lo
         if "Memory Update Candidate Agent" in system_prompt:
             return fallback_factory(), ""
         if "Character Reduce Agent" in system_prompt:
+            return fallback_factory(), ""
+        if "Chapter Outline Segment Agent" in system_prompt:
+            return fallback_factory(), ""
+        if "Character Identity Resolution Agent" in system_prompt:
+            return fallback_factory(), ""
+        if "Outline Root Summary Agent" in system_prompt:
             return fallback_factory(), ""
         return (
             {

@@ -14,12 +14,21 @@
   [`../creative-knowledge-base/spec.md`](../creative-knowledge-base/spec.md)。
 - Artifact 读取、泄漏边界和 Writer / Benchmark 接入：读第 5.1、6、10 节。
 - Reviewer 类型和 smoke：读第 7、8 节。
+- 已入库原文章节的文学性 / 人物塑造诊断：读第 7.6 节，并参考
+  [`../outline-analyzer/design.md`](../outline-analyzer/design.md) 的 seed、
+  evidence triage 与 raw excerpt 升级策略。
 
 ## 1. Design Summary
 
 Reviewer Agent 是一个模型驱动、只读、可插拔的评审运行时。
 
 它把“评审能力”从 Writer 和 benchmark 中抽象出来，但第一阶段不改动既有 Writer / benchmark 流程。Reviewer Runtime 接收 `ReviewRequest`，解析 `ReviewTarget`，驱动指定 Reviewer 通过模型多轮查询 Memory / KB，最后输出 `ReviewReport`。
+
+对于“已入库原文章节”的文学性、人物塑造和前文一致性诊断，Reviewer
+应作为目标文本评审框架承载该能力；信息探索部分复用 Outline Analyzer
+的轻量 seed、模型主导 research request、evidence triage 和受预算 raw
+excerpt 读取策略。该能力不属于 close-read 建模链路，也不得把诊断结论写回
+Memory、人物档案或 Writer artifact。
 
 ```text
 ReviewRequest
@@ -43,6 +52,9 @@ ReviewRequest
 - 保留来源引用，例如 document id、artifact path、chapter id、range hint。
 - 校验目标类型是否被指定 Reviewer 支持。
 - 对超长文本做输入裁剪，但必须记录裁剪策略。
+- 对声明为必须完整阅读的目标类型，先执行硬性长度校验；若超过该 Reviewer
+  的 hard limit，应返回 `skipped` / `failed` 并提示用户缩小章节范围，而不是
+  静默裁剪后继续评审。
 
 Resolver 不做语义评审，不判断文本质量。
 
@@ -420,7 +432,90 @@ Reviewer 有更高评审视角，但必须受场景约束。
 - 模型只比较文笔、文风、氛围和细节执行，不把 KB 相似段落当作剧情正确性标准。
 - 通常不需要 Memory Query。
 
-### 7.6 Shared Output Rule
+### 7.6 SourceChapterLiteraryDiagnosticReviewer
+
+`reviewer_id`: `source_chapter_literary_diagnostic`
+
+状态：
+
+- Proposed extension，不属于第一阶段必须交付的五类正式 Reviewer。
+- 需要新增或扩展 `ReviewTarget` contract 后才能作为冻结 API 暴露。
+
+支持目标：
+
+- `source_chapter`：已入库、可定位到 source document / chapter boundary 的原文章节或章节片段。
+- `raw_text` MAY 作为 diagnostic fallback，但只有调用方同时提供 chapter / document
+  source refs 时，才允许查询当前 book 的 Memory 证据并生成正式 evidence refs。
+
+Web 入口：
+
+- Web 右侧章节概要 / 章节内容面板中，用户选中一个章节或章节内范围后，右下角显示“分析原文”按钮。
+- 点击后创建 `source_chapter_literary_diagnostic` review request。
+- UI SHOULD 在创建任务前显示目标范围和大小；若目标原文超过 64KB，直接拒绝创建，并提示用户缩小选区或选择更短章节。
+- 入口只启动只读诊断，不进入 Writer review gate，不自动把结论写入续写补充说明。
+
+关注：
+
+- 原作者该章节的文学性优点和短板，例如叙事功能、场景推进、节奏、冲突、情绪曲线、主题表达和语言执行。
+- 本章人物的行动、对白、心理、关系互动是否符合此前人物档案、关系状态、历史行动和当前弧线。
+- 是否存在与前文人物塑造相矛盾的内容，例如动机断裂、关系跃迁、信息知情越界、能力或价值观突变。
+- 是否虽然不构成事实矛盾，但没有很好体现人物特点，例如人物功能化、语气失真、辨识度下降、关键关系张力被弱化。
+- 原文中可能存在的合理文学解释，例如人物压抑、伪装、视角限制、阶段性变化或作者有意制造反差；不得把所有张力都直接判为“写崩”。
+
+上下文策略：
+
+- Target 章节原文是主材料。Runtime 在解析目标时必须完整读取用户选择的原文范围，且该范围不得超过 64KB。
+- 首轮 seed 只包含目标章节 metadata、目标章节原文或分块索引、极短 story overview、chapter index、source arc hint、命中人物索引和可用 request types。
+- 模型先阅读目标原文，抽取本章涉及的人物、关系、事件、情绪转折、文学观察点和待核查问题。
+- 模型再生成 research plan，优先查询 `character_profile`、`character_state_card_search`、`story_detail`、`chapter_summary`、`theme_signal_card_search` 和必要的 `source_arc`。
+- 只有当人物语气、关系张力、关键行动、伏笔措辞或前文铺垫无法通过摘要层判断时，才允许请求历史 `raw_excerpt`。
+- Runtime MUST 复用 `ReviewerMemoryTool` 和 `NarrativeInquiryBroker`，不得直接扫描 documents、Memory SQLite、Markdown 或 Narrative Index 内部表。
+
+Raw evidence budget：
+
+- 创建任务前硬性校验：目标原文 `target_raw_text` 不得超过 64KB。
+- 整个诊断过程中，目标章节原文与历史原文摘录之和不得超过 128KB。这里的“历史原文摘录”只包含真正注入模型判断 prompt 的早期 document 原文，不包含索引、摘要、人物档案摘要或 trace metadata。
+- 历史原文读取必须是多轮、贡献导向的。模型请求某个历史 document / chapter 后，Broker SHOULD 先返回候选范围、摘要、source refs 和可裁剪片段说明；模型再判断哪些片段对目标章节判断有贡献。
+- 对每个历史 document，进入 judging prompt 的 raw excerpt SHOULD 是“对目标章节分析有贡献”的局部截取，例如人物第一次表现同类特质的段落、关系转折段落、相似对话语气段落、关键承诺或冲突段落。
+- 若累计贡献截取后仍会超过 128KB，Runtime SHALL 触发额外压缩轮：模型必须把低优先级片段压缩成带 evidence refs 的结论摘要，只保留最高相关、最需要逐字判断的原文片段。
+- 若压缩后仍无法在 128KB 内覆盖关键证据，Runtime 应进入 `budget_exhausted_proceed` 或 `blocked_by_missing_context`，最终报告必须降低 confidence 并明确说明未能覆盖哪些历史原文。
+- 模型不得请求“读取所有历史章节原文”；Broker 必须拒绝或拆分为带 read reason、expected confirmation 和 source refs 的有限 request。
+
+Loop shape：
+
+```text
+resolve source chapter target
+  -> hard limit check: selected target raw text <= 64KB
+  -> seed with target text / target chunk map and lightweight book indexes
+  -> model extracts target chapter literary and character questions
+  -> model plans Memory / character / chapter-summary / card queries
+  -> Broker returns compact evidence candidates
+  -> model selects evidence and requests only necessary historical raw excerpts
+  -> enforce target raw + selected historical raw <= 128KB
+  -> optional compression round if selected historical raw exceeds budget
+  -> model judges literary quality and character fit
+  -> model self-checks evidence usage
+  -> ReviewReport
+```
+
+Recommended report dimensions:
+
+- `literary_execution`：章节功能、节奏、冲突、情绪曲线、主题表达和语言执行。
+- `character_fit`：人物是否符合已有档案、目标、恐惧、关系状态和行动模式。
+- `character_expression`：是否充分体现人物特点，而不是只判断是否矛盾。
+- `continuity_and_causality`：本章事件、动机、信息流和前文铺垫是否连贯。
+- `evidence_confidence`：目标原文、人物档案、历史摘要和历史原文证据是否足够。
+
+Finding taxonomy SHOULD distinguish:
+
+- `strength`：值得保留或学习的文学优点。
+- `weakness`：文学执行不足，但不一定违反事实。
+- `likely_contradiction`：较明确的人物、关系、事件或设定矛盾。
+- `possible_tension`：需要解释的张力，可能是合理人物变化或叙事策略。
+- `under_expressed_character_trait`：人物特点没有充分体现。
+- `insufficient_evidence`：需要更多历史原文或人物档案才能判断。
+
+### 7.7 Shared Output Rule
 
 上述所有 Reviewer 都必须输出中文参考意见和 0-100 参考评分。评分字段只表示该 Reviewer 视角下的质量估计，不作为 Writer 或 Benchmark 的通过标准。
 

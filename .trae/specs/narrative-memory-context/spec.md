@@ -150,10 +150,10 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
   - `document` leaf：粗读入库的原始文本片段，保存原文、source offset、`doc_id`
   - `chapter` Page：多个连续 `document` 的章节级摘要
   - `outline_segment` Page：每 N 个连续 `document` / `chapter` 的连续剧情压缩梗概
-  - `outline_root` Page：多个 `outline_segment` 的根索引，只保存 segment id、范围和极短摘要
+  - `outline_root` Page：多个 `outline_segment` 的根索引，保存 segment id、范围和由模型压缩得到的连续剧情概览
 - **AND** 多个 `document` SHOULD 对应一个真实 chapter；如果章节边界识别不可靠，系统 SHOULD 显式标记该 chapter Page 为派生的 `document_title_index` 聚合桶
 - **AND** `outline_segment` MUST 直接从连续 chapter summaries / document summaries 压缩生成，不经过 `timeline_events`、`event list` 或等价中间事件数组
-- **AND** 真正用于多维检索的事件索引 SHOULD 由 Narrative Indexer 的 `FactualEventCard` 承担，不属于 Story Outline Memory schema
+- **AND** 真正用于多维检索的事件级索引 SHOULD 由 Narrative Indexer cards 承担，例如 `NarrativeSceneCard` 或等价事件 / 场景级 IndexCard；它不属于 Story Outline Memory schema
 
 #### Scenario: BTree 压缩比例
 - **WHEN** 系统生成 chapter 级 `summary_md`
@@ -163,7 +163,8 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **THEN** 单个 `outline_segment.summary` SHOULD 是连续自然语言梗概，保留剧情顺序、因果、主要人物状态变化、关系推进、设定揭示和未解问题
 - **AND** 单个 `outline_segment` SHOULD 目标覆盖配置指定的连续 N 个 document / chapter，或约 10 万到 20 万字原始小说文档
 - **AND** `outline_segment` MUST 保存其覆盖的 `source_doc_ids`、`source_title_indexes` 或 `source_doc_range`
-- **AND** `outline_root` SHOULD 只保存每个 segment 的 id、source range、极短 summary hint 和 status
+- **AND** `outline_root.summary` MUST 由模型压缩其覆盖的多个 `outline_segment.summary` 得到，用于快速判断相关性；它不得只是把 segment 摘要简单拼接在一起
+- **AND** `outline_root` MUST 保存每个 segment 的 id、source range 和 status，使系统可以从 root 可靠展开到具体 segment
 
 #### Scenario: 超长篇多 Page 根结构
 - **WHEN** 小说原始长度达到数百万字
@@ -191,6 +192,8 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
   - `speaking_character_status`
   - `personhood_evidence_summary`
   - `evidence_level`
+  - `profile_brief`
+  - `recent_activity`
   - `story_events`
 
 #### Scenario: Character Profile 只保存事实型信息
@@ -205,6 +208,29 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** 系统不得仅因为后续窗口出现了一个新称呼就覆盖既有 `canonical_name`
 - **AND** 只有后续证据明确表明既有主称呼是误认对象、写错、伪装名或假名时，Profile Update / Canonical Name Agent 才可改写 `canonical_name`，并应保留旧称呼作为 alias 或迁移证据
 
+#### Scenario: 身份揭示后的同一人物合并
+- **WHEN** 原文明确揭示两个既有人物、代号、伪装身份或过去身份其实指向同一人物
+- **THEN** Character Evidence / Profile Update MAY 输出带 source refs 的 `identity_revelations`
+- **AND** `identity_revelations` MUST 至少包含同人关系、左右人物标识或称呼、证据摘要、`source_doc_ids` 或 `outline_segment_ids`、置信度
+- **AND** CharacterIdentityMergeService MUST 先使用模型复核并输出 0-100 的同一人物评分与推荐动作，不得由 Character Evidence Agent 的单次输出直接写库合并
+- **AND** 低分候选 SHOULD 只进入消息流提示；中分候选 SHOULD 记录为待积累证据但不阻塞阅读；高分且可能写库破坏记忆一致性的候选 MUST 挂起 close-read 并等待人工确认
+- **AND** CharacterIdentityMergeService 只能在人工确认后的高置信、可回源证据确认后合并既有人物档案
+- **AND** 系统不得因名字相似、同场出现、关系亲密、职业/阵营相同、能力相似或叙事隐喻自动合并人物
+- **AND** 合并时 SHOULD 保留既有叙事主称呼作为 survivor canonical name，将被揭示的真名、代号或伪装名写入 aliases，并迁移两边的经历、关系、出场/发言 doc refs
+- **AND** 对其他人物关系中指向被合并档案的 `target_name` SHOULD 改写到 survivor canonical name
+- **AND** 如果证据不足，系统 MUST 保持独立档案并返回 `request_more_evidence` / skipped / blocked 等显式状态，不得用本地 heuristic 伪装模型已完成身份判断
+
+#### Scenario: 叙事误导后的历史记忆修正
+- **WHEN** 后续原文揭示早期人物、事件、时间、地点或因果理解被叙事误导
+- **THEN** 系统 SHOULD 通过 CharacterMemoryCorrectionService 或等价服务执行可审计修正
+- **AND** 修正发现 SHOULD 先通过 seed loop 扫描 `outline_root.summary`、`outline_segment`、人物经历索引和少量 doc 元数据来定位证据范围，不应重读整本小说
+- **AND** 修正输入 MUST 是模型确认或用户明确确认的 correction plan，不得由本地 heuristic 自行判定语义错误
+- **AND** correction plan MUST 包含修正类型、证据摘要、`source_doc_ids` 或 `outline_segment_ids`、置信度和一组明确 operations
+- **AND** operations SHOULD 支持移除错误 alias、迁移 / 移除误归因经历、改写关系目标、创建或补全正确人物档案、追加修正事件
+- **AND** 迁移经历必须使用明确 selector，例如 `event_ids`、`outline_segment_ids`、`source_doc_ids` 或模型确认的事件标识；不得仅凭名字相似或弱共现批量迁移
+- **AND** 修正后旧误导 MAY 作为“当时叙事视角 / correction note”保留，但 Writer / Analyzer 的当前事实上下文不应继续读取被推翻的错误事实
+- **AND** 身份合并 MAY 视为历史记忆修正的特例，但 profile-to-profile merge 可由专门服务实现以保留更强的安全约束
+
 #### Scenario: 关系称呼
 - **WHEN** 原文中出现某角色对另一角色的对话称呼，例如配偶称“老公”、同事称英文名、朋友称昵称
 - **THEN** 该称呼 SHOULD 随关系条目保存，并尽量保留称呼方向，例如“A 称 B 为 X”
@@ -213,19 +239,49 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 
 #### Scenario: Character Profile 分层表达
 - **WHEN** 系统维护人物档案
-- **THEN** 人物档案 SHOULD 分为至少两层：
+- **THEN** 人物档案 SHOULD 分为至少三层：
   - 基础属性层：姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、基础人际关系、能力和特长
-  - 人物剧情时间线层：以该人物为维度过滤出的 `key_experiences`
-- **AND** 基础属性层 SHOULD 足够压缩，服务于 Writer 快速理解人物稳定状态
-- **AND** 人物剧情时间线层 SHOULD 保留关键事件、关系推进、状态转折与行动结果
-- **AND** 每条 `key_experience` MUST 带有可回源索引，例如 `experience_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
+  - 常驻简档层：`profile_brief`，保存身份锚点、当前状态、稳定特征、能力/限制、关键关系摘要、未解问题、最近重大变化和 compact 进度
+  - 人物经历层：以该人物为维度保存 `recent_activity` 增量队列和 `story_events` 长期经历索引
+- **AND** `profile_brief` MUST 是持久化字段或等价投影，不得在每次 close-read 中通过超大 prompt 临时生成
+- **AND** 普通 close-read / Character Reduce SHOULD 默认只读取 `profile_brief`、当前人物 evidence、当前 chapter summary / outline segment 和必要身份索引
+- **AND** `recent_activity` SHOULD 保存尚热或尚未被概括吸收的近期经历增量，保留当前行动、关系推进、状态转折与行动结果；它不应默认进入每一次 Character Reduce prompt
+- **AND** `story_events` SHOULD 保存长期经历索引摘要，重点保留高度概括剧情、角色作用、`outline_segment_id` / source range 和可回源引用
+- **AND** 对低频、背景出场或弱相关人物，系统 SHOULD 只追加极简人物经历索引，不触发完整档案整理
+- **AND** 当 `profile_brief` 缺失时，系统 SHOULD 对该人物执行一次模型 compact/bootstrap，生成初始 `profile_brief` 后再进入普通增量更新；该兼容初始化是一次性成本，不得退回每批临时压缩完整档案
+- **AND** 当当前 document / outline segment 对人物造成重大状态、关系、身份、能力、性格、形象或未解谜题变化时，系统 SHOULD 触发 `profile_brief` compact loop
+- **AND** `profile_brief` compact loop MAY 由模型主导读取该人物的 `recent_activity`、`story_events`、outline segment、chapter summary 或必要原文摘录；模型必须说明读取原因和最终吸收哪些经历
+- **AND** 每条人物经历 MUST 带有可回源索引，例如 `experience_id`、`outline_segment_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
+- **AND** 如果当前人物经历来自某个 `outline_segment` 覆盖范围，人物经历更新 MUST 保留 `outline_segment_id`，供 Analyzer / Writer 先定位剧情段，再按需展开 chapter / document
 - **AND** `mentioned_doc_ids` / `speaking_doc_ids` 仍可作为底层索引保存，但不应作为模型筛选人物过往的唯一入口
+- **AND** 所有人物经历压缩 MUST 由模型进行抽象概括；生产路径不得使用按字符数、token 数、句子数或列表长度硬截断来伪装已经完成语义压缩
 
 #### Scenario: Character Experience List 与原文回源
 - **WHEN** 模型需要确认某人物的过往经历
-- **THEN** 系统 SHOULD 先返回该人物的人物剧情时间线，而不是直接返回庞大的 mentioned doc id 列表
-- **AND** 模型 MAY 选择其中一个或多个 `experience_id` / `source_doc_ids` 请求进一步展开原文证据
-- **AND** 系统 SHOULD 通过该事件携带的 `source_doc_ids` 或 `source_doc_range` 返回对应原始 `documents` 的摘录或全文片段
+- **THEN** 系统 SHOULD 先返回该人物的 `profile_brief`、`recent_activity` 索引和 `story_events` 索引，而不是直接返回庞大的 mentioned doc id 列表
+- **AND** 模型 MAY 选择其中一个或多个 `experience_id`、`outline_segment_id` 或 `source_doc_ids` 请求进一步展开剧情段或原文证据
+- **AND** 系统 SHOULD 通过该经历携带的 `outline_segment_id`、`source_doc_ids` 或 `source_doc_range` 返回对应 outline segment、章节摘要、原始 `documents` 的摘录或全文片段
+- **AND** 同一段剧情对不同角色的意义可能不同；人物经历更新 SHOULD 根据人物在该段中的作用压缩人物经历摘要
+- **AND** 当角色只是背景出场或弱相关参与者时，人物档案中的该经历 SHOULD 大幅压缩，只保留大致事件、角色相关点和 `outline_segment_id`
+- **AND** 当角色是主要推动者、主要关联者，或该段原文主要来自该角色口述 / 对话时，人物档案中的该经历 SHOULD 保留更完整的剧情因果、行动结果和关系变化
+
+#### Scenario: Character Relationship 边界
+- **WHEN** 系统写入或更新人物关系
+- **THEN** `relationships` / `relationships_json` SHOULD 只保存当前关系状态、关系类型、情感状态、对话称呼和回源索引
+- **AND** `status_summary` SHOULD 是短关系状态，不应承载完整剧情因果、小型章节摘要或人物经历
+- **AND** 关系变化的过程、触发事件、冲突细节和结果 SHOULD 写入 `recent_activity` 或 `story_events`
+- **AND** Character Reduce prompt MUST 明确要求关系层与经历层分工，避免把同一段剧情同时长篇复制进 relationship 与 experience
+
+#### Scenario: Incremental Character Reduce 与 Brief Compact
+- **WHEN** 系统组装 Character Reduce Agent 输入
+- **THEN** 不得传入完整 `profile_summary_md`、全量 `relationships_json`、全量 `recent_activity` 或全量 `story_events`
+- **AND** 系统 SHOULD 传入持久化 `profile_brief`、当前 ordered evidence、当前 outline segment / chapter summary 和必要身份索引
+- **AND** `profile_summary_md` SHOULD 作为展示层或投影层存在，不应作为人物归并 prompt 的主要事实来源
+- **AND** 系统 MUST NOT 生成或依赖每批临时完整档案压缩上下文
+- **AND** Character Reduce SHOULD 只输出当前剧情带来的人物经历增量、短关系状态变化和 compact 触发信号，不负责每次整理完整人物档案
+- **AND** Brief Compact Gate SHOULD 至少考虑当前窗口 document 覆盖率、发言证据、行动证据、关系变化证据、角色是否推动/承受主要剧情，以及是否产生重大身份/能力/性格/关系/谜题变化
+- **AND** 当人物被判定为 `index_only` / `defer_index_only` 时，系统 SHOULD 跳过 Character Reduce 模型调用，只保存可回源的 `outline_segment_id` / source range / role / one-line summary 索引更新
+- **AND** 当 brief 缺失、recent_activity 积累超阈值、人物长期冷却或出现重大变化时，系统 SHOULD 运行模型 compact loop，将必要经历吸收进 `profile_brief` 并把已吸收的热层经历转入长期索引或标记为已 compact
 
 ### Requirement: Character Evidence Batch
 系统 SHALL 为 Character Evidence Agent 引入独立于 Chapter Summary Agent 的轻量 batch 工作单元。
@@ -270,25 +326,25 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** Character Evidence Agent 不应完全依赖本地候选名服务
 - **AND** Character Evidence Agent 仍应发现本地候选名服务漏掉的真实角色
 
-### Requirement: Character Profile Update Batch
+### Requirement: Character Reduce 与 Brief Compact Batch
 系统 SHALL 将人物证据抽取与人物档案归并拆成两个可独立调参的 batch。
 
-#### Scenario: Evidence Batch 与 Profile Update Batch 分工
+#### Scenario: Evidence Batch 与 Character Reduce 分工
 - **WHEN** close-read 需要更新人物档案
 - **THEN** Character Evidence Agent SHOULD 先按连续 `documents` 组装 evidence batch，目标是抽取当前原文窗口涉及哪些人物、发言、行动状态与关系变化
-- **AND** Profile Update / Character Reduce Agent SHOULD 再按人物维度读取既有人物档案与 ordered evidence，输出可写回的人物档案增量
-- **AND** Evidence Batch 的 document 预算和 Profile Update Batch 的档案预算 SHOULD 分开配置
+- **AND** Character Reduce Agent SHOULD 再按人物维度读取 `profile_brief` 与 ordered evidence，输出可写回的人物档案增量和 brief compact 触发信号
+- **AND** Evidence Batch 的 document 预算和 Character Reduce 的 brief/evidence 预算 SHOULD 分开配置
 
-#### Scenario: Profile Update Batch 预算
-- **WHEN** 系统组装 Profile Update / Character Reduce Agent 输入
+#### Scenario: Character Reduce Batch 预算
+- **WHEN** 系统组装 Character Reduce Agent 输入
 - **THEN** 初始建议把连续 document 原文或 evidence 摘要控制在约 16KB 以内
-- **AND** 同一条 profile update prompt 中最多包含 4 个候选人物档案
-- **AND** 这些人物既有档案合计 SHOULD 控制在约 8KB 以内
+- **AND** 同一条 reduce prompt 默认只处理 1 个目标人物
+- **AND** `profile_brief` SHOULD 控制在约 1-2KB 以内，相关人物 brief 只能作为短关系参照
 - **AND** 上述阈值 MUST 可配置，并应通过 benchmark 调整，而不是写死到 prompt 语义中
-- **AND** 如果人物之间关系高度耦合，系统 MAY 将相关人物放入同一 update batch；如果档案过长、关系冲突复杂或模型低置信，系统 SHOULD 退回单人物 reduce
+- **AND** 如果人物之间关系高度耦合，系统 MAY 读取相关人物 brief；如果关系冲突复杂或模型低置信，系统 SHOULD 退回单人物 reduce 或人工确认
 
-#### Scenario: Profile Update Batch 输出边界
-- **WHEN** Profile Update / Character Reduce Agent 返回结果
+#### Scenario: Character Reduce 输出边界
+- **WHEN** Character Reduce Agent 返回结果
 - **THEN** 输出 MUST 按 `character_id` 或 canonical identity 分离每个人物的更新
 - **AND** 不得把 A 人物的经历写入 B 人物档案
 - **AND** 不得使用本地 heuristic 伪装模型完成了人物性、关系或经历归并
@@ -350,16 +406,23 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 
 #### Scenario: Story Outline 字段
 - **WHEN** 系统维护整书大纲
-- **THEN** 至少应支持：
+- **THEN** 标准 Story Outline Memory SHALL 以 `outline_segments.json` 中的 `segments` 与 `roots` 为事实索引：
   - `book_id`
-  - `outline_summary`
-  - `outline_status`
-  - `evidence_window`
-  - `target_range`
-  - `major_turning_points`
-  - `timeline_notes`
-  - `main_character_threads`
+  - `segments[].outline_segment_id`
+  - `segments[].chapter_line`
+  - `segments[].summary` 或等价 `outline_segment`
+  - `segments[].source_doc_ids` / `segments[].source_doc_range`
+  - `segments[].source_title_indexes`
+  - `segments[].status`
+  - `roots[].outline_root_id`
+  - `roots[].summary`
+  - `roots[].outline_segment_ids`
+  - `roots[].source_doc_ids` / `roots[].source_doc_range`
+  - `roots[].source_title_indexes`
+  - `roots[].status`
   - `updated_at`
+- **AND** 旧式大纲 Markdown 或追加式大纲字段 MAY 作为迁移兼容输入读取，但不属于新的 Story Outline Memory source of truth
+- **AND** `.outline.md` MUST 只由 `segments` / `roots` 投影生成，用于人类阅读；Analyzer / Writer 不应把 Markdown 当作检索入口或事实源
 
 #### Scenario: Story Outline 四层结构
 - **WHEN** 系统完成 close-read Memory 写回
@@ -370,7 +433,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
   - `outline root`：多个 outline segment 的上层索引
 - **AND** 上层不应丢失下层索引；`chapter summary`、`outline segment` 和 `outline root` SHOULD 能回到其覆盖的 `source_doc_ids` 或 `source_doc_range`
 - **AND** Story Outline Memory schema SHALL NOT 输出 `timeline_events`、`event list` 或等价事件数组，避免模型被旧 schema 诱导
-- **AND** 多维事件检索应由 Narrative Indexer 的 `FactualEventCard` 实现，而不是由 Story Outline Memory 的 outline schema 实现
+- **AND** 事件级 source of truth 应由 Narrative Indexer cards 实现，例如 `NarrativeSceneCard` 或等价事件 / 场景级 IndexCard，而不是由 Story Outline Memory 的 outline schema 实现
 
 #### Scenario: Outline Segment
 - **WHEN** 系统维护整书或章节范围的大纲
@@ -386,6 +449,16 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** 模型 SHOULD 直接压缩为一个连续 `outline_segment.summary`
 - **AND** Agent MUST 保存该 segment 覆盖的 source doc/title range
 - **AND** 输出 schema 中不得包含 `timeline_events`、`event_ids`、`pending_event_ids` 或等价事件数组
+
+#### Scenario: Outline Root 模型压缩
+- **GIVEN** 系统已有多个连续 `outline_segment`
+- **WHEN** 需要生成或刷新 `outline_root`
+- **THEN** Agent SHOULD 把该 root 覆盖的 segment 摘要、segment id 和 source ranges 发给模型
+- **AND** 模型 MUST 输出连续自然语言 `root.summary`，用于快速检索和判断相关性
+- **AND** `root.summary` SHOULD 压缩多个 segment 的因果、主线转折、主要人物状态变化、关系推进、设定揭示和未解问题
+- **AND** `root.summary` MUST NOT 是 16 个 segment summary 的原样拼接
+- **AND** `root` MUST 保留 `outline_segment_ids`，使 Analyzer / Writer 能从 root 确定性展开到 segment，再展开到 chapter / document
+- **AND** `root` 输出 schema 不得包含 `timeline_events`、`event_ids`、`pending_event_ids` 或等价事件数组
 
 #### Scenario: Outline 长度约束
 - **WHEN** 大纲超过约 10KB

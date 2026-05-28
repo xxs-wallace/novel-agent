@@ -91,35 +91,57 @@ class MemoryCandidateService:
         prompt_input: dict[str, Any],
         summary_payload: dict[str, Any],
         evidence_payload: dict[str, Any],
+        current_outline_segment: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         grouped = self._group_character_evidence(evidence_payload)
         if not grouped:
             return []
+        outline_segment = dict(current_outline_segment or {})
+        reduce_outline_segment = self._character_reduce_outline_segment(outline_segment)
+        chapter_summary = self._character_reduce_summary(
+            summary_payload,
+            current_outline_segment=reduce_outline_segment,
+        )
         result: list[dict[str, Any]] = []
         for identity_key in sorted(grouped):
             evidence_items = sorted(grouped[identity_key], key=self._evidence_sort_key)
             canonical_name = str(evidence_items[0].get("canonical_name", "")).strip()
             character_id = str(evidence_items[0].get("character_id", "") or "").strip()
+            existing_profile = self._character_reduce_existing_profile(
+                prompt_input.get("character_profiles", []),
+                canonical_name=canonical_name,
+                character_id=character_id,
+            )
+            detail_policy = self._character_reduce_detail_policy(
+                evidence_items=evidence_items,
+                existing_profile=existing_profile,
+            )
             result.append(
                 {
                     "book_id": prompt_input.get("book_id"),
                     "character_id": character_id,
                     "canonical_name": canonical_name,
-                    "existing_profile": self._find_existing_profile(
-                        prompt_input.get("character_profiles", []),
-                        canonical_name=canonical_name,
-                        character_id=character_id,
-                    ),
+                    "existing_profile": existing_profile,
                     "ordered_character_evidence": evidence_items,
-                    "chapter_summary": self._character_reduce_summary(summary_payload),
+                    "chapter_summary": chapter_summary,
+                    "chapter_context_text": chapter_summary["chapter_context_text"],
+                    "current_outline_segment": reduce_outline_segment,
                     "reduce_policy": {
                         "same_character_must_be_reduced_serially": True,
                         "relationships_are_merged_inside_character_reduce": True,
                         "character_id_is_primary_identity_when_present": True,
                         "personhood_and_relationships_must_be_deduplicated": True,
+                        "key_experiences_must_be_target_character_scoped": True,
+                        "preserve_outline_segment_id": True,
+                        "background_roles_should_be_brief_or_index_only": True,
+                        "detail_level": detail_policy["detail_level"],
+                        "detail_reason": detail_policy["reason"],
+                        "non_core_characters_get_index_only_experience": True,
+                        "relationships_for_non_core_characters_must_be_short": True,
                         "drop_low_value_candidate_types": sorted(LOW_VALUE_CANDIDATE_TYPES),
                         "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
                     },
+                    "profile_update_gate": detail_policy,
                 }
             )
         return result
@@ -148,11 +170,68 @@ class MemoryCandidateService:
         if update is not None and reduce_input.get("character_id"):
             update = dict(update)
             update["character_id"] = str(reduce_input.get("character_id") or "").strip()
+        if update is not None:
+            key_experiences = self._fallback_key_experiences_for_character(
+                canonical_name=canonical_name,
+                character_id=str(reduce_input.get("character_id") or "").strip(),
+                reduce_input=reduce_input,
+            )
+            if key_experiences:
+                update = dict(update)
+                update["key_experiences"] = key_experiences
         return {
             "should_update": update is not None,
             "canonical_name": canonical_name,
             "character_id": str(reduce_input.get("character_id") or "").strip(),
             "character_update": update,
+        }
+
+    def build_index_only_reduce_output(
+        self,
+        *,
+        reduce_input: dict[str, Any],
+    ) -> dict[str, Any]:
+        canonical_name = str(reduce_input.get("canonical_name", "")).strip()
+        evidence_items = [item for item in reduce_input.get("ordered_character_evidence", []) if isinstance(item, dict)]
+        if not canonical_name or not evidence_items:
+            return {"should_update": False, "canonical_name": canonical_name, "character_update": None}
+        character_id = str(reduce_input.get("character_id") or "").strip()
+        aliases: list[str] = []
+        for item in evidence_items:
+            for alias in item.get("aliases", []) if isinstance(item.get("aliases"), list) else []:
+                cleaned = self.clean_evidence_name(alias, character=item)
+                if cleaned and cleaned not in aliases:
+                    aliases.append(cleaned)
+        key_experiences = self._index_only_key_experiences_for_character(
+            canonical_name=canonical_name,
+            character_id=character_id,
+            reduce_input=reduce_input,
+        )
+        update: dict[str, Any] = {
+            "canonical_name": canonical_name,
+            "character_id": character_id,
+            "aliases": aliases,
+            "personality": [],
+            "occupations": [],
+            "abilities": [],
+            "relationships": [],
+            "recent_activity": [],
+            "key_experiences": key_experiences,
+            "recent_key_experiences": key_experiences,
+            "profile_update_policy": "defer_index_only",
+            "profile_update_gate": reduce_input.get("profile_update_gate") or {},
+            "evidence_level": "explicit" if any(item.get("confidence", 0) for item in evidence_items) else "inferred",
+        }
+        if any(bool(item.get("is_speaking_character")) for item in evidence_items):
+            update["speaking_character_status"] = "confirmed_speaking"
+        return {
+            "should_update": True,
+            "canonical_name": canonical_name,
+            "character_id": character_id,
+            "character_update": update,
+            "key_experiences": key_experiences,
+            "profile_update_gate": reduce_input.get("profile_update_gate") or {},
+            "skipped_model_reduce": True,
         }
 
     def normalize_character_reduce_outputs(self, outputs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -177,8 +256,109 @@ class MemoryCandidateService:
             normalized["canonical_name"] = canonical_name
             if output.get("character_id") and not normalized.get("character_id"):
                 normalized["character_id"] = str(output.get("character_id") or "").strip()
+            if isinstance(output.get("key_experiences"), list) and not isinstance(normalized.get("key_experiences"), list):
+                normalized["key_experiences"] = output["key_experiences"]
             updates.append(normalized)
         return {"character_updates": updates}
+
+    def _fallback_key_experiences_for_character(
+        self,
+        *,
+        canonical_name: str,
+        character_id: str,
+        reduce_input: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        outline_segment = reduce_input.get("current_outline_segment")
+        if not isinstance(outline_segment, dict):
+            return []
+        outline_segment_id = str(outline_segment.get("outline_segment_id") or "").strip()
+        summary = str(outline_segment.get("outline_segment") or "").strip()
+        if not outline_segment_id or not summary:
+            return []
+        evidence_items = [item for item in reduce_input.get("ordered_character_evidence", []) if isinstance(item, dict)]
+        has_speaking = any(bool(item.get("is_speaking_character")) for item in evidence_items)
+        has_action = any(str(item.get("activity_or_state_evidence") or "").strip() for item in evidence_items)
+        role = "speaker_source" if has_speaking else "supporting" if has_action else "background"
+        compression_level = "medium" if role in {"speaker_source", "supporting"} else "brief"
+        character_suffix = character_id or re.sub(r"[^\w\u4e00-\u9fff]+", "-", canonical_name).strip("-").lower()
+        return [
+            {
+                "experience_id": f"char-exp:{character_suffix}:{outline_segment_id}",
+                "outline_segment_id": outline_segment_id,
+                "role_in_segment": role,
+                "compression_level": compression_level,
+                "label": str(outline_segment.get("chapter_line") or "").strip() or summary[:24],
+                "summary": summary if role != "background" else f"{canonical_name}在该剧情段中作为背景或弱相关人物出现。",
+                "source_chapter_indexes": self._safe_int_list(outline_segment.get("source_title_indexes")),
+                "source_doc_ids": self._safe_int_list(outline_segment.get("source_doc_ids")),
+                "source_doc_range": str(outline_segment.get("source_doc_range") or "").strip(),
+                "participants": [canonical_name],
+                "status": str(outline_segment.get("status") or "provisional"),
+                "generation_note": "dry_run_fallback",
+            }
+        ]
+
+    def _index_only_key_experiences_for_character(
+        self,
+        *,
+        canonical_name: str,
+        character_id: str,
+        reduce_input: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        outline_segment = reduce_input.get("current_outline_segment")
+        if not isinstance(outline_segment, dict):
+            return []
+        outline_segment_id = str(outline_segment.get("outline_segment_id") or "").strip()
+        if not outline_segment_id:
+            return []
+        evidence_items = [item for item in reduce_input.get("ordered_character_evidence", []) if isinstance(item, dict)]
+        source_doc_ids = sorted(
+            {
+                doc_id
+                for item in evidence_items
+                for doc_id in self._safe_int_list(item.get("source_doc_ids"))
+            }
+        )
+        source_title_indexes = sorted(
+            {
+                title_index
+                for item in evidence_items
+                for title_index in self._safe_int_list(item.get("source_title_indexes"))
+            }
+        )
+        has_speaking = any(bool(item.get("is_speaking_character")) for item in evidence_items)
+        has_action = any(str(item.get("activity_or_state_evidence") or "").strip() for item in evidence_items)
+        has_relationship = any(str(item.get("relationship_evidence") or "").strip() for item in evidence_items)
+        role = "speaker_source" if has_speaking else "supporting" if has_action or has_relationship else "background"
+        evidence_summary = self._first_evidence_summary(evidence_items)
+        if not evidence_summary:
+            evidence_summary = f"{canonical_name}在该剧情段中作为背景或弱相关人物出现。"
+        character_suffix = character_id or re.sub(r"[^\w\u4e00-\u9fff]+", "-", canonical_name).strip("-").lower()
+        return [
+            {
+                "experience_id": f"char-exp:{character_suffix}:{outline_segment_id}",
+                "outline_segment_id": outline_segment_id,
+                "role_in_segment": role,
+                "compression_level": "index_only",
+                "label": str(outline_segment.get("chapter_line") or "").strip() or canonical_name,
+                "summary": evidence_summary,
+                "source_chapter_indexes": source_title_indexes or self._safe_int_list(outline_segment.get("source_title_indexes")),
+                "source_doc_ids": source_doc_ids or self._safe_int_list(outline_segment.get("source_doc_ids")),
+                "source_doc_range": str(outline_segment.get("source_doc_range") or "").strip(),
+                "participants": [canonical_name],
+                "status": str(outline_segment.get("status") or "provisional"),
+                "generation_note": "index_only_deferred_from_character_evidence",
+            }
+        ]
+
+    @staticmethod
+    def _first_evidence_summary(evidence_items: list[dict[str, Any]]) -> str:
+        for field_name in ("activity_or_state_evidence", "relationship_evidence", "personhood_evidence", "speaking_evidence"):
+            for item in evidence_items:
+                text = str(item.get(field_name) or "").strip()
+                if text:
+                    return text
+        return ""
 
     def build_global_memory_input(
         self,
@@ -257,7 +437,6 @@ class MemoryCandidateService:
             "world_update": {"should_update": False, "changes": []},
             "outline_update": {
                 "chapter_line": f"[{document_title_index}] {chapter_title}: {summary_short}",
-                "timeline_events": [],
             },
         }
 
@@ -506,12 +685,191 @@ class MemoryCandidateService:
                 return profile
         return None
 
-    def _character_reduce_summary(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "chapter_summary_md": summary_payload.get("chapter_summary_md", ""),
-            "chapter_summary_short": summary_payload.get("chapter_summary_short", ""),
-            "chapter_summaries": summary_payload.get("chapter_summaries", []),
+    def _character_reduce_existing_profile(
+        self,
+        profiles: object,
+        *,
+        canonical_name: str,
+        character_id: str = "",
+    ) -> dict[str, Any] | None:
+        profile = self._find_existing_profile(
+            profiles,
+            canonical_name=canonical_name,
+            character_id=character_id,
+        )
+        if not isinstance(profile, dict):
+            return None
+        brief = profile.get("profile_brief")
+        existing_profile = {
+            "character_id": profile.get("character_id"),
+            "canonical_name": profile.get("canonical_name"),
+            "aliases": profile.get("aliases", []),
+            "profile_brief": brief if isinstance(brief, dict) else {},
+            "profile_brief_status": str(profile.get("profile_brief_status") or "").strip() or (
+                "ready" if isinstance(brief, dict) and brief else "missing"
+            ),
         }
+        if isinstance(profile.get("character_update_gate"), dict):
+            existing_profile["character_update_gate"] = profile["character_update_gate"]
+        return existing_profile
+
+    def _character_reduce_detail_policy(
+        self,
+        *,
+        evidence_items: list[dict[str, Any]],
+        existing_profile: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        gate = None
+        if isinstance(existing_profile, dict):
+            raw_gate = existing_profile.get("character_update_gate")
+            if isinstance(raw_gate, dict):
+                gate = raw_gate
+        if isinstance(gate, dict) and str(gate.get("detail_level") or "").strip():
+            return {
+                "detail_level": str(gate.get("detail_level") or "compact").strip(),
+                "reason": str(gate.get("reason") or "profile_update_gate").strip(),
+                "current_doc_frequency": gate.get("current_doc_frequency"),
+                "current_doc_count": gate.get("current_doc_count"),
+                "current_total_docs": gate.get("current_total_docs"),
+                "speaking_doc_count": gate.get("speaking_doc_count"),
+                "action_doc_count": gate.get("action_doc_count"),
+                "relationship_doc_count": gate.get("relationship_doc_count"),
+            }
+        doc_ids = {
+            doc_id
+            for item in evidence_items
+            for doc_id in self._safe_int_list(item.get("source_doc_ids"))
+        }
+        speaking_count = sum(1 for item in evidence_items if bool(item.get("is_speaking_character")))
+        action_count = sum(1 for item in evidence_items if str(item.get("activity_or_state_evidence") or "").strip())
+        relationship_count = sum(1 for item in evidence_items if str(item.get("relationship_evidence") or "").strip())
+        if len(doc_ids) >= 3 and (speaking_count > 0 or action_count >= 2 or relationship_count > 0):
+            detail_level = "detailed"
+            reason = "fallback_batch_wide_direct_signal"
+        elif speaking_count > 0 or action_count > 0 or relationship_count > 0:
+            detail_level = "compact"
+            reason = "fallback_direct_signal"
+        else:
+            detail_level = "index_only"
+            reason = "fallback_low_frequency_or_background_role"
+        return {
+            "detail_level": detail_level,
+            "reason": reason,
+            "current_doc_count": len(doc_ids),
+            "speaking_doc_count": speaking_count,
+            "action_doc_count": action_count,
+            "relationship_doc_count": relationship_count,
+        }
+
+    def _character_reduce_summary(
+        self,
+        summary_payload: dict[str, Any],
+        *,
+        current_outline_segment: dict[str, Any],
+    ) -> dict[str, Any]:
+        chapter_summaries = self._compact_chapter_summaries(summary_payload.get("chapter_summaries", []))
+        summary_short = str(summary_payload.get("chapter_summary_short") or "").strip()
+        context_text = self._character_reduce_chapter_context_text(
+            summary_short=summary_short,
+            chapter_summaries=chapter_summaries,
+            current_outline_segment=current_outline_segment,
+        )
+        return {
+            "chapter_summary_short": summary_short,
+            "chapter_context_text": context_text,
+            "chapter_summaries": chapter_summaries,
+            "summary_policy": "full_chapter_summary_md_omitted; use chapter_context_text/current_outline_segment",
+        }
+
+    def _character_reduce_outline_segment(self, outline_segment: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "outline_segment_id",
+            "outline_segment",
+            "chapter_line",
+            "source_doc_ids",
+            "source_doc_range",
+            "source_doc_start_id",
+            "source_doc_end_id",
+            "source_title_indexes",
+            "source_chapter_range",
+            "status",
+        }
+        return {key: outline_segment[key] for key in allowed if key in outline_segment and outline_segment[key] not in ("", [], {})}
+
+    def _compact_chapter_summaries(self, value: object) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            summary_short = str(item.get("chapter_summary_short") or "").strip()
+            if not summary_short:
+                summary_short = str(item.get("summary_short") or "").strip()
+            outline_source = item.get("current_outline_segment")
+            if not isinstance(outline_source, dict):
+                outline_source = item.get("outline_update")
+            if not isinstance(outline_source, dict):
+                outline_source = {
+                    "outline_segment_id": item.get("outline_segment_id"),
+                    "outline_segment": item.get("outline_segment") or item.get("summary"),
+                    "source_doc_range": item.get("source_doc_range"),
+                    "source_doc_ids": item.get("source_doc_ids"),
+                    "source_title_indexes": item.get("source_title_indexes"),
+                }
+            outline_segment = self._character_reduce_outline_segment(dict(outline_source))
+            if not summary_short and not outline_segment.get("outline_segment"):
+                continue
+            compact_item = {
+                "document_title_index": item.get("document_title_index"),
+                "chapter_title": str(item.get("chapter_title") or "").strip(),
+                "chapter_summary_short": summary_short,
+                "summary_quality": str(item.get("summary_quality") or "").strip(),
+            }
+            if outline_segment:
+                compact_item["current_outline_segment"] = outline_segment
+            result.append(compact_item)
+        return result
+
+    def _character_reduce_chapter_context_text(
+        self,
+        *,
+        summary_short: str,
+        chapter_summaries: list[dict[str, Any]],
+        current_outline_segment: dict[str, Any],
+    ) -> str:
+        parts: list[str] = []
+        outline_text = str(current_outline_segment.get("outline_segment") or "").strip()
+        outline_id = str(current_outline_segment.get("outline_segment_id") or "").strip()
+        doc_range = str(current_outline_segment.get("source_doc_range") or "").strip()
+        if outline_text:
+            label = outline_id or "current_outline_segment"
+            suffix = f" docs {doc_range}" if doc_range else ""
+            parts.append(f"[{label}{suffix}] {outline_text}")
+        elif summary_short:
+            parts.append(f"短摘要：{summary_short}")
+        for item in chapter_summaries:
+            title_index = item.get("document_title_index")
+            title = str(item.get("chapter_title") or "").strip()
+            short = str(item.get("chapter_summary_short") or "").strip()
+            item_outline = item.get("current_outline_segment")
+            if isinstance(item_outline, dict):
+                item_outline = self._character_reduce_outline_segment(item_outline)
+            else:
+                item_outline = {}
+            item_outline_text = str(item_outline.get("outline_segment") or "").strip()
+            item_outline_id = str(item_outline.get("outline_segment_id") or "").strip()
+            item_doc_range = str(item_outline.get("source_doc_range") or "").strip()
+            label_bits = [str(title_index)] if title_index not in (None, "") else []
+            if title:
+                label_bits.append(title)
+            label = item_outline_id or " ".join(label_bits) or "chapter_summary"
+            if item_outline_text:
+                suffix = f" docs {item_doc_range}" if item_doc_range else ""
+                parts.append(f"[{label}{suffix}] {item_outline_text}")
+            elif short:
+                parts.append(f"[{label}] {short}")
+        return "\n".join(dict.fromkeys(part for part in parts if part))
 
     def _global_summary_payload(self, summary_payload: dict[str, Any]) -> dict[str, Any]:
         return {

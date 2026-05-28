@@ -67,6 +67,7 @@ def test_memory_and_kb_reviewer_tool_boundaries_are_explicit() -> None:
 
     assert manifests["chapter_synopsis_plot_character"].allowed_tools == ["memory_query"]
     assert manifests["memory_draft_consistency"].allowed_tools == ["memory_query"]
+    assert manifests["source_chapter_literary_diagnostic"].allowed_tools == ["memory_query"]
     assert manifests["kb_draft_style_atmosphere"].allowed_tools == ["kb_retrieval"]
     assert "kb_retrieval" not in manifests["memory_draft_consistency"].allowed_tools
     assert "memory_query" not in manifests["kb_draft_style_atmosphere"].allowed_tools

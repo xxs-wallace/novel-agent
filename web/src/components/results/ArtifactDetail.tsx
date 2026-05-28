@@ -96,6 +96,21 @@ export function ArtifactDetail({ view, isLoading = false, actionPending = false,
           <ReactMarkdown>{normalizePublicTerms(view.markdown)}</ReactMarkdown>
         </div>
       ) : null}
+      {view.actions.length ? (
+        <div className="artifact-floating-actions">
+          {view.actions.map((action) => (
+            <button
+              type="button"
+              key={`${action.action}:${action.label}`}
+              disabled={actionPending}
+              title={action.description}
+              onClick={() => void onAction?.(action.action, action.payload ?? {})}
+            >
+              {normalizePublicTerms(action.label)}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <TechnicalDetailsDrawer artifactId={view.artifact_id} available={view.technical_available} />
     </article>
   );

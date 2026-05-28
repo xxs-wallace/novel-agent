@@ -245,6 +245,8 @@ class WriterInteractiveWorkflow:
                 )
         if not raw_answer_text:
             raise ValueError("请先填写回答内容。")
+        if raw_answer_text:
+            self._merge_outline_answer_into_continuation_intent(run_id=run_id, answer_text=raw_answer_text)
         submission_question_set_id = question_set.question_set_id if question_set is not None else question_set_id
         if not submission_question_set_id:
             submission_question_set_id = f"outline-research-{run_id}-manual"
@@ -296,8 +298,44 @@ class WriterInteractiveWorkflow:
         self._save_workflow_state(run_id, state)
         return result
 
+    def _merge_outline_answer_into_continuation_intent(self, *, run_id: str, answer_text: str) -> None:
+        text = str(answer_text or "").strip()
+        if not text:
+            return
+        payload = self._load_optional_run_data(run_id, "continuation_intent.json") or {}
+        if not payload:
+            return
+        existing_notes = str(payload.get("notes") or "").strip()
+        existing_prompt = str(payload.get("raw_user_prompt") or "").strip()
+        if text in existing_notes:
+            return
+        if text not in existing_prompt:
+            question_set = self._load_outline_research_question_set(run_id)
+            question_text = ""
+            if question_set is not None:
+                prompts = [question.prompt for question in question_set.questions if question.prompt.strip()]
+                if prompts:
+                    question_text = "\n".join(f"模型提问：{prompt}" for prompt in prompts)
+            payload["raw_user_prompt"] = "\n\n".join(
+                item
+                for item in (
+                    existing_prompt,
+                    question_text,
+                    f"用户补充回答：{text}",
+                )
+                if item
+            )
+        payload["notes"] = f"{existing_notes}\n\n用户补充回答：{text}".strip()
+        self.run_writer.write_json(run_id, "continuation_intent.json", payload)
+
     def _load_outline_research_question_set(self, run_id: str) -> OutlineResearchQuestionSet | None:
         payload = self._load_optional_run_data(run_id, "outline_research_question_set.json")
+        if not payload:
+            return None
+        return OutlineResearchQuestionSet.from_dict(payload)
+
+    def _load_draft_research_question_set(self, run_id: str) -> OutlineResearchQuestionSet | None:
+        payload = self._load_optional_run_data(run_id, "draft_research_question_set.json")
         if not payload:
             return None
         return OutlineResearchQuestionSet.from_dict(payload)
@@ -408,6 +446,126 @@ class WriterInteractiveWorkflow:
             "question_set": question_set.to_dict(),
             "missing_required_questions": list(missing_question_ids),
         }
+
+    def continue_after_draft_research_input(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        run_id: str,
+        book_id: str,
+        product_mode: str,
+        user_answers: Mapping[str, str] | list[Mapping[str, Any]],
+        question_set_id: str = "",
+        source_message_id: str = "",
+        answer_text: str = "",
+    ) -> dict[str, Any]:
+        mode = self._normalize_mode(product_mode)
+        question_set = self._load_draft_research_question_set(run_id)
+        normalized_answers = self._normalize_outline_research_answers(
+            question_set=question_set,
+            user_answers=user_answers,
+            answer_text=answer_text,
+        )
+        raw_answer_text = self._outline_research_raw_answer_text(answer_text=answer_text, answers=normalized_answers)
+        if question_set is not None:
+            if question_set_id and question_set_id != question_set.question_set_id:
+                raise ValueError("提交的问题集与当前正文研究问题集不一致。")
+            missing_required = (
+                []
+                if raw_answer_text
+                else self._missing_required_outline_answers(question_set=question_set, answers=normalized_answers)
+            )
+            if missing_required:
+                checkpoint = self._write_checkpoint(
+                    run_id=run_id,
+                    stage="draft_research_user_input",
+                    artifact_path=str(self.run_writer.layout.run_dir(run_id) / "draft_research_question_set.json"),
+                    source="continue_after_draft_research_input",
+                )
+                state = self.load_workflow_state(run_id=run_id) or self._base_state(
+                    run_id=run_id,
+                    book_id=book_id,
+                    product_mode=mode,
+                )
+                state["pending_checkpoint"] = checkpoint
+                state["terminal_stage"] = None
+                self._set_workflow_position(state, technical_stage="draft_research_user_input", agent_state="needs_user_input")
+                self._save_workflow_state(run_id, state)
+                return {
+                    "status": "needs_user_input",
+                    "stage": "draft_research_user_input",
+                    "question_set": question_set.to_dict(),
+                    "missing_required_questions": missing_required,
+                }
+        if not raw_answer_text:
+            raise ValueError("请先填写回答内容。")
+
+        execution_input = self._load_run_data(run_id, "chapter_execution_input.json")
+        updated_input = dict(execution_input)
+        user_supplement = dict(updated_input.get("user_supplement") or {})
+        prior_answers = [
+            dict(item) for item in (user_supplement.get("draft_research_answers") or []) if isinstance(item, Mapping)
+        ]
+        answer_record = {
+            "question_set_id": question_set.question_set_id if question_set is not None else question_set_id,
+            "source_message_id": source_message_id,
+            "answer_text": raw_answer_text,
+            "user_answers": [
+                {"question_id": question_id, "answer_text": answer}
+                for question_id, answer in normalized_answers.items()
+            ],
+            "created_at": _utc_now(),
+        }
+        prior_answers.append(answer_record)
+        user_supplement["draft_research_answers"] = prior_answers
+        updated_input["user_supplement"] = user_supplement
+        self.run_writer.write_json(run_id, "chapter_execution_input.json", updated_input)
+        self._rewrite_freeze_d_execution_input(
+            run_id=run_id,
+            execution_input=updated_input,
+            summary="受限执行输入已冻结，包含 Draft Research 用户澄清回答。",
+        )
+        self.run_writer.write_json(run_id, "draft_research_answer_submission.json", answer_record)
+
+        state = self.load_workflow_state(run_id=run_id) or self._base_state(
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=mode,
+        )
+        state["pending_checkpoint"] = None
+        state["terminal_stage"] = None
+        self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
+        self._save_workflow_state(run_id, state)
+        return self.execute_current_chapter(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+        )
+
+    def _rewrite_freeze_d_execution_input(
+        self,
+        *,
+        run_id: str,
+        execution_input: Mapping[str, Any],
+        summary: str,
+    ) -> None:
+        if self.run_writer.get_freeze_record(run_id, "freeze_d") is None:
+            return
+        self.run_writer.write_freeze_record(
+            run_id,
+            FreezeRecord(
+                freeze_stage="freeze_d",
+                summary=summary,
+                depends_on=["freeze_c"],
+            ),
+            artifact_payloads={
+                "chapter_brief.json": self._load_optional_run_data(run_id, "chapter_brief.json") or {},
+                "chapter_length_budget.json": self._load_optional_run_data(run_id, "chapter_length_budget.json") or {},
+                "style_reference_bundle.json": self._load_optional_run_data(run_id, "style_reference_bundle.json") or {},
+                "chapter_execution_input.json": dict(execution_input),
+            },
+        )
 
     def continue_after_planning_review(self, *, run_id: str) -> dict[str, str]:
         paths = self.planner.confirm_freeze_a(run_id=run_id)
@@ -579,6 +737,7 @@ class WriterInteractiveWorkflow:
             state["current_decision_id"] = ""
         state["current_chapter_id"] = chapter_id
         state["pending_checkpoint"] = None
+        state["terminal_stage"] = None
         self.executor.confirm_freeze_d(run_id=run_id)
         self._set_workflow_position(state, technical_stage="freeze_d", agent_state="generating_draft")
         self._save_workflow_state(run_id, state)
@@ -665,6 +824,31 @@ class WriterInteractiveWorkflow:
             auto_freeze_e=False,
         )
         state = self.load_workflow_state(run_id=run_id) or self._base_state(run_id=run_id, book_id=book_id, product_mode=mode)
+        draft_research_status = str(result.get("draft_research_status") or "").strip()
+        if draft_research_status and draft_research_status != "ready_for_draft":
+            if draft_research_status == "needs_user_input":
+                self._set_workflow_position(state, technical_stage="draft_research_user_input", agent_state="needs_user_input")
+                self._set_pending_stage(
+                    run_id=run_id,
+                    stage="draft_research_user_input",
+                    artifact_path=str(result.get("draft_research_decision_path") or ""),
+                    source="execute_current_chapter",
+                )
+                state = self.load_workflow_state(run_id=run_id) or state
+            elif draft_research_status == "replan_requested":
+                self._set_workflow_position(state, technical_stage="draft_research_replan_requested", agent_state="reviewing_artifact")
+                self._set_pending_stage(
+                    run_id=run_id,
+                    stage="wait_chapter_review",
+                    artifact_path=str(result.get("draft_research_decision_path") or ""),
+                    source="execute_current_chapter",
+                )
+                state = self.load_workflow_state(run_id=run_id) or state
+            else:
+                self._set_workflow_position(state, technical_stage="draft_research_blocked", agent_state="halted")
+                state["pending_checkpoint"] = None
+            self._save_workflow_state(run_id, state)
+            return result
         if result["canon_ready"]:
             state["failure_count"] = 0
             state["last_rollback"] = None
@@ -1283,12 +1467,17 @@ class WriterInteractiveWorkflow:
         if stage == "batch_review":
             return self.continue_after_batch_review(run_id=run_id, artifact_path=artifact_path)
         if stage in {"chapter_review", "wait_chapter_review"}:
+            state_before_chapter_confirm = self.load_workflow_state(run_id=run_id) or {}
             result: dict[str, Any] = {
                 "freeze_c": self.continue_after_chapter_review(run_id=run_id, artifact_path=artifact_path)
             }
             if conn is None:
                 return result
-            selected_chapter_id = chapter_id or self._first_chapter_id_from_chapter_package(run_id)
+            selected_chapter_id = self._select_chapter_id_after_chapter_review(
+                run_id=run_id,
+                requested_chapter_id=chapter_id,
+                prior_state=state_before_chapter_confirm,
+            )
             if not selected_chapter_id:
                 raise ValueError("chapter_package.json does not contain a chapter_id")
             result["chapter_id"] = selected_chapter_id
@@ -1598,6 +1787,30 @@ class WriterInteractiveWorkflow:
             if isinstance(item, Mapping) and str(item.get("chapter_id") or "").strip():
                 return str(item.get("chapter_id") or "").strip()
         return ""
+
+    def _select_chapter_id_after_chapter_review(
+        self,
+        *,
+        run_id: str,
+        requested_chapter_id: str,
+        prior_state: Mapping[str, Any],
+    ) -> str:
+        payload = self._load_optional_run_data(run_id, "chapter_package.json")
+        if not isinstance(payload, Mapping):
+            payload = self._load_optional_frozen_payload(run_id, "freeze_c", "chapter_package.json")
+        chapter_ids = [
+            str(item.get("chapter_id") or "").strip()
+            for item in (payload or {}).get("chapters") or []
+            if isinstance(item, Mapping) and str(item.get("chapter_id") or "").strip()
+        ]
+        candidates = [
+            str(requested_chapter_id or "").strip(),
+            str(prior_state.get("current_chapter_id") or "").strip(),
+        ]
+        for candidate in candidates:
+            if candidate and (not chapter_ids or candidate in chapter_ids):
+                return candidate
+        return chapter_ids[0] if chapter_ids else ""
 
     def _load_optional_frozen_payload(self, run_id: str, freeze_stage: str, artifact_name: str) -> dict[str, Any]:
         record = self.run_writer.get_freeze_record(run_id, freeze_stage)

@@ -99,6 +99,8 @@ export function WorkspaceShell() {
           const eventCards = event.payload?.decision_cards;
           if (Array.isArray(eventCards)) {
             setDecisionCards(eventCards as DecisionCardModel[]);
+          } else if (["succeeded", "failed", "cancelled", "error"].includes(event.kind)) {
+            setDecisionCards([]);
           }
         },
         () => undefined
@@ -169,9 +171,7 @@ export function WorkspaceShell() {
     if (resultJob) {
       setActiveJobs((current) => (current.some((job) => job.job_id === resultJob.job_id) ? current : [...current, resultJob]));
     }
-    if (result.decision_cards?.length) {
-      setDecisionCards(result.decision_cards);
-    }
+    setDecisionCards(result.decision_cards?.length ? result.decision_cards : []);
     refreshTaskArtifacts(result.task_id);
     void queryClient.invalidateQueries({ queryKey: ["messages", result.task_id] });
   }

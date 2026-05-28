@@ -13,6 +13,7 @@ from novel_agent.app.reviewer.reviewers import (
     LocalDraftContinuityReviewer,
     MemoryDraftConsistencyReviewer,
     OutlinePlotDevelopmentReviewer,
+    SourceChapterLiteraryDiagnosticReviewer,
     default_reviewers,
 )
 from novel_agent.app.schemas.reviewer_schema import ReviewBudget, ReviewContextPolicy, ReviewRequest, ReviewTarget
@@ -43,6 +44,11 @@ EXPECTED_REVIEWERS = {
         "target_types": {"draft", "raw_text"},
         "allowed_tools": ["kb_retrieval"],
         "dimensions": {"文笔细节", "氛围", "节奏", "叙述视角", "风格一致性"},
+    },
+    "source_chapter_literary_diagnostic": {
+        "target_types": {"source_chapter"},
+        "allowed_tools": ["memory_query"],
+        "dimensions": {"文学执行", "人物契合", "人物特点体现", "连续性与因果", "证据置信度"},
     },
 }
 
@@ -91,6 +97,7 @@ def test_default_model_only_reviewer_manifests_register() -> None:
         (MemoryDraftConsistencyReviewer(), "draft"),
         (KBDraftStyleAtmosphereReviewer(), "draft"),
         (KBDraftStyleAtmosphereReviewer(), "raw_text"),
+        (SourceChapterLiteraryDiagnosticReviewer(), "source_chapter"),
     ],
 )
 def test_model_only_reviewers_run_with_scripted_model_responses(tmp_path: Path, reviewer, target_type: str) -> None:

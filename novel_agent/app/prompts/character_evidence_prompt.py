@@ -25,8 +25,9 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         "13. candidate_type 使用 character / ambiguous / non_person / object / scene 等短标签；低置信或弱共现候选请标 ambiguous 或不输出。\n"
         "14. 严禁把动词、物品、抽象名词、场景词当人物名，如“张开/高跟鞋/上下打量/学院”。\n"
         "15. 每个人物必须返回 source_doc_ids 和 source_title_indexes，用于后续按故事顺序归纳；只需轻量来源引用，不要 offset。\n"
-        "16. 不要输出 mention_offsets、speaking_offsets、原文连续子串、逐 doc_id 人物列表或 document_character_mentions。\n"
-        "17. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "16. 如果当前 document 明确揭示两个已有人物、代号、伪装身份或过去身份其实是同一人物，可在 identity_revelations 中输出；必须有明确文本证据和高置信度，不能基于猜测、相似或共现。\n"
+        "17. 不要输出 mention_offsets、speaking_offsets、原文连续子串、逐 doc_id 人物列表或 document_character_mentions。\n"
+        "18. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
         "请按以下 JSON schema 返回：\n"
@@ -35,6 +36,23 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         '  "document_title_index": 12,\n'
         '  "request_full_roster": false,\n'
         '  "request_full_roster_reason": "",\n'
+        '  "identity_revelations": [\n'
+        "    {\n"
+        '      "relation": "same_person",\n'
+        '      "left_character_id": "101",\n'
+        '      "left_name": "旧称呼",\n'
+        '      "right_character_id": "202",\n'
+        '      "right_name": "新揭示身份",\n'
+        '      "survivor_canonical_name": "旧称呼",\n'
+        '      "aliases_to_keep": ["新揭示身份"],\n'
+        '      "evidence_summary": "当前 document 明确揭示二者为同一人物。",\n'
+        '      "source_doc_ids": [1],\n'
+        '      "source_title_indexes": [12],\n'
+        '      "outline_segment_ids": [],\n'
+        '      "resolution_status": "confirmed_identity_reveal",\n'
+        '      "confidence": 0.96\n'
+        "    }\n"
+        "  ],\n"
         '  "characters": [\n'
         "    {\n"
         '      "character_id": "123",\n'

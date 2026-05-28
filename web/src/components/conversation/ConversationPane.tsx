@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpenCheck, ClipboardCheck, Send, WandSparkles } from "lucide-react";
+import { BookOpenCheck, CheckCircle2, ClipboardCheck, LoaderCircle, Send, WandSparkles } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { postCommand } from "../../api/actions";
@@ -9,12 +9,15 @@ import type {
   DecisionAction,
   DecisionCardModel,
   JobEventView,
+  JobSummary,
   TaskSummary,
   WriterArtifactReview,
   WriterDraftReview,
   WriterQuestionSet,
-  WriterReviewAction
+  WriterReviewAction,
+  TaskProgress
 } from "../../api/types";
+import { toPublicStatusText } from "../../utils/status";
 import { publicDecisionLabel } from "./DecisionCard";
 import { MessageList } from "./MessageList";
 import { WriterIntentWizard } from "./WriterIntentWizard";
@@ -260,6 +263,8 @@ export function ConversationPane({
     () => (activeDraftReview ? draftReviews.find((review) => review.review_id === activeDraftReview.reviewId) ?? null : null),
     [activeDraftReview, draftReviews]
   );
+  const activeTaskJob = isActiveJob(selectedTask?.active_job) ? selectedTask.active_job : null;
+  const activeWriterJob = activeTaskJob && isWriterJob(activeTaskJob) ? activeTaskJob : null;
 
   useEffect(() => {
     if (writerWizardSignal > 0 && selectedTask) {
@@ -301,21 +306,24 @@ export function ConversationPane({
     },
     [dismissedActionMessageIds, messages]
   );
-  const composerQuestionSet = analyzerMode ? null : latestActionMessage?.writer_question_set ?? null;
-  const composerArtifactReview = analyzerMode ? null : activeArtifactContext ?? latestActionMessage?.writer_artifact_review ?? null;
-  const composerDraftReview = analyzerMode ? null : activeDraftContext ?? latestActionMessage?.writer_draft_review ?? null;
+  const composerQuestionSet = analyzerMode || activeWriterJob ? null : latestActionMessage?.writer_question_set ?? null;
+  const latestMessageDecisionCards = useMemo(() => latestActionMessage?.decision_cards ?? [], [latestActionMessage]);
+  const hasDecisionCardContext = !analyzerMode && !activeWriterJob && (latestMessageDecisionCards.length > 0 || decisionCards.length > 0);
+  const composerArtifactReview =
+    analyzerMode || activeWriterJob || hasDecisionCardContext ? null : activeArtifactContext ?? latestActionMessage?.writer_artifact_review ?? null;
+  const composerDraftReview =
+    analyzerMode || activeWriterJob || hasDecisionCardContext ? null : activeDraftContext ?? latestActionMessage?.writer_draft_review ?? null;
   const composerDecisionCards = useMemo(() => {
-    if (analyzerMode || !latestActionMessage) {
+    if (analyzerMode || activeWriterJob) {
       return [];
     }
-    const latestMessageCards = latestActionMessage?.decision_cards ?? [];
-    const ordered = [...latestMessageCards, ...decisionCards];
+    const ordered = [...latestMessageDecisionCards, ...decisionCards];
     const deduped = new Map<string, DecisionCardModel>();
     for (const card of ordered) {
       deduped.set(card.card_id, card);
     }
     return [...deduped.values()];
-  }, [analyzerMode, decisionCards, latestActionMessage]);
+  }, [activeWriterJob, analyzerMode, decisionCards, latestMessageDecisionCards]);
 
   const latestNaturalGoal = useMemo(() => {
     const latest = [...messages].reverse().find((message) => message.role === "user" && !message.content.trim().startsWith("/"));
@@ -365,7 +373,7 @@ export function ConversationPane({
   async function submitQuestionSet(questionSet: WriterQuestionSet) {
     const answer = answersByQuestionSet[questionSet.question_set_id];
     dismissLatestActionMessage();
-    await onAction("submit_outline_research_answers", {
+    await onAction(questionSet.submit_action || "submit_outline_research_answers", {
       run_id: questionSet.run_id,
       question_set_id: questionSet.question_set_id,
       source_message_id: answer?.messageId ?? "",
@@ -375,7 +383,7 @@ export function ConversationPane({
 
   async function deferQuestionSet(questionSet: WriterQuestionSet) {
     dismissLatestActionMessage();
-    await onAction("defer_outline_research_answers", {
+    await onAction(questionSet.defer_action || "defer_outline_research_answers", {
       run_id: questionSet.run_id,
       question_set_id: questionSet.question_set_id
     });
@@ -426,7 +434,7 @@ export function ConversationPane({
     const recorded = await recordQuestionAnswer(questionSet, content);
     const answer = recorded ?? existing;
     dismissLatestActionMessage();
-    await onAction("submit_outline_research_answers", {
+    await onAction(questionSet.submit_action || "submit_outline_research_answers", {
       run_id: questionSet.run_id,
       question_set_id: questionSet.question_set_id,
       source_message_id: answer?.messageId ?? "",
@@ -659,7 +667,7 @@ export function ConversationPane({
   const composerContextLabel = analyzerMode
     ? "正在和小说专家讨论剧情"
     : activeQuestionSet
-      ? "正在回答大纲研究问题"
+      ? `正在回答${questionResearchLabel(activeQuestionSet)}问题`
       : activeArtifactContext || composerArtifactReview
         ? `正在审阅：${(activeArtifactContext ?? composerArtifactReview)?.title ?? ""}`
         : (activeDraftContext || composerDraftReview) && activeDraftReview
@@ -678,6 +686,31 @@ export function ConversationPane({
           : composerDecisionCards.length
             ? "decision"
             : "plain";
+  const statusLine = useMemo(
+    () =>
+      buildCurrentStatusLine({
+        jobEvents,
+        progress: selectedTask?.progress ?? null,
+        activeJob: activeTaskJob,
+        analyzerMode,
+        composerQuestionSet,
+        composerArtifactReview,
+        composerDraftReview,
+        composerDecisionCards,
+        activeDecisionAction
+      }),
+    [
+      activeDecisionAction,
+      activeTaskJob,
+      analyzerMode,
+      composerArtifactReview,
+      composerDecisionCards,
+      composerDraftReview,
+      composerQuestionSet,
+      jobEvents,
+      selectedTask?.progress
+    ]
+  );
 
   return (
     <div className="conversation-pane">
@@ -716,7 +749,6 @@ export function ConversationPane({
 
       <MessageList
         messages={displayMessages}
-        jobEvents={jobEvents}
         pending={actionPending}
         activeQuestionSetId={activeQuestionSetId}
         activeArtifactReview={activeArtifactReview}
@@ -735,6 +767,8 @@ export function ConversationPane({
         onSubmitDraftAction={submitDraftAction}
         onOpenArtifactDetail={onOpenArtifactDetail}
       />
+
+      <CurrentTaskStatus status={statusLine} />
 
       <form className={`composer composer-${composerMode}`} onSubmit={handleSubmit}>
         {composerContextLabel ? (
@@ -757,7 +791,9 @@ export function ConversationPane({
             analyzerMode
               ? "向小说专家提问，例如：当前未解之谜哪条最适合下一阶段回收？"
               : activeQuestionSet || composerQuestionSet
-                ? "回答当前大纲研究问题，然后点击右侧分支按钮继续。"
+                ? `回答当前${questionResearchLabel(activeQuestionSet ?? composerQuestionSet)}问题，然后点击右侧分支按钮继续。`
+                : activeWriterJob
+                  ? "后台任务正在处理你的上一项决策，完成后会刷新审阅入口。"
                 : activeArtifactContext || composerArtifactReview
                   ? "输入通过补充或调整反馈，然后点击右侧分支按钮。"
                   : activeDraftContext || composerDraftReview
@@ -767,7 +803,7 @@ export function ConversationPane({
               : "输入自然语言方向。只有明确以 / 开头时才进入高级命令兼容路径。"
           }
           rows={composerDraftReview ? 2 : 4}
-          disabled={!selectedTask}
+          disabled={!selectedTask || Boolean(activeWriterJob)}
         />
         {composerQuestionSet ? (
           <div className="composer-actions composer-decision-actions" aria-label="当前问题分支">
@@ -854,15 +890,6 @@ export function ConversationPane({
           </div>
         ) : composerDraftReview ? (
           <div className="composer-actions composer-decision-actions" aria-label="当前草稿分支">
-            <button
-              type="submit"
-              className="primary-icon-button send-button"
-              disabled={!selectedTask || submitMutation.isPending || !input.trim()}
-              aria-label="发送"
-              title="先记录反馈"
-            >
-              <Send size={18} aria-hidden="true" />
-            </button>
             {composerDraftReview.detail_artifact_id ? (
               <button
                 type="button"
@@ -909,22 +936,6 @@ export function ConversationPane({
               onClick={() => void submitDraftComposerDecision(composerDraftReview, "replan_chapter")}
             >
               修改章节梗概后重写
-            </button>
-            <button
-              type="button"
-              className="danger-button"
-              disabled={!selectedTask || actionPending || submitMutation.isPending}
-              onClick={() => void submitDraftComposerDecision(composerDraftReview, "discard_chapter")}
-            >
-              作废本次草稿
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={!selectedTask || actionPending || submitMutation.isPending}
-              onClick={() => void submitDraftComposerDecision(composerDraftReview, "defer_chapter_acceptance")}
-            >
-              稍后再决定
             </button>
           </div>
         ) : composerDecisionCards.length ? (
@@ -1028,6 +1039,166 @@ function isConversationMessage(value: unknown): value is ConversationMessage {
   return Boolean(value && typeof value === "object" && "message_id" in value && "content" in value);
 }
 
+interface CurrentStatusLine {
+  tone: "idle" | "running" | "waiting" | "done" | "error";
+  label: string;
+  text: string;
+  recoverySuggestion?: string;
+}
+
+function CurrentTaskStatus({ status }: { status: CurrentStatusLine | null }) {
+  if (!status) {
+    return null;
+  }
+  const Icon = status.tone === "running" ? LoaderCircle : status.tone === "done" ? CheckCircle2 : ClipboardCheck;
+  return (
+    <div className={`current-task-status status-${status.tone}`} role="status" aria-live="polite">
+      <Icon size={14} aria-hidden="true" className={status.tone === "running" ? "status-spinner" : ""} />
+      <span className="current-status-label">{status.label}</span>
+      <span className="current-status-text">{status.text}</span>
+      {status.recoverySuggestion ? <span className="current-status-recovery">{status.recoverySuggestion}</span> : null}
+    </div>
+  );
+}
+
+function buildCurrentStatusLine({
+  jobEvents,
+  progress,
+  activeJob,
+  analyzerMode,
+  composerQuestionSet,
+  composerArtifactReview,
+  composerDraftReview,
+  composerDecisionCards,
+  activeDecisionAction
+}: {
+  jobEvents: JobEventView[];
+  progress: TaskProgress | null;
+  activeJob: JobSummary | null;
+  analyzerMode: boolean;
+  composerQuestionSet: WriterQuestionSet | null;
+  composerArtifactReview: WriterArtifactReview | null;
+  composerDraftReview: WriterDraftReview | null;
+  composerDecisionCards: DecisionCardModel[];
+  activeDecisionAction: { cardId: string; action: DecisionAction } | null;
+}): CurrentStatusLine | null {
+  const latestEvent = latestJobEvent(jobEvents);
+  if (latestEvent) {
+    const eventText = toPublicStatusText(latestEvent.message, "");
+    if (latestEvent.kind === "succeeded") {
+      return {
+        tone: "done",
+        label: "已完成",
+        text: eventText || "任务已经完成。"
+      };
+    }
+    if (["failed", "error"].includes(latestEvent.kind)) {
+      return {
+        tone: "error",
+        label: "失败",
+        text: eventText || "任务执行失败。",
+        recoverySuggestion: latestEvent.payload?.recovery_suggestion ? String(latestEvent.payload.recovery_suggestion) : ""
+      };
+    }
+    if (latestEvent.kind === "cancelled") {
+      return {
+        tone: "idle",
+        label: "已暂停",
+        text: eventText || "任务已暂停，可以稍后继续。"
+      };
+    }
+    return {
+      tone: "running",
+      label: latestEvent.kind === "queued" ? "排队中" : "进行中",
+      text: eventText || "后台任务正在执行。"
+    };
+  }
+
+  if (activeJob) {
+    return {
+      tone: "running",
+      label: activeJob.status === "queued" ? "排队中" : "进行中",
+      text: toPublicStatusText(activeJob.message, "") || "后台任务正在执行。"
+    };
+  }
+
+  if (analyzerMode) {
+    return {
+      tone: "waiting",
+      label: "专家意见",
+      text: "你可以向小说专家提问；这不会推进 Writer 流程。"
+    };
+  }
+  if (composerQuestionSet) {
+    const researchLabel = questionResearchLabel(composerQuestionSet);
+    return {
+      tone: "waiting",
+      label: "等待输入",
+      text: `请回答当前${researchLabel}问题，提交后继续研究。`
+    };
+  }
+  if (composerArtifactReview) {
+    return {
+      tone: "waiting",
+      label: "等待审阅",
+      text: `请审阅${composerArtifactReview.title || "当前产物"}。`
+    };
+  }
+  if (composerDraftReview) {
+    return {
+      tone: "waiting",
+      label: "等待决策",
+      text: "请决定接受、重写、重规划或暂缓本章草稿。"
+    };
+  }
+  if (activeDecisionAction) {
+    return {
+      tone: "waiting",
+      label: "等待反馈",
+      text: `请补充“${publicDecisionLabel(activeDecisionAction.action.label)}”需要的反馈。`
+    };
+  }
+  if (composerDecisionCards.length) {
+    return {
+      tone: "waiting",
+      label: "等待选择",
+      text: composerDecisionCards[0]?.title ? toPublicStatusText(composerDecisionCards[0].title, "") : "请选择下一步。"
+    };
+  }
+
+  const progressText = toPublicStatusText(progress?.message || progress?.step, "");
+  if (progressText) {
+    return {
+      tone: "idle",
+      label: "当前状态",
+      text: progressText
+    };
+  }
+  return null;
+}
+
+function latestJobEvent(jobEvents: JobEventView[]): JobEventView | null {
+  if (!jobEvents.length) {
+    return null;
+  }
+  return [...jobEvents].sort((left, right) => {
+    const leftTime = Date.parse(left.created_at);
+    const rightTime = Date.parse(right.created_at);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+    return right.event_id.localeCompare(left.event_id);
+  })[0] ?? null;
+}
+
+function isActiveJob(job: JobSummary | null | undefined): job is JobSummary {
+  return Boolean(job && !["succeeded", "failed", "cancelled"].includes(job.status));
+}
+
+function isWriterJob(job: JobSummary): boolean {
+  return job.type === "writer" || job.type === "writer_resume";
+}
+
 function isActionMessage(message: ConversationMessage): boolean {
   return (
     Boolean(message.decision_cards?.length) ||
@@ -1116,6 +1287,10 @@ function draftContextLabel(action: string) {
     return "正在写作废说明";
   }
   return "正在写草稿调整反馈";
+}
+
+function questionResearchLabel(questionSet: WriterQuestionSet | null) {
+  return questionSet?.stage === "draft_research_user_input" ? "正文研究" : "大纲研究";
 }
 
 function decisionActionNeedsInput(action: DecisionAction): boolean {

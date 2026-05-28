@@ -11,7 +11,11 @@ from ...repos.db import NovelAgentDB
 from ...run_interactive import resolve_writer_memory_db_path
 from ..schemas import ArtifactCard, ArtifactSection, ArtifactTable, ArtifactView
 from .artifact_ids import decode_artifact_id
-from .reviewer_action_specs import artifact_reviewer_actions, reviewer_specs_for_writer_kind
+from .reviewer_action_specs import (
+    artifact_reviewer_actions,
+    reviewer_specs_for_writer_kind,
+    source_chapter_reviewer_action,
+)
 
 
 class ArtifactViewService:
@@ -33,7 +37,6 @@ class ArtifactViewService:
     def view(self, artifact_id: str) -> ArtifactView:
         descriptor = decode_artifact_id(artifact_id)
         surface = str(descriptor.get("surface") or "")
-        kind = str(descriptor.get("kind") or "")
         task_id = str(descriptor.get("task_id") or "")
         if surface == "close-read":
             return self._close_read_view(artifact_id=artifact_id, task_id=task_id, descriptor=descriptor)
@@ -201,10 +204,23 @@ class ArtifactViewService:
         summary_markdown = self._chapter_summary_markdown(row)
         summary_short = str(row.get("summary_short") or "").strip()
         range_text = self._chapter_range_text(row)
+        document_ids = self._source_document_ids(row)
         return ArtifactView(
             artifact_id=artifact_id,
             title=str(row.get("chapter_title") or f"第 {index} 章"),
             kind="chapter_summary",
+            actions=[
+                source_chapter_reviewer_action(
+                    task_id=task_id,
+                    target_id=f"source-chapter-{index}",
+                    document_title_index=index,
+                    chapter_title=str(row.get("chapter_title") or f"第 {index} 章"),
+                    document_ids=document_ids,
+                    source_total_chars=int(row.get("source_total_chars") or 0),
+                )
+            ]
+            if document_ids
+            else [],
             sections=[
                 ArtifactSection(title="处理范围", body=range_text),
                 ArtifactSection(title="短剧情概括", body=summary_short or self._plain_preview(summary_markdown)),
@@ -426,8 +442,13 @@ class ArtifactViewService:
 
     def _continuation_intent_view(self, artifact_id: str, path: Path) -> ArtifactView:
         payload = self._load_json(path)
+        question_set = self._load_json(path.parent / "outline_research_question_set.json")
+        answer_submission = self._load_json(path.parent / "outline_research_answer_submission.json")
         sections = [
+            ArtifactSection(title="完整提交上下文", body=self._intent_full_context(payload, question_set, answer_submission)),
             ArtifactSection(title="剧情提示", body=self._intent_goal_text(payload)),
+            ArtifactSection(title="模型提问", body=self._outline_question_text(question_set)),
+            ArtifactSection(title="用户补充回答", body=self._outline_answer_text(answer_submission)),
             ArtifactSection(title="目标规模", body=self._intent_scale_text(payload)),
             ArtifactSection(title="高潮设想", body=self._intent_climax_text(payload)),
             ArtifactSection(title="额外约束", body=self._intent_constraints_text(payload)),
@@ -443,6 +464,55 @@ class ArtifactViewService:
             ),
             technical_available=True,
         )
+
+    def _intent_full_context(
+        self,
+        payload: Mapping[str, Any],
+        question_set: Mapping[str, Any],
+        answer_submission: Mapping[str, Any],
+    ) -> str:
+        blocks = []
+        raw_prompt = self._compact_text(payload.get("raw_user_prompt"))
+        if raw_prompt:
+            blocks.append(f"初始输入：\n{raw_prompt}")
+        elif self._intent_goal_text(payload):
+            blocks.append(f"初始输入：\n{self._intent_goal_text(payload)}")
+        questions = self._outline_question_text(question_set)
+        if questions:
+            blocks.append(f"模型提问：\n{questions}")
+        answer = self._outline_answer_text(answer_submission)
+        if answer:
+            blocks.append(f"用户补充：\n{answer}")
+        return "\n\n".join(blocks)
+
+    def _outline_question_text(self, payload: Mapping[str, Any]) -> str:
+        questions = payload.get("questions")
+        if not isinstance(questions, list):
+            return ""
+        lines = []
+        for item in questions:
+            if not isinstance(item, Mapping):
+                continue
+            prompt = self._compact_text(item.get("prompt") or item.get("question"))
+            if prompt:
+                lines.append(f"- {prompt}")
+        return "\n".join(lines)
+
+    def _outline_answer_text(self, payload: Mapping[str, Any]) -> str:
+        text = self._compact_text(payload.get("answer_text"))
+        if text:
+            return text
+        answers = payload.get("user_answers")
+        if not isinstance(answers, list):
+            return ""
+        lines = []
+        for item in answers:
+            if not isinstance(item, Mapping):
+                continue
+            answer = self._compact_text(item.get("answer_text") or item.get("answer"))
+            if answer:
+                lines.append(f"- {answer}")
+        return "\n".join(lines)
 
     def _outline_research_view(self, artifact_id: str, path: Path) -> ArtifactView:
         payload = self._load_json(path)
@@ -729,7 +799,7 @@ class ArtifactViewService:
     def _generation_review_view(self, artifact_id: str, path: Path) -> ArtifactView:
         payload = self._load_json(path)
         status_label = {
-            "accepted": "接受本章",
+            "accepted": "提交本章正文",
             "rewrite_requested": "基于反馈重写",
             "replan_requested": "修改章节梗概后重写",
             "discarded": "作废本次草稿",
@@ -742,7 +812,7 @@ class ArtifactViewService:
                 ArtifactSection(title="当前决定", body=status_label),
                 ArtifactSection(title="反馈原文", body=str(payload.get("feedback_text") or "")),
                 ArtifactSection(title="下一步", body=self._generation_next_action_text(str(payload.get("next_action") or ""))),
-                ArtifactSection(title="写回边界", body="只有用户接受本章才会进入写回摘要审阅；Reviewer 与连续性报告只提供参考，不会自动写入 Memory 或 Creative KB。"),
+                ArtifactSection(title="提交边界", body="只有用户提交本章正文才会更新续写记忆；正文、历史梗概、outline 片段和人物档案更新作为同一个事务处理。"),
             ],
             technical_available=True,
         )
@@ -1007,6 +1077,16 @@ class ArtifactViewService:
             parts.append(f"{total_chars} 字")
         return "；".join(parts)
 
+    def _source_document_ids(self, row: Mapping[str, Any]) -> list[str]:
+        try:
+            start = int(row.get("source_doc_start_id") or 0)
+            end = int(row.get("source_doc_end_id") or 0)
+        except (TypeError, ValueError):
+            return []
+        if start <= 0 or end < start:
+            return []
+        return [str(doc_id) for doc_id in range(start, end + 1)]
+
     def _safe_int_list(self, value: object) -> list[int]:
         if not isinstance(value, list):
             return []
@@ -1036,7 +1116,12 @@ class ArtifactViewService:
         return f"{compact[:limit].rstrip()}..."
 
     def _person_row(self, task_id: str, name: str) -> dict[str, Any]:
-        db_path = self.facade.db_path_for_book(task_id)
+        row = self._person_row_from_db(self._writer_memory_db_path(task_id), task_id, name)
+        if row:
+            return row
+        return self._person_row_from_db(self.facade.db_path_for_book(task_id), task_id, name)
+
+    def _person_row_from_db(self, db_path: Path, task_id: str, name: str) -> dict[str, Any]:
         if not db_path.exists():
             return {}
         db = NovelAgentDB(db_path)
@@ -1053,6 +1138,9 @@ class ArtifactViewService:
                 (task_id, name),
             ).fetchone()
         return dict(row) if row else {}
+
+    def _writer_memory_db_path(self, task_id: str) -> Path:
+        return self.repo_root / ".indexes" / "writer" / f"{task_id}.db"
 
     def _technical_source(self, descriptor: Mapping[str, Any]) -> dict[str, Any]:
         surface = str(descriptor.get("surface") or "")
@@ -1289,7 +1377,7 @@ class ArtifactViewService:
     @staticmethod
     def _generation_next_action_text(next_action: str) -> str:
         return {
-            "writeback_review": "进入写回摘要审阅",
+            "writeback_review": "提交正文并更新续写记忆",
             "agent_loop_rewrite_draft": "基于当前已通过章节梗概重写正文",
             "agent_loop_replan_chapter": "回到章节标题与梗概审阅",
             "halted": "暂停在当前草稿",
@@ -1302,8 +1390,13 @@ class ArtifactViewService:
         if isinstance(value, str):
             return cls._public_writer_text(value.strip())
         if isinstance(value, list):
+            if all(not isinstance(item, (Mapping, list, tuple, set)) for item in value):
+                return "，".join(cls._public_writer_text(str(item)) for item in value if str(item).strip())
             return "\n".join(cls._list_or_mapping_text(item) for item in value if cls._list_or_mapping_text(item))
         if isinstance(value, Mapping):
+            profile_item = cls._profile_fact_text(value)
+            if profile_item:
+                return profile_item
             parts = []
             for key, item in value.items():
                 item_text = cls._list_or_mapping_text(item)
@@ -1311,6 +1404,51 @@ class ArtifactViewService:
                 parts.append(f"{label}：{item_text}" if item_text else label)
             return "\n".join(parts)
         return cls._public_writer_text(str(value))
+
+    @classmethod
+    def _profile_fact_text(cls, value: Mapping[str, Any]) -> str:
+        main = cls._compact_profile_text(
+            value.get("value")
+            or value.get("summary")
+            or value.get("label")
+            or value.get("name")
+        )
+        if not main:
+            return ""
+        source_parts = []
+        chapter_indexes = cls._int_values(value.get("source_chapter_indexes"))
+        doc_ids = cls._int_values(value.get("source_doc_ids"))
+        source_doc_range = cls._compact_profile_text(value.get("source_doc_range"))
+        outline_segment_id = cls._compact_profile_text(value.get("outline_segment_id"))
+        if chapter_indexes:
+            source_parts.append(f"章节：{', '.join(str(item) for item in chapter_indexes)}")
+        if doc_ids:
+            source_parts.append(f"documents：{', '.join(str(item) for item in doc_ids)}")
+        elif source_doc_range:
+            source_parts.append(f"documents：{source_doc_range}")
+        if outline_segment_id:
+            source_parts.append(f"outline_segment：{outline_segment_id}")
+        if source_parts:
+            return f"{main}（{'；'.join(source_parts)}）"
+        return main
+
+    @staticmethod
+    def _compact_profile_text(value: object) -> str:
+        return " ".join(str(value or "").split())
+
+    @staticmethod
+    def _int_values(value: object) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        result: list[int] = []
+        for item in value:
+            try:
+                number = int(item)
+            except (TypeError, ValueError):
+                continue
+            if number not in result:
+                result.append(number)
+        return result
 
     @staticmethod
     def _public_writer_text(value: str) -> str:
@@ -1366,7 +1504,7 @@ class ArtifactViewService:
             "writing_guidance": "章节写作指导",
             "draft": "草稿正文",
             "generation_review": "草稿决策",
-            "writeback": "写回摘要",
+            "writeback": "正文提交摘要",
         }.get(kind, "Writer 产物")
 
     @staticmethod

@@ -66,12 +66,22 @@ def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
                 },
             ]
         },
+        current_outline_segment={
+            "outline_segment_id": "outline-segment:chapter-1:docs-1-2",
+            "outline_segment": "林澈先收到邀请，随后进入营地。",
+            "chapter_line": "[1] 第一章: 林澈进入营地。",
+            "source_doc_ids": [1, 2],
+            "source_doc_range": "1-2",
+            "source_title_indexes": [1],
+        },
     )
 
     assert [item["canonical_name"] for item in reduce_inputs] == ["林澈"]
     evidence = reduce_inputs[0]["ordered_character_evidence"]
     assert [item["source_doc_ids"] for item in evidence] == [[1], [2]]
     assert reduce_inputs[0]["existing_profile"]["profile_summary_md"] == "旧档案"
+    assert reduce_inputs[0]["current_outline_segment"]["outline_segment_id"] == "outline-segment:chapter-1:docs-1-2"
+    assert reduce_inputs[0]["reduce_policy"]["key_experiences_must_be_target_character_scoped"] is True
 
 
 def test_memory_candidates_keep_model_supported_short_names_and_roles() -> None:

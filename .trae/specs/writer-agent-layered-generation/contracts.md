@@ -2,14 +2,14 @@
 
 ## 1. 目的
 
-本文件用于稳定 Writer Agent 的 artifact 审阅、用户草稿决策、返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
+本文件用于稳定 Writer Agent 的 artifact 审阅、用户草稿决策、Draft Research Loop 返工与用户补充问题环节的跨模块对象，供以下文档共同遵循：
 
 - [spec.md](.trae/specs/writer-agent-layered-generation/spec.md)
 - [design.md](.trae/specs/writer-agent-layered-generation/design.md)
 - [../web-interface/spec.md](.trae/specs/web-interface/spec.md)
 - [../web-interface/design.md](.trae/specs/web-interface/design.md)
 
-本 contract 只定义模块间如何传递“artifact 审阅决策”“用户草稿决策”“大纲研究补充问题与回答”，不替代各层内部实现。
+本 contract 只定义模块间如何传递“artifact 审阅决策”“用户草稿决策”“正文研究/重写决策”“大纲研究补充问题与回答”，不替代各层内部实现。
 
 ## 2. Design Principles
 
@@ -35,6 +35,8 @@
 - `reviewer_type`: 发起决策的主体类型；对 `GenerationReviewDecision` 而言通常为 `user` 或显式测试脚本来源，不表示独立 Reviewer 模块
 - `question_set_id`: 一组待用户回答问题的稳定标识
 - `question_id`: 问题集内单个问题的稳定标识
+- `draft_research_id`: 一次 Draft Research Loop 运行的唯一标识
+- `rewrite_plan_id`: 一次草稿重写计划的唯一标识
 - `source_message_id`: 触发结构化 action 的聊天消息标识
 
 ### 3.2 时间与路径
@@ -50,6 +52,7 @@
 - 普通聊天消息不得自动绕过 `needs_user_input`
 - 章节草稿只有 `GenerationReviewDecision.status = accepted` 才允许进入正式写回候选
 - 任何不接受草稿的分支都必须回到 Agent Loop，不得触发 Memory / KB 正式写回
+- `rewrite_requested` 必须先进入 Draft Research Loop，不能只把用户反馈拼进旧正文 prompt 后直接重写
 
 ## 4. Contract A: ArtifactReviewDecision
 
@@ -221,6 +224,148 @@
 - `GenerationReviewDecision` 是用户草稿决策对象，不是正文对象，也不是 Reviewer 评分对象
 - 字数、风格和节奏问题都可以通过 `feedback_text` 表达，由 Agent 判断是基于同一 brief 重写，还是回到章节梗概修订
 - 不再要求单独的长度计划更新对象作为正式分支
+- 当 `status = rewrite_requested` 时，`feedback_text` 必须先进入 Draft Research Loop；Draft Prose Executor 只能消费 Draft Research Loop 产出的 `draft_rewrite_plan.json` 或等价受控重写计划
+
+## 5A. Contract B2: DraftResearchDecision
+
+### 5A.1 用途
+
+- 表达 Draft Research Loop 对当前章正文前研究的结构化出口
+- 决定 workflow 是否进入 Draft Prose Executor、询问用户、回到上游 artifact，或阻塞
+- 保留 Draft Research Loop 使用过的 seed、notebook、trace 和证据引用
+
+### 5A.2 Frozen Fields
+
+```json
+{
+  "schema_version": "1.0",
+  "draft_research_id": "draft-research-run-20260503-001-ch02-001",
+  "run_id": "run-20260503-001",
+  "chapter_id": "batch03-ch02",
+  "draft_id": "draft-003",
+  "status": "ready_for_draft",
+  "seed_packet_path": "runs/writer/run-20260503-001/draft_seed_packet.json",
+  "notebook_path": "runs/writer/run-20260503-001/draft_context_notebook.json",
+  "trace_path": "runs/writer/run-20260503-001/draft_research_trace.json",
+  "question_set_id": "",
+  "replan_target": "",
+  "blocked_reason": "",
+  "next_action": "run_draft_prose_executor",
+  "created_at": "2026-05-03T12:20:00Z"
+}
+```
+
+### 5A.3 Required Fields
+
+- `schema_version`
+- `draft_research_id`
+- `run_id`
+- `chapter_id`
+- `status`
+- `next_action`
+- `created_at`
+
+### 5A.4 Status Enum
+
+- `ready_for_draft`
+- `needs_user_input`
+- `replan_requested`
+- `blocked`
+
+### 5A.5 Required Rules
+
+- 当 `status = ready_for_draft` 时：
+  - `notebook_path` 必须指向可恢复的 `draft_context_notebook.json` 或等价 artifact
+  - `next_action` 必须等价于调用 Draft Prose Executor
+- 当 `status = needs_user_input` 时：
+  - 必须提供 `question_set_id` 或等价结构化问题集引用
+  - 不得继续生成正文
+- 当 `status = replan_requested` 时：
+  - `replan_target` 必须指向 `chapter_brief`、`chapter_package`、`batch_plan` 或更上游 artifact
+  - workflow 必须回到对应 review gate
+- 当 `status = blocked` 时：
+  - `blocked_reason` 必须非空
+  - 不得生成正式草稿
+
+### 5A.6 Boundary Notes
+
+- `DraftResearchDecision` 是运行决策对象，不是正式 Memory 事实对象
+- `draft_context_notebook.json` 是临时写作上下文，可被重写和 reviewer 复用，但不得直接污染 canon
+- trace 可进入 debug / reviewer，不得作为隐藏知识无来源注入下一轮 prompt
+
+## 5B. Contract B3: DraftRewritePlan
+
+### 5B.1 用途
+
+- 表达用户不接受草稿后的受控重写计划
+- 将 `GenerationReviewDecision.feedback_text` 转换为 Draft Prose Executor 可消费的 preserve / change / remove 约束
+- 决定本次反馈可在当前 brief 内重写，还是必须回到上游规划
+
+### 5B.2 Frozen Fields
+
+```json
+{
+  "schema_version": "1.0",
+  "rewrite_plan_id": "draft-rewrite-run-20260503-001-ch02-001",
+  "run_id": "run-20260503-001",
+  "chapter_id": "batch03-ch02",
+  "source_decision_id": "draft-review-batch03-ch02-003",
+  "source_draft_id": "draft-003",
+  "rewrite_mode": "full_rewrite",
+  "feedback_classification": "character_voice_fix",
+  "feedback_text": "这个人物不该这样说话，和前面早期设定冲突。",
+  "preserve": ["本章结尾 hook", "章节核心行动结果"],
+  "remove_or_change": ["修正人物称谓和对主角的关系认知"],
+  "new_memory_notes": [],
+  "character_constraints": [],
+  "style_constraints": [],
+  "must_not_change": [],
+  "requires_replan": false,
+  "replan_target": "",
+  "created_at": "2026-05-03T12:25:00Z"
+}
+```
+
+### 5B.3 Required Fields
+
+- `schema_version`
+- `rewrite_plan_id`
+- `run_id`
+- `chapter_id`
+- `source_decision_id`
+- `source_draft_id`
+- `rewrite_mode`
+- `feedback_classification`
+- `feedback_text`
+- `requires_replan`
+- `created_at`
+
+### 5B.4 Rewrite Mode Enum
+
+- `full_rewrite`
+- `targeted_rewrite`
+- `regenerate_from_brief`
+- `replan_required`
+
+### 5B.5 Feedback Classification Enum
+
+- `prose_only`
+- `scene_emphasis`
+- `continuity_fix`
+- `character_voice_fix`
+- `structure_fix`
+- `upstream_conflict`
+- `other`
+
+### 5B.6 Required Rules
+
+- `feedback_text` 必须保留用户原文
+- 当 `requires_replan = true` 或 `rewrite_mode = replan_required` 时：
+  - `replan_target` 必须非空
+  - workflow 不得调用 Draft Prose Executor 重写当前 brief
+- 当 `feedback_classification` 属于 `continuity_fix`、`character_voice_fix` 或 `upstream_conflict` 时：
+  - Draft Research Loop SHOULD 先查询 Memory / KB / 用户授权，再生成最终 rewrite plan
+- Draft Prose Executor 必须按 `preserve`、`remove_or_change`、`must_not_change` 和约束字段重写，不得自由扩大重写范围
 
 ## 6. Contract C: OutlineResearchQuestionSet
 
@@ -352,7 +497,10 @@ GenerationReviewDecision.status = accepted
 
 GenerationReviewDecision.status = rewrite_requested
   -> preserve feedback_text
-  -> Agent Loop rewrites draft without formal writeback
+  -> Draft Research Loop classifies feedback and may query Memory / KB / user
+  -> write DraftRewritePlan
+  -> Draft Prose Executor rewrites draft only if current brief remains valid
+  -> no formal writeback
 
 GenerationReviewDecision.status = replan_requested
   -> preserve feedback_text
@@ -367,6 +515,18 @@ OutlineResearchQuestionSet.status = pending
   -> submit answer via continue_after_outline_research_input
   -> accepted answers become user_authorized evidence
   -> may continue research or generate outline
+
+DraftResearchDecision.status = ready_for_draft
+  -> Draft Prose Executor may generate draft.md
+
+DraftResearchDecision.status = needs_user_input / replan_requested / blocked
+  -> no draft generation
+
+DraftRewritePlan.requires_replan = false
+  -> Draft Prose Executor may rewrite within current approved brief
+
+DraftRewritePlan.requires_replan = true
+  -> return to upstream review gate
 ```
 
 ## 9. Writeback Boundary
@@ -382,6 +542,11 @@ OutlineResearchQuestionSet.status = pending
 - `artifact_review_decision.json`
 - `user_supplement.json`
 - `generation_review_decision.json`
+- `draft_seed_packet.json`
+- `draft_research_decision.json`
+- `draft_research_trace.json`
+- `draft_context_notebook.json`
+- `draft_rewrite_plan.json`
 - `outline_research_question_set.json`
 - `outline_research_answer_submission.json`
 
@@ -392,6 +557,7 @@ OutlineResearchQuestionSet.status = pending
 - 删除必填字段
 - 改变 `decision`、`status` 或 `reason_code` 的既有语义
 - 改变 review decision 与 Agent Loop 分支之间的映射关系
+- 允许 `rewrite_requested` 绕过 Draft Research Loop 直接调用旧正文 prompt
 - 改变 `question_set_id` / `question_id` 的稳定性要求
 - 改变用户回答必须保留原文并作为 `user_authorized` evidence 的语义
 - 允许普通聊天消息自动绕过结构化问题集等待态

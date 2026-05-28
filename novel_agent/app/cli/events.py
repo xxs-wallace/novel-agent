@@ -317,6 +317,14 @@ class RunEventStream:
         if event_name == "cancelled":
             suffix = f" · {progress}" if progress else ""
             return f"已请求停止 close-read，将从最近 checkpoint 恢复{suffix}"
+        if event_name == "identity_merge_candidate":
+            left = str(event.get("left_name") or "").strip()
+            right = str(event.get("right_name") or "").strip()
+            score = event.get("same_person_score")
+            status = str(event.get("status") or "").strip()
+            action = str(event.get("recommended_action") or "").strip()
+            pair = "/".join(item for item in [left, right] if item)
+            return f"发现身份候选：{pair or '未命名候选'}，score={score}，{action or status}"
         return ""
 
     @staticmethod

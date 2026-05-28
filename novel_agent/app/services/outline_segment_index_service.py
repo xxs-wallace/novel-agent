@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..constants import DEFAULT_MEMORY_ROOT
+from ..prompts.outline_root_summary_prompt import build_outline_root_summary_prompt
 from ..repos.chapters_repo import ChaptersRepo
 
 
@@ -78,11 +79,13 @@ class OutlineSegmentIndexService:
         self,
         *,
         repo_root: Path,
+        model_client: Any | None = None,
         chapters_repo: ChaptersRepo | None = None,
         root_group_size: int = DEFAULT_OUTLINE_ROOT_GROUP_SIZE,
         root_group_chars: int = DEFAULT_OUTLINE_ROOT_GROUP_CHARS,
     ) -> None:
         self.repo_root = repo_root
+        self.model_client = model_client
         self.chapters_repo = chapters_repo or ChaptersRepo()
         self.root_group_size = max(1, int(root_group_size or 1))
         self.root_group_chars = max(1, int(root_group_chars or 1))
@@ -96,6 +99,7 @@ class OutlineSegmentIndexService:
         payload = self.build_payload(conn, book_id=book_id)
         path = self.artifact_path(book_id)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_outline_markdown_projection(book_id=book_id, payload=payload)
         return path
 
     def build_payload(self, conn: sqlite3.Connection, *, book_id: str) -> dict[str, Any]:
@@ -168,10 +172,19 @@ class OutlineSegmentIndexService:
                 for title_index in _int_list(segment.get("source_title_indexes"))
             })
             segment_ids = [_text(segment.get("outline_segment_id")) for segment in group if _text(segment.get("outline_segment_id"))]
+            root_id = f"{book_id}:outline-root-{index:04d}"
+            root_summary = self._compress_root_summary(
+                book_id=book_id,
+                outline_root_id=root_id,
+                group=group,
+                source_doc_range=_range_text(doc_ids),
+                source_title_indexes=title_indexes,
+            )
             roots.append(
                 {
-                    "outline_root_id": f"{book_id}:outline-root-{index:04d}",
-                    "summary": _safe_excerpt("；".join(_text(segment.get("summary")) for segment in group), limit=700),
+                    "outline_root_id": root_id,
+                    "summary": root_summary["root_summary"],
+                    "compression_notes": root_summary.get("compression_notes", ""),
                     "outline_segment_ids": segment_ids,
                     "source_title_indexes": title_indexes,
                     "source_doc_ids": doc_ids,
@@ -180,6 +193,115 @@ class OutlineSegmentIndexService:
                 }
             )
         return roots
+
+    def _compress_root_summary(
+        self,
+        *,
+        book_id: str,
+        outline_root_id: str,
+        group: list[dict[str, Any]],
+        source_doc_range: str,
+        source_title_indexes: list[int],
+    ) -> dict[str, str]:
+        if not group:
+            return {"root_summary": "", "compression_notes": ""}
+        if self.model_client is None:
+            raise RuntimeError("OutlineSegmentIndexService requires an available model_client for root summary compression")
+        prompt_input = {
+            "book_id": book_id,
+            "outline_root_id": outline_root_id,
+            "source_doc_range": source_doc_range,
+            "source_title_indexes": source_title_indexes,
+            "segments": group,
+        }
+        fallback = self._fallback_root_summary(group)
+        system_prompt, user_prompt = build_outline_root_summary_prompt(prompt_input)
+        payload, _raw = self.model_client.generate_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback_factory=lambda: fallback,
+            use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
+        )
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("Outline root summary model returned a non-object JSON payload")
+        root_summary = _text(payload.get("root_summary"))
+        if not root_summary:
+            raise RuntimeError("Outline root summary model returned empty root_summary")
+        return {
+            "root_summary": _safe_excerpt(root_summary, limit=900),
+            "compression_notes": _text(payload.get("compression_notes")),
+        }
+
+    @staticmethod
+    def _fallback_root_summary(group: list[dict[str, Any]]) -> dict[str, str]:
+        joined = "；".join(_text(segment.get("summary")) for segment in group if _text(segment.get("summary")))
+        return {
+            "root_summary": _safe_excerpt(joined, limit=700),
+            "compression_notes": "dry_run_fallback",
+        }
+
+    def _write_outline_markdown_projection(self, *, book_id: str, payload: dict[str, Any]) -> Path:
+        path = self.repo_root / DEFAULT_MEMORY_ROOT / "outlines" / f"{book_id}.outline.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        roots = [item for item in payload.get("roots", []) if isinstance(item, Mapping)]
+        segments = [item for item in payload.get("segments", []) if isinstance(item, Mapping)]
+        segment_by_id = {
+            _text(segment.get("outline_segment_id")): segment
+            for segment in segments
+            if _text(segment.get("outline_segment_id"))
+        }
+        lines = [
+            "# 故事大纲",
+            "",
+            "## 连续剧情概览",
+        ]
+        if not roots:
+            lines.append("- 暂无可用 outline root。")
+        for root in roots:
+            root_id = _text(root.get("outline_root_id"))
+            source_range = _text(root.get("source_doc_range"))
+            summary = _text(root.get("summary"))
+            title_range = _range_text(_int_list(root.get("source_title_indexes")))
+            heading_bits = [root_id or "outline-root"]
+            if title_range:
+                heading_bits.append(f"chapters {title_range}")
+            if source_range:
+                heading_bits.append(f"docs {source_range}")
+            lines.extend(
+                [
+                    "",
+                    f"### {' | '.join(heading_bits)}",
+                    "",
+                    summary or "暂无摘要。",
+                ]
+            )
+        lines.extend(["", "## 分段索引"])
+        if not segments:
+            lines.append("- 暂无可用 outline segment。")
+        for root in roots:
+            root_id = _text(root.get("outline_root_id"))
+            segment_ids = [str(item) for item in (root.get("outline_segment_ids") or []) if str(item)]
+            if root_id:
+                lines.extend(["", f"### {root_id}", ""])
+            for segment_id in segment_ids:
+                segment = segment_by_id.get(segment_id)
+                if not segment:
+                    continue
+                chapter_line = _text(segment.get("chapter_line"))
+                summary = _text(segment.get("summary"))
+                source_range = _text(segment.get("source_doc_range"))
+                title_range = _range_text(_int_list(segment.get("source_title_indexes")))
+                source_hint = []
+                if title_range:
+                    source_hint.append(f"chapters {title_range}")
+                if source_range:
+                    source_hint.append(f"docs {source_range}")
+                hint = f" ({'; '.join(source_hint)})" if source_hint else ""
+                lines.append(f"- [{segment_id}]{hint} {chapter_line or summary}")
+                if chapter_line and summary and summary != chapter_line:
+                    lines.append(f"  {summary}")
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return path
 
     @staticmethod
     def _source_doc_ids_from_row(row: sqlite3.Row) -> list[int]:

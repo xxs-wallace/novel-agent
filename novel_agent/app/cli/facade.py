@@ -36,6 +36,16 @@ def _env_optional_text(name: str) -> str | None:
     return value or None
 
 
+def _env_optional_int(name: str) -> int | None:
+    value = _env_optional_text(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ModelingStatusSnapshot:
     book_id: str
@@ -596,6 +606,7 @@ class WorkflowFacade:
                 _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
                 or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
             ),
+            timeout_seconds=_env_optional_int("NOVEL_AGENT_WEB_WRITER_TIMEOUT_SECONDS") or 900,
         )
         self.event_stream.emit("系统", "开始 Writer 分层生成", payload={"run_id": run_id})
         with db.connect() as conn:
@@ -649,6 +660,7 @@ class WorkflowFacade:
                 _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
                 or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
             ),
+            timeout_seconds=_env_optional_int("NOVEL_AGENT_WEB_WRITER_TIMEOUT_SECONDS") or 900,
         )
         with db.connect() as conn:
             db.init_schema(conn)

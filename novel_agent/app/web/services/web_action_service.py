@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ...cli.events import RunEvent
+from ...constants import DEFAULT_CLOSE_READING_STAGE
 from ...cli.status import WriterStatusPresenter
 from ...llm import JsonModelClient, ModelSettings
+from ...repos.character_profiles_repo import CharacterProfilesRepo
+from ...repos.db import NovelAgentDB
 from ...reviewer.registry import ReviewerRegistry
 from ...reviewer.reviewers import default_reviewers
 from ...reviewer.runtime import ReviewerRuntime
@@ -18,6 +21,7 @@ from ...reviewer.suite import ReviewerSuite
 from ...reviewer.target_resolver import ReviewTargetResolver
 from ...reviewer.tools import ReviewerArtifactTool, ReviewerMemoryTool
 from ...schemas.reviewer_schema import ReviewBudget, ReviewContextPolicy, ReviewRequest, ReviewTarget, utc_now
+from ...services.character_identity_merge_service import CharacterIdentityMergeEvidence, CharacterIdentityMergeService
 from ..schemas import DecisionCard, WebActionRequest, WebActionResult
 from .artifact_ids import decode_artifact_id
 from .artifact_view_service import ArtifactViewService
@@ -67,6 +71,7 @@ class WebActionService:
         "discard_chapter",
         "approve_writeback",
         "submit_outline_research_answers",
+        "submit_draft_research_answers",
     }
 
     _DIRECT_WRITER_WORKFLOW_ACTIONS = {
@@ -84,6 +89,7 @@ class WebActionService:
         "discard_chapter",
         "approve_writeback",
         "submit_outline_research_answers",
+        "submit_draft_research_answers",
     }
 
     _SUPPORTED_ACTIONS = {
@@ -111,11 +117,17 @@ class WebActionService:
         "discard_chapter",
         "defer_chapter_acceptance",
         "submit_outline_research_answers",
+        "submit_draft_research_answers",
         "defer_outline_research_answers",
+        "defer_draft_research_answers",
         "approve_writeback",
         "go_back",
         "save_artifact",
         "show_debug_details",
+        "confirm_identity_merge",
+        "reject_identity_merge",
+        "request_identity_merge_more_evidence",
+        "route_identity_merge_to_correction",
     }
 
     def __init__(
@@ -161,13 +173,22 @@ class WebActionService:
         if action == "resume":
             return await self._resume_writer_action(task_id=task_id, payload=payload)
         if action in self._JOB_ACTION_TYPES:
+            if action == "run_reviewer":
+                self._preflight_reviewer_action(task_id=task_id, payload=payload)
             return await self._start_job_action(task_id=task_id, action=action, payload=payload)
         if action == "defer_chapter_acceptance":
             return self._defer_chapter_acceptance(task_id=task_id, payload=payload)
-        if action == "defer_outline_research_answers":
-            return self._defer_outline_research_answers(task_id=task_id, payload=payload)
+        if action in {"defer_outline_research_answers", "defer_draft_research_answers"}:
+            return self._defer_writer_question_answers(task_id=task_id, action=action, payload=payload)
         if action in self._WRITER_REVIEW_ACTIONS:
             return await self._start_writer_review_action(task_id=task_id, action=action, payload=payload)
+        if action in {
+            "confirm_identity_merge",
+            "reject_identity_merge",
+            "request_identity_merge_more_evidence",
+            "route_identity_merge_to_correction",
+        }:
+            return self._identity_merge_review_action(task_id=task_id, action=action, payload=payload)
         if action == "go_back":
             return self._go_back(task_id=task_id, payload=payload)
         if action == "save_artifact":
@@ -499,6 +520,7 @@ class WebActionService:
         context.emit("progress", "Writer 已到达可审阅节点。", payload={"run_id": result.get("run_id", "")})
         result_payload = dict(result)
         self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
+        self._attach_current_writer_decision_cards(context.task_id, result_payload)
         return result_payload
 
     async def _continue_previous_writer_chapter_if_requested(
@@ -548,6 +570,21 @@ class WebActionService:
                 api_key=api_key,
             ),
         )
+        if str(execution_result.get("status") or "") == "draft_research_not_ready":
+            draft_status = str(execution_result.get("draft_research_status") or "")
+            context.emit(
+                "progress",
+                "下一章正文研究需要补充信息。",
+                payload={"run_id": previous_run_id, "chapter_id": chapter_id},
+            )
+            return {
+                "status": "draft_research_not_ready",
+                "run_id": previous_run_id,
+                "chapter_id": chapter_id,
+                "workflow_stage": "draft_research_user_input" if draft_status == "needs_user_input" else "",
+                "execution_input": execution_input,
+                "execution_result": execution_result,
+            }
         context.emit(
             "progress",
             "下一章草稿已生成，等待你决定是否接受。",
@@ -654,7 +691,36 @@ class WebActionService:
             ),
         )
         result_payload = dict(result)
-        if workflow_action == "approve_writeback":
+        if workflow_action == "accept_chapter":
+            context.emit(
+                "progress",
+                "本章草稿已接受，正在作为一个事务提交正文和续写记忆更新。",
+                payload={"run_id": run_id},
+            )
+            writeback_payload = await self._call_facade_with_events(
+                context,
+                lambda: self.session_service.facade.writer_action(
+                    book_id=context.task_id,
+                    run_id=run_id,
+                    action="approve_writeback",
+                    product_mode=str(payload.get("product_mode") or "assist"),
+                    payload={**dict(payload), "workflow_action": "approve_writeback", "source_action": "accept_chapter"},
+                    dry_run=dry_run,
+                    api_key=api_key,
+                ),
+            )
+            result_payload = {"acceptance_result": result_payload, "writeback_result": dict(writeback_payload)}
+            next_chapter_payload = await self._continue_next_chapter_after_writeback_if_available(
+                context=context,
+                run_id=run_id,
+                product_mode=str(payload.get("product_mode") or "assist"),
+                dry_run=dry_run,
+                api_key=api_key,
+                writeback_result=dict(writeback_payload),
+            )
+            if next_chapter_payload is not None:
+                result_payload = next_chapter_payload
+        elif workflow_action == "approve_writeback":
             next_chapter_payload = await self._continue_next_chapter_after_writeback_if_available(
                 context=context,
                 run_id=run_id,
@@ -666,6 +732,7 @@ class WebActionService:
             if next_chapter_payload is not None:
                 result_payload = next_chapter_payload
         self._append_writer_result_messages(task_id=context.task_id, result_payload=result_payload)
+        self._attach_current_writer_decision_cards(context.task_id, result_payload)
         context.emit(
             "progress",
             "Writer 状态已更新，新的审阅入口会刷新到会话区。",
@@ -715,6 +782,23 @@ class WebActionService:
                 api_key=api_key,
             ),
         )
+        if str(execution_result.get("status") or "") == "draft_research_not_ready":
+            draft_status = str(execution_result.get("draft_research_status") or "")
+            if draft_status == "needs_user_input":
+                context.emit(
+                    "progress",
+                    "下一章正文研究需要补充信息，已生成问题卡。",
+                    payload={"run_id": run_id, "chapter_id": next_chapter_id},
+                )
+            return {
+                "status": "draft_research_not_ready",
+                "run_id": run_id,
+                "chapter_id": next_chapter_id,
+                "workflow_stage": "draft_research_user_input" if draft_status == "needs_user_input" else "",
+                "writeback_result": dict(writeback_result),
+                "execution_input": execution_input,
+                "execution_result": execution_result,
+            }
         return {
             "status": "waiting_for_draft_review",
             "run_id": run_id,
@@ -748,10 +832,10 @@ class WebActionService:
             target=target,
             reviewer_ids=reviewer_ids,
             context_policy=ReviewContextPolicy(
-                purpose="writer_assist",
+                purpose="user_review" if target_type == "source_chapter" else "writer_assist",
                 allow_memory=True,
-                allow_kb=True,
-                allow_writer_artifacts=True,
+                allow_kb=target_type != "source_chapter",
+                allow_writer_artifacts=target_type != "source_chapter",
                 allow_reference_truth=False,
                 allowed_artifact_kinds=[
                     "outline",
@@ -921,13 +1005,54 @@ class WebActionService:
             artifact_id=str(payload.get("artifact_id") or ""),
             artifact_path=artifact_path,
             chapter_id=str(payload.get("chapter_id") or ""),
+            range_hint={
+                "document_title_index": payload.get("document_title_index"),
+                "target_raw_chars": payload.get("target_raw_chars"),
+            },
+            source_refs=self._coerce_source_refs(payload.get("source_refs")),
             metadata={
                 "run_id": str(payload.get("run_id") or ""),
                 "review_id": str(payload.get("review_id") or ""),
                 "draft_id": str(payload.get("draft_id") or ""),
                 "artifact_kind": str(payload.get("artifact_kind") or ""),
+                "chapter_title": str(payload.get("chapter_title") or ""),
             },
         )
+
+    def _preflight_reviewer_action(self, *, task_id: str, payload: Mapping[str, Any]) -> None:
+        target_type = str(payload.get("target_type") or "").strip()
+        reviewer_id = str(payload.get("reviewer_id") or "").strip()
+        if target_type != "source_chapter" and reviewer_id != "source_chapter_literary_diagnostic":
+            return
+        max_chars = 65536
+        text = str(payload.get("text") or payload.get("target_text") or "")
+        if text and len(text) > max_chars:
+            raise ValueError("目标原文超过 64KB，请缩小章节范围后再分析。")
+        raw_chars = self._optional_int(payload, "target_raw_chars", default=None)
+        if raw_chars is not None and raw_chars > max_chars:
+            raise ValueError("目标原文超过 64KB，请缩小章节范围后再分析。")
+        document_ids = self._coerce_text_list(payload.get("document_ids"))
+        if not document_ids:
+            return
+        db_path = Path(self.session_service.facade.db_path_for_book(task_id))
+        if not db_path.exists():
+            raise FileNotFoundError("分析原文需要先完成原文导入和章节入库。")
+        clean_ids = [int(item) for item in document_ids if str(item).isdigit()]
+        if not clean_ids:
+            return
+        placeholders = ",".join("?" for _ in clean_ids)
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                f"""
+                SELECT COALESCE(SUM(LENGTH(content)), 0) AS total_chars
+                FROM documents
+                WHERE book_id = ? AND doc_id IN ({placeholders})
+                """,
+                (task_id, *clean_ids),
+            ).fetchone()
+        total_chars = int(row[0] if row else 0)
+        if total_chars > max_chars:
+            raise ValueError("目标原文超过 64KB，请缩小章节范围后再分析。")
 
     def _reviewer_artifact_path(self, payload: Mapping[str, Any]) -> str:
         raw_path = str(payload.get("artifact_path") or payload.get("draft_path") or "").strip()
@@ -1123,6 +1248,12 @@ class WebActionService:
         return [str(value).strip()] if str(value).strip() else []
 
     @staticmethod
+    def _coerce_source_refs(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, Mapping)]
+
+    @staticmethod
     def _append_unique(items: Any, value: str) -> None:
         if not isinstance(items, list):
             return
@@ -1209,9 +1340,16 @@ class WebActionService:
             decision_cards=self._writer_decision_cards(task_id=task_id),
         )
 
-    def _defer_outline_research_answers(self, *, task_id: str, payload: dict[str, Any]) -> WebActionResult:
+    def _defer_writer_question_answers(
+        self,
+        *,
+        task_id: str,
+        action: str,
+        payload: dict[str, Any],
+    ) -> WebActionResult:
         writer_state = self.session_service.latest_writer_state(task_id)
-        message = "已保留当前大纲研究问题，稍后可以继续回答。"
+        is_draft_research = action == "defer_draft_research_answers"
+        message = "已保留当前正文研究问题，稍后可以继续回答。" if is_draft_research else "已保留当前大纲研究问题，稍后可以继续回答。"
         self.session_service.append_message(
             task_id,
             role="assistant",
@@ -1224,7 +1362,7 @@ class WebActionService:
             },
         )
         return WebActionResult(
-            action="defer_outline_research_answers",
+            action=action,
             task_id=task_id,
             message=message,
             progress=self.session_service.task_progress(task_id),
@@ -1257,6 +1395,183 @@ class WebActionService:
             payload=result,
         )
 
+    def _identity_merge_review_action(self, *, task_id: str, action: str, payload: dict[str, Any]) -> WebActionResult:
+        candidate_id = str(payload.get("candidate_id") or "").strip()
+        if not candidate_id:
+            raise ValueError("缺少 identity merge candidate_id。")
+        snapshot = self.session_service.facade.task_snapshot(book_id=task_id)
+        db_path = snapshot.db_path or self.session_service.facade.db_path_for_book(task_id)
+        if not db_path.exists():
+            raise FileNotFoundError("当前任务索引不存在。")
+        db = NovelAgentDB(db_path)
+        result_payload: dict[str, Any] = {}
+        message = ""
+        with db.connect() as conn:
+            db.init_schema(conn)
+            row = conn.execute(
+                "SELECT * FROM character_identity_merge_candidates WHERE book_id = ? AND candidate_id = ?",
+                (task_id, candidate_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("找不到待确认的人物身份候选。")
+            candidate = self.session_service._identity_candidate_from_row(row)  # noqa: SLF001
+            if str(candidate.get("status") or "") not in {"pending_user_confirmation", "needs_more_evidence"}:
+                message = "这个人物身份候选已经处理过。"
+                return WebActionResult(
+                    action=action,
+                    task_id=task_id,
+                    message=message,
+                    payload={"candidate": candidate},
+                    progress=self.session_service.task_progress(task_id),
+                )
+            if action == "confirm_identity_merge":
+                merge_result = self._confirm_identity_merge(conn, task_id=task_id, candidate=candidate)
+                self._mark_identity_candidate(conn, candidate_id=candidate_id, status="merged", extra={"merge_result": merge_result})
+                self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="merged")
+                message = "已确认人物身份合并，相关人物档案已写回。可以重新开始阅读继续处理。"
+                result_payload = {"candidate_id": candidate_id, "merge_result": merge_result}
+            elif action == "reject_identity_merge":
+                self._mark_identity_candidate(conn, candidate_id=candidate_id, status="rejected", extra={"resolution_reason": "user rejected merge"})
+                self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="rejected")
+                message = "已保持两个人物档案分离。可以重新开始阅读继续处理。"
+                result_payload = {"candidate_id": candidate_id, "status": "rejected"}
+            elif action == "request_identity_merge_more_evidence":
+                self._mark_identity_candidate(
+                    conn,
+                    candidate_id=candidate_id,
+                    status="needs_more_evidence",
+                    gate_level="medium",
+                    extra={"resolution_reason": "user requested more evidence"},
+                )
+                self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="needs_more_evidence")
+                message = "已标记为需要更多证据；后续阅读遇到新的揭示证据时会重新评分。"
+                result_payload = {"candidate_id": candidate_id, "status": "needs_more_evidence"}
+            else:
+                self._mark_identity_candidate(
+                    conn,
+                    candidate_id=candidate_id,
+                    status="routed_to_memory_correction",
+                    extra={"resolution_reason": "user routed to memory correction"},
+                )
+                self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="routed_to_memory_correction")
+                message = "已转为记忆修正候选；不会执行人物档案合并。"
+                result_payload = {"candidate_id": candidate_id, "status": "routed_to_memory_correction"}
+            conn.commit()
+        self.session_service.append_message(
+            task_id,
+            role="assistant",
+            content=message,
+            payload={"channel": "identity_merge_review_result", **result_payload},
+        )
+        return WebActionResult(
+            action=action,
+            task_id=task_id,
+            message=message,
+            payload=result_payload,
+            progress=self.session_service.task_progress(task_id),
+            decision_cards=[],
+        )
+
+    def _confirm_identity_merge(self, conn, *, task_id: str, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        left_id = candidate.get("left_character_id")
+        right_id = candidate.get("right_character_id")
+        if left_id is None or right_id is None:
+            raise ValueError("候选缺少左右人物 character_id，不能执行合并。")
+        survivor_name = str(candidate.get("survivor_canonical_name") or "").strip()
+        left_name = str(candidate.get("left_name") or "").strip()
+        right_name = str(candidate.get("right_name") or "").strip()
+        survivor_id = left_id if survivor_name == left_name or survivor_name not in {left_name, right_name} else right_id
+        duplicate_id = right_id if survivor_id == left_id else left_id
+        evidence = CharacterIdentityMergeEvidence(
+            summary=str(candidate.get("evidence_summary") or candidate.get("reason") or "").strip(),
+            source_doc_ids=[int(item) for item in candidate.get("source_doc_ids") or [] if str(item).isdigit()],
+            source_title_indexes=[int(item) for item in candidate.get("source_title_indexes") or [] if str(item).isdigit()],
+            outline_segment_ids=[str(item) for item in candidate.get("outline_segment_ids") or [] if str(item).strip()],
+            confidence=float(candidate.get("confidence") or 1.0),
+            decision_source="user_confirmed",
+        )
+        service = CharacterIdentityMergeService(profiles_repo=CharacterProfilesRepo())
+        result = service.merge_confirmed_profiles(
+            conn,
+            book_id=task_id,
+            survivor_character_id=survivor_id,
+            duplicate_character_id=duplicate_id,
+            evidence=evidence,
+            aliases_to_keep=[str(item) for item in candidate.get("aliases_to_keep") or [] if str(item).strip()],
+        )
+        if not result.merged:
+            raise RuntimeError(f"人物身份合并失败：{result.reason}")
+        return result.to_dict()
+
+    @staticmethod
+    def _mark_identity_candidate(
+        conn,
+        *,
+        candidate_id: str,
+        status: str,
+        gate_level: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        row = conn.execute(
+            "SELECT decision_json FROM character_identity_merge_candidates WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        decision: dict[str, Any] = {}
+        if row is not None:
+            try:
+                loaded = json.loads(row["decision_json"] or "{}")
+                decision = loaded if isinstance(loaded, dict) else {}
+            except json.JSONDecodeError:
+                decision = {}
+        decision.update(dict(extra or {}))
+        if gate_level is None:
+            conn.execute(
+                """
+                UPDATE character_identity_merge_candidates
+                SET status = ?, decision_json = ?, resolved_at = ?, updated_at = ?
+                WHERE candidate_id = ?
+                """,
+                (status, json.dumps(decision, ensure_ascii=False), utc_now(), utc_now(), candidate_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE character_identity_merge_candidates
+                SET status = ?, gate_level = ?, decision_json = ?, resolved_at = ?, updated_at = ?
+                WHERE candidate_id = ?
+                """,
+                (status, gate_level, json.dumps(decision, ensure_ascii=False), utc_now(), utc_now(), candidate_id),
+            )
+
+    @staticmethod
+    def _resolve_identity_block(conn, *, task_id: str, candidate_id: str, resolution: str) -> None:
+        row = conn.execute(
+            "SELECT status_json FROM reading_progress WHERE book_id = ? AND agent_stage = ?",
+            (task_id, DEFAULT_CLOSE_READING_STAGE),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            status_payload = json.loads(row["status_json"] or "{}")
+        except json.JSONDecodeError:
+            status_payload = {}
+        if str(status_payload.get("state") or "") != "blocked_identity_merge_review":
+            return
+        candidate_ids = [str(item) for item in status_payload.get("candidate_ids") or []]
+        if candidate_id not in candidate_ids:
+            return
+        status_payload["state"] = "identity_merge_review_resolved"
+        status_payload["resolution"] = resolution
+        status_payload["resolved_candidate_id"] = candidate_id
+        conn.execute(
+            """
+            UPDATE reading_progress
+            SET status_json = ?, updated_at = ?
+            WHERE book_id = ? AND agent_stage = ?
+            """,
+            (json.dumps(status_payload, ensure_ascii=False), utc_now(), task_id, DEFAULT_CLOSE_READING_STAGE),
+        )
+
     def _normalize_writer_review_payload(self, *, task_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         writer_state, pending, stage, pending_stage = self._writer_state_parts(task_id)
         run_id = str(payload.get("run_id") or writer_state.get("run_id") or "")
@@ -1264,7 +1579,7 @@ class WebActionService:
             raise ValueError("没有找到可恢复的 Writer run。")
         workflow_action = self._resolve_writer_workflow_action(task_id=task_id, action=action, payload=payload)
         normalized = {**payload, "action": action, "workflow_action": workflow_action, "run_id": run_id}
-        if action == "submit_outline_research_answers":
+        if action in {"submit_outline_research_answers", "submit_draft_research_answers"}:
             answer_text = str(payload.get("answer_text") or "").strip()
             user_answers = payload.get("user_answers")
             has_structured_answers = isinstance(user_answers, list) and any(
@@ -1333,6 +1648,8 @@ class WebActionService:
             return "resume"
         if action == "submit_outline_research_answers":
             return "continue_after_outline_research_input"
+        if action == "submit_draft_research_answers":
+            return "continue_after_draft_research_input"
         if action == "approve_writer_artifact":
             writer_state, _pending, _stage, pending_stage = self._writer_state_parts(task_id)
             active_stage = pending_stage or str(writer_state.get("current_stage") or "")
@@ -1369,8 +1686,10 @@ class WebActionService:
                         actions=[
                             {
                                 "action": "start_writer",
-                                "label": "开始新一轮规划",
+                                "label": "提交下一批续写规划",
                                 "variant": "primary",
+                                "requires_input": True,
+                                "input_role": "writer_new_batch_direction",
                                 "payload": {
                                     "requested_from": "writer_new_batch",
                                     "previous_run_id": previous_run_id,
@@ -1387,11 +1706,26 @@ class WebActionService:
         if isinstance(question_set, dict):
             self.session_service.append_writer_question_message(task_id, question_set)
             return
+        execution_result = result_payload.get("execution_result")
+        if isinstance(execution_result, dict) and str(execution_result.get("status") or "") == "draft_research_not_ready":
+            self.session_service.sync_writer_question_messages(task_id)
+            self.session_service.sync_writer_review_messages(task_id)
+            return
+        if str(result_payload.get("status") or "") == "draft_research_not_ready":
+            self.session_service.sync_writer_question_messages(task_id)
+            self.session_service.sync_writer_review_messages(task_id)
+            return
         self.session_service.sync_writer_completion_message(task_id)
-        if str(result_payload.get("stage") or "") == "outline_research_user_input":
+        if str(result_payload.get("stage") or "") in {"outline_research_user_input", "draft_research_user_input"}:
             self.session_service.sync_writer_question_messages(task_id)
             return
         self.session_service.sync_writer_review_messages(task_id)
+        self.session_service.sync_writer_recovery_message(task_id)
+
+    def _attach_current_writer_decision_cards(self, task_id: str, result_payload: dict[str, Any]) -> None:
+        cards = self._writer_decision_cards(task_id=task_id)
+        if cards:
+            result_payload["decision_cards"] = self._cards_payload(cards)
 
     def _writer_state_parts(self, task_id: str) -> tuple[dict[str, Any], dict[str, Any], str, str]:
         writer_state = self.session_service.latest_writer_state(task_id)
@@ -1415,13 +1749,14 @@ class WebActionService:
             "apply_scoped_artifact_revision": "已准备应用候选修改。",
             "discard_scoped_artifact_revision": "已准备放弃候选修改。",
             "reject_scoped_artifact_revision": "已准备放弃候选修改。",
-            "accept_chapter": "已接受本章草稿，接下来进入写回确认。",
+            "accept_chapter": "已提交本章正文，Writer 会同步更新续写记忆。",
             "rewrite_chapter": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "revise_chapter_length": "已提交正文重写反馈，Writer 会基于当前章节梗概重写。",
             "replan_chapter": "已提交章节梗概调整请求，Writer 会回到梗概审阅。",
             "discard_chapter": "已准备作废本次草稿。",
             "submit_outline_research_answers": "已提交补充回答，Writer 会继续大纲研究。",
-            "approve_writeback": "已确认写回续写记忆。",
+            "submit_draft_research_answers": "已提交补充回答，Writer 会继续正文研究。",
+            "approve_writeback": "已提交本章正文并更新续写记忆。",
         }.get(action, "已准备继续 Writer 流程。")
 
     @staticmethod
@@ -1435,13 +1770,14 @@ class WebActionService:
             "apply_scoped_artifact_revision": "正在应用受控修订候选。",
             "discard_scoped_artifact_revision": "正在放弃受控修订候选。",
             "reject_scoped_artifact_revision": "正在放弃受控修订候选。",
-            "accept_chapter": "正在处理章节草稿决策。",
+            "accept_chapter": "正在提交本章正文并更新续写记忆。",
             "rewrite_chapter": "正在根据反馈重写当前章。",
             "revise_chapter_length": "正在根据反馈重写当前章。",
             "replan_chapter": "正在返回章节梗概调整。",
             "discard_chapter": "正在作废本次草稿。",
             "continue_after_outline_research_input": "正在提交补充回答并继续大纲研究。",
-            "approve_writeback": "正在写回续写记忆。",
+            "continue_after_draft_research_input": "正在提交补充回答并继续正文研究。",
+            "approve_writeback": "正在提交本章正文并更新续写记忆。",
         }.get(workflow_action, "正在继续 Writer 流程。")
 
     def _writer_decision_cards(self, *, task_id: str) -> list[DecisionCard]:
@@ -1471,6 +1807,26 @@ class WebActionService:
             ]
 
         active_stage = pending_stage or stage
+        if active_stage in {"freeze_a", "freeze_b", "freeze_c", "freeze_d"} and not pending:
+            actions = self.status_presenter.writer_actions_for_stage(stage=stage, pending_stage=pending_stage)
+            if not writer_state or not actions:
+                return []
+            status = self.status_presenter.present(active_stage)
+            return [
+                DecisionCard(
+                    card_id=f"{task_id}:writer-resume:{str(writer_state.get('run_id') or active_stage)}",
+                    title=status.step or "继续 Writer 流程",
+                    body=status.next_action or "可以继续生成下一条可审阅内容。",
+                    actions=[
+                        {
+                            "action": "resume",
+                            "label": actions[0].label,
+                            "variant": "primary",
+                            "payload": {"run_id": str(writer_state.get("run_id") or "")},
+                        }
+                    ],
+                )
+            ]
         if active_stage == "outline_research_user_input":
             self.session_service.sync_writer_question_messages(task_id)
             return []
@@ -1517,11 +1873,11 @@ class WebActionService:
                 DecisionCard(
                     card_id=f"{task_id}:writeback-review",
                     title=status.step,
-                    body=status.message or "请确认是否写回续写记忆。",
+                    body=status.message or "本章草稿已接受，可以继续提交正文并更新续写记忆。",
                     actions=[
                         {
                             "action": "approve_writeback",
-                            "label": "确认写回续写记忆",
+                            "label": "提交本章正文",
                             "variant": "primary",
                             "payload": {"workflow_action": "approve_writeback"},
                         },

@@ -142,18 +142,18 @@ class NarrativeMemoryQueryService:
             root_level = "outline_root"
             fallback = False
         else:
-            root_level = "event_summary"
-            root_pages = self._event_summary_pages(conn, book_id=book_id)
-            fallback = not bool(self._event_summary_artifact(book_id).exists())
+            root_level = "outline_segment"
+            root_pages = self._outline_segment_pages(conn, book_id=book_id)
+            fallback = True
         candidates = self._rank_pages(
             root_pages,
             query=query,
             limit=budget.max_root_candidates,
         )
         if not candidates:
-            root_level = "event_summary"
+            root_level = "chapter"
             candidates = self._rank_pages(
-                self._synthetic_event_summary_pages(conn, book_id=book_id),
+                self._chapter_pages(conn, book_id=book_id),
                 query=query,
                 limit=budget.max_root_candidates,
             )
@@ -186,7 +186,7 @@ class NarrativeMemoryQueryService:
         book_id: str,
         budget: MemoryQueryBudget | None = None,
     ) -> list[dict[str, Any]]:
-        """Return the event-summary map without semantic ranking.
+        """Return the outline-root map without semantic ranking.
 
         This is the lightweight table-of-contents entry point for agents that
         need to plan retrieval before asking for specific story detail.
@@ -194,7 +194,7 @@ class NarrativeMemoryQueryService:
         budget = budget or MemoryQueryBudget(max_root_candidates=128)
         pages = self._outline_root_pages(conn, book_id=book_id)
         if not pages:
-            pages = self._event_summary_pages(conn, book_id=book_id) or self._synthetic_event_summary_pages(conn, book_id=book_id)
+            pages = self._outline_segment_pages(conn, book_id=book_id)
         return [self._candidate_dict(page, budget=budget) for page in pages[: budget.max_root_candidates]]
 
     def drill_down(
@@ -426,22 +426,15 @@ class NarrativeMemoryQueryService:
             *self._chapter_pages(conn, book_id=book_id),
             *self._outline_segment_pages(conn, book_id=book_id),
             *self._outline_root_pages(conn, book_id=book_id),
-            *self._event_pages(conn, book_id=book_id),
-            *self._event_summary_pages(conn, book_id=book_id),
         ]
         if any(page.page_type == "outline_segment" for page in pages) and not any(
             page.page_type == "outline_root" for page in pages
         ):
             pages.extend(self._synthetic_outline_root_pages(conn, book_id=book_id))
-        if not any(page.page_type == "event_summary" for page in pages):
-            pages.extend(self._synthetic_event_summary_pages(conn, book_id=book_id))
         self.pages_repo.clear_book(conn, book_id=book_id)
         for page in pages:
             self.pages_repo.upsert(conn, book_id=book_id, page=page)
         return pages
-
-    def _event_summary_artifact(self, book_id: str) -> Path:
-        return self.repo_root / DEFAULT_MEMORY_ROOT / "outlines" / f"{book_id}.event_summaries.json"
 
     def _outline_segments_artifact(self, book_id: str) -> Path:
         return self.repo_root / DEFAULT_MEMORY_ROOT / "outlines" / f"{book_id}.outline_segments.json"
@@ -612,132 +605,16 @@ class NarrativeMemoryQueryService:
         return dict(payload) if isinstance(payload, Mapping) else {}
 
     def _event_summary_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
-        stored = self._stored_pages(conn, book_id=book_id, page_type="event_summary")
-        if stored:
-            return stored
-        path = self._event_summary_artifact(book_id)
-        if not path.exists():
-            return []
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return []
-        segments = payload.get("segments") or []
-        pages = []
-        event_status = {page.page_id: page.status for page in self._event_pages(conn, book_id=book_id)}
-        for index, segment in enumerate(segments if isinstance(segments, list) else [], start=1):
-            if not isinstance(segment, Mapping):
-                continue
-            event_ids = [str(item) for item in (segment.get("event_ids") or []) if str(item)]
-            if not event_ids:
-                continue
-            summary_id = _text(segment.get("summary_id")) or f"{book_id}:event-summary-{index:04d}"
-            doc_ids = _int_list(segment.get("source_doc_ids"))
-            source_range = _text(segment.get("source_doc_range")) or _range_text(doc_ids)
-            pages.append(
-                NarrativeMemoryPage(
-                    page_id=summary_id,
-                    page_type="event_summary",
-                    summary=_safe_excerpt(str(segment.get("summary") or ""), limit=200),
-                    child_refs=event_ids,
-                    source_doc_ids=doc_ids,
-                    source_doc_range=source_range,
-                    status=_combined_status([event_status.get(event_id, "provisional") for event_id in event_ids]),
-                    updated_at=str(payload.get("updated_at") or segment.get("created_at") or _utc_now()),
-                    metadata={
-                        "event_id_range": {
-                            "start_event_id": event_ids[0],
-                            "end_event_id": event_ids[-1],
-                        },
-                        "event_ids": event_ids,
-                        "source_title_indexes": _int_list(segment.get("source_title_indexes")),
-                        "summary_title": _text(segment.get("summary_title")),
-                    },
-                )
-            )
-        return pages
+        _ = conn, book_id
+        return []
 
     def _synthetic_event_summary_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
-        events = self._event_pages(conn, book_id=book_id)
-        if not events:
-            return []
-        groups: list[list[NarrativeMemoryPage]] = []
-        current: list[NarrativeMemoryPage] = []
-        current_chars = 0
-        for event in events:
-            current.append(event)
-            current_chars += int(event.metadata.get("source_total_chars") or 0)
-            if len(current) >= 16 or current_chars >= 120_000:
-                groups.append(current)
-                current = []
-                current_chars = 0
-        if current:
-            groups.append(current)
-        pages = []
-        for index, group in enumerate(groups, start=1):
-            doc_ids = sorted({doc_id for page in group for doc_id in page.source_doc_ids})
-            pages.append(
-                NarrativeMemoryPage(
-                    page_id=f"{book_id}:event-summary-{index:04d}",
-                    page_type="event_summary",
-                    summary=_safe_excerpt("；".join(page.summary for page in group if page.summary), limit=200),
-                    child_refs=[page.page_id for page in group],
-                    source_doc_ids=doc_ids,
-                    source_doc_range=_range_text(doc_ids),
-                    status=_combined_status([page.status for page in group]),
-                    updated_at=_utc_now(),
-                    metadata={
-                        "event_id_range": {
-                            "start_event_id": group[0].page_id,
-                            "end_event_id": group[-1].page_id,
-                        },
-                        "event_ids": [page.page_id for page in group],
-                        "fallback_reason": "missing_event_summary_artifact",
-                    },
-                )
-            )
-        return pages
+        _ = conn, book_id
+        return []
 
     def _event_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
-        stored = self._stored_pages(conn, book_id=book_id, page_type="event")
-        if stored:
-            return stored
-        pages: list[NarrativeMemoryPage] = []
-        for row in self._chapter_rows(conn, book_id=book_id):
-            outline = _json_dict(row["outline_update_json"])
-            status = _combined_status([str(row["summary_status"] or ""), str(row["outline_status"] or "")])
-            chapter_ref = f"chapter-{int(row['document_title_index'])}"
-            for index, item in enumerate(outline.get("timeline_events") or [], start=1):
-                if not isinstance(item, Mapping):
-                    continue
-                event_id = _text(item.get("event_id")) or f"chapter-{row['document_title_index']}:event-{index:02d}"
-                doc_ids = _int_list(item.get("source_doc_ids")) or self._source_doc_ids_from_chapter_row(row)
-                title_indexes = _int_list(item.get("source_title_indexes")) or [int(row["document_title_index"] or 0)]
-                pages.append(
-                    NarrativeMemoryPage(
-                        page_id=event_id,
-                        page_type="event",
-                        summary=_text(item.get("summary")) or _text(item.get("label")),
-                        child_refs=[chapter_ref],
-                        source_doc_ids=doc_ids,
-                        source_doc_range=_text(item.get("source_doc_range")) or _range_text(doc_ids),
-                        status=_text(item.get("status")) or status,
-                        updated_at=str(row["updated_at"] or ""),
-                        metadata={
-                            "event_id": event_id,
-                            "label": _text(item.get("label")) or _safe_excerpt(_text(item.get("summary")), limit=40),
-                            "outcome": _text(item.get("outcome")) or _text(outline.get("outcome")),
-                            "participants": [str(value) for value in (item.get("participants") or [])],
-                            "source_chapter_id": int(row["chapter_id"] or 0),
-                            "source_chapter_range": _range_text(title_indexes),
-                            "source_chapter_indexes": title_indexes,
-                            "source_doc_start_id": int(item.get("source_doc_start_id") or (doc_ids[0] if doc_ids else 0)),
-                            "source_doc_end_id": int(item.get("source_doc_end_id") or (doc_ids[-1] if doc_ids else 0)),
-                            "source_total_chars": int(row["source_total_chars"] or 0),
-                        },
-                    )
-                )
-        return pages
+        _ = conn, book_id
+        return []
 
     def _chapter_pages(self, conn: sqlite3.Connection, *, book_id: str) -> list[NarrativeMemoryPage]:
         stored = self._stored_pages(conn, book_id=book_id, page_type="chapter")

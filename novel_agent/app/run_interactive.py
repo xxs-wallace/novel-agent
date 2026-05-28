@@ -41,6 +41,7 @@ DEFAULT_PIPELINE_SEGMENT_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_PIPELINE_CLOSE_READ_MODEL_NAME = "deepseek-v4-pro"
 DEFAULT_PIPELINE_CREATIVE_KB_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_WRITER_MODEL_NAME = "deepseek-v4-pro"
+DEFAULT_WRITER_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_PIPELINE_CREATIVE_KB_COMMIT_BATCH_SIZE = 8
 STATUS_PRESENTER = WriterStatusPresenter()
 ARTIFACT_PRESENTER = ArtifactPresenter()
@@ -219,6 +220,8 @@ def build_writer_workflow(
     thinking: str | None = "enabled",
     reasoning_effort: str | None = "high",
     include_reasoning_content: bool = True,
+    timeout_seconds: int = 900,
+    max_output_tokens: int = DEFAULT_WRITER_MAX_OUTPUT_TOKENS,
     revision_adapter: object | None = None,
 ) -> tuple[NovelAgentDB, WriterInteractiveWorkflow]:
     if dry_run:
@@ -242,6 +245,8 @@ def build_writer_workflow(
                 thinking=thinking,
                 reasoning_effort=reasoning_effort,
                 include_reasoning_content=include_reasoning_content,
+                timeout_seconds=timeout_seconds,
+                max_output_tokens=max_output_tokens,
                 dry_run=False,
             )
         )
@@ -328,6 +333,27 @@ def run_writer_workflow_action(
             user_world_notes=str(payload.get("user_world_notes") or ""),
             character_seed_payloads=cast(list[Mapping[str, Any]], payload.get("character_seed_payloads") or []),
             roster_hint_payloads=cast(list[Mapping[str, Any]], payload.get("roster_hint_payloads") or []),
+        )
+    if action == "continue_after_draft_research_input":
+        raw_user_answers = payload.get("user_answers")
+        if isinstance(raw_user_answers, list):
+            user_answers = [dict(item) for item in raw_user_answers if isinstance(item, Mapping)]
+        elif isinstance(raw_user_answers, dict):
+            user_answers = {
+                str(key): str(value)
+                for key, value in raw_user_answers.items()
+            }
+        else:
+            user_answers = {}
+        return workflow.continue_after_draft_research_input(
+            conn,
+            run_id=run_id,
+            book_id=book_id,
+            product_mode=product_mode,
+            user_answers=user_answers,
+            question_set_id=str(payload.get("question_set_id") or ""),
+            source_message_id=str(payload.get("source_message_id") or ""),
+            answer_text=str(payload.get("answer_text") or ""),
         )
     if action == "prepare_batch_plan":
         target_chapter_count = payload.get("target_chapter_count")

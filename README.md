@@ -1,27 +1,27 @@
 # Novel Agent
 
-Novel Agent 是一个面向作者的小说续写工作台，用于把长篇原文导入本地、完成粗读/精读建模、构建创作知识库，并在人工审阅确认的节奏下生成后续章节。
+Novel Agent 是一个面向作者的小说续写 Web 工作台，用于把长篇原文导入本地，完成粗读 / 精读建模、叙事索引、Creative KB 构建，并在人工审阅确认的节奏下生成后续章节。
 
-本项目基于 [huggingface/smolagents](https://github.com/huggingface/smolagents.git) 研发，继续复用其 Agent、Tool 与模型接入能力，并在此基础上扩展了小说续写相关的 `novel_agent` 模块和统一 CLI / TUI 工作台。
+本项目基于 [huggingface/smolagents](https://github.com/huggingface/smolagents.git) 研发，复用其 Agent、Tool 与模型接入能力，并在此基础上扩展 `novel_agent` 的小说续写产品层。当前 README 以 Web 工作台为主入口。
 
 ## 主要功能
 
-- 原文导入与粗读：把小说原文切分并写入本地索引，形成后续建模的 `documents` 基线。
-- 精读建模：抽取章节信息、人物档案、世界观摘要、故事大纲和事实型记忆。
-- 精读产物查询：可在同一工作台里查询人物档案、剧情总览、故事大纲和 source arc 等建模结果。
-- Creative KB：构建桥段卡片、结构模式与风格参考，用于续写时检索相似桥段。
-- Writer 分层生成：按“全书规划 -> 批次大纲 -> 章节梗概 -> 长度计划 -> 写作材料 -> 正文草稿 -> 验收写回”的流程推进。
-- 人工审阅与可恢复运行：每个关键产物都先展示摘要，用户可以修改、保存、确认，再进入下一步。
-- 按反馈受控修订：审阅规划类产物时，可以让系统只针对当前 artifact 生成候选修改、展示 diff，并在用户接受后写回。
-- Benchmark 回归：支持最小续写回归、端到端 Agentic benchmark 和 Creative KB benchmark，用于检查 Writer 与 KB 增益。
-- 统一 CLI / TUI：粗读、精读、知识库和 Writer 不再分散在多个用户入口中，而是在同一个工作台里切换。
+- 原文导入与阅读建模：导入小说原文，切分 documents，抽取章节摘要、人物档案、世界观摘要、故事大纲、源作品篇章地图和事实型记忆。
+- 叙事索引与 Memory 查询：通过统一 inquiry broker 从人物、世界观、章节摘要、source arc、场景卡和原文摘录中按需取证。
+- Creative KB：构建桥段卡片、结构模式与风格参考，用于续写、风格对照和 benchmark 检索评估。
+- Web 三栏工作台：左侧任务列表，中间会话与 Agent 决策卡，右侧阅读 / Writer 结果浏览器。
+- Outline Analyzer：通过“小说专家意见”按钮进入只读分析模式，讨论剧情结构、人物动机、伏笔回收、节奏和风险。
+- Reviewer Agent：在 Writer 审阅卡片和结果详情中运行只读评审，输出中文报告和参考评分，不替用户确认或写回。
+- Writer 分层生成：模型主导 Agent Loop，在信息不足时查询本地资料或向用户提问，在 artifact review gate 中生成、修订、确认规划和草稿。
+- Draft Research + Prose Executor：正文生成前先整理可追踪事实笔记和写作约束，再由受限正文执行器生成 `draft.md`。
+- 可恢复运行：后台任务进度、阻塞点、审阅卡、草稿决策和技术详情都会保存在本地，便于稍后继续。
 
 ## 环境准备
 
-需要 Python 3.10 及以上版本。推荐直接使用仓库根目录的启动脚本，它会自动创建或复用 `.venv` 并安装缺失依赖：
+需要 Python 3.10 及以上版本。推荐使用仓库根目录的 Web 启动脚本，它会自动创建或复用 `.venv` 并安装缺失依赖：
 
 ```bash
-./novel-agent
+./novel-agent-web
 ```
 
 如果希望手动安装：
@@ -32,163 +32,259 @@ source .venv/bin/activate
 pip install -e ".[openai]"
 ```
 
-本项目默认使用 DeepSeek 兼容 OpenAI 的接口能力。运行前请设置 `DEEPSEEK_API_KEY`：
+本项目默认使用 DeepSeek 兼容 OpenAI 的接口能力。运行真实模型功能前请设置 `DEEPSEEK_API_KEY`：
 
 ```bash
 export DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 ```
 
-也可以把 key 放在自己的 shell 配置或本地环境管理工具中，只要启动 `novel-agent` 时进程能读取到 `DEEPSEEK_API_KEY` 即可。
-
-## 启动 CLI 工作台
-
-开发者推荐入口：
+## 启动 Web 工作台
 
 ```bash
-./novel-agent
+./novel-agent-web
 ```
 
 安装为 console script 后也可以使用：
 
 ```bash
-novel-agent
+novel-agent-web
 ```
 
-等价的开发调试入口：
+默认会启动：
+
+- FastAPI 后端：`http://127.0.0.1:8000`
+- Vite 前端：`http://127.0.0.1:5173`
+
+常用启动参数：
 
 ```bash
-python -m novel_agent.app.cli_tui
+./novel-agent-web --check-only
+./novel-agent-web --api-port 8010 --web-port 5174
+./novel-agent-web --no-open
 ```
 
-启动后会进入 Textual 全屏 TUI。首屏会提供常用动作，例如选择或创建任务、继续上次会话、导入/粗读原文、运行精读建模、查看建模状态、构建 Creative KB、开始或恢复 Writer。
+如果前端依赖尚未安装，启动脚本会在 `web/` 下自动执行 `npm install`。`--check-only` 只检查依赖，不启动服务。
 
-旧入口 `python -m novel_agent.app.run_interactive` 仅保留给 smoke、兼容测试和迁移期调试，不再作为正式用户入口。
+## Web 工作台布局
 
-CLI 工作台已经实现的交互能力包括：
+Web 主界面是三栏布局，窄屏时会折叠成“任务 / 会话 / 结果”三个移动端面板。
 
-- prompt-first 首页：输入框默认聚焦，首屏动作分行展示，也支持直接输入自然语言续写方向。
-- 三段式工作台：消息流、artifact 摘要/编辑区、状态侧栏和底部输入区分离，后台输出不会覆盖正在编辑的输入。
-- 中文友好输入区：支持中英文混排、多行输入、长文本粘贴、历史记录和常见行编辑快捷键。
-- Slash command autocomplete 与 `Ctrl+P` 命令面板：命令定义由同一个 `CommandRouter` 提供，并按上下文隐藏或提示不可用动作。
-- `@` artifact 引用：输入 `@` 时可选择当前会话产物或最近 runs 文件，并插入短 token，避免长路径塞满输入框。
-- Artifact 审阅与编辑：JSON / Markdown 产物默认展示结构化摘要，大文件折叠预览；保存前会做 JSON 与关键 schema 校验。
-- 阻塞决策面板：需要确认时底部输入区切换为结构化选项，支持保存、确认、返回上一层、章节验收和稍后继续。
-- 技术详情与错误恢复：内部 stage、run id、checkpoint、artifact path 和折叠日志放在技术详情中；错误会给出可继续操作的建议。
+- 顶栏：显示 Novel Agent、当前任务、公开状态、最近一次操作提示和“设置”按钮。
+- 左侧任务栏：展示任务列表、当前任务进度、阻塞点 badge 和任务操作菜单。
+- 中间会话区：展示用户消息、Agent 回复、后台进度、Writer 问题卡、审阅卡、草稿决策卡和输入框。
+- 右侧结果浏览器：用“阅读”和“Writer”两个 tab 展示目录树与详情视图。
+
+Web 的主交互是按钮、菜单、wizard、卡片和表单提交，不要求用户输入命令。
 
 ## 基本使用流程
 
-1. 设置 `DEEPSEEK_API_KEY`。
-2. 运行 `./novel-agent` 进入工作台。
-3. 使用 `/new-task <task_id> <source_path>` 创建任务，或用 `/tasks` 查看已有任务。
-4. 使用 `/read` 导入并粗读原文。
-5. 使用 `/close-read` 运行精读建模。
-6. 使用 `/query summary total`、`/query character <name>` 等命令检查精读产物。
-7. 使用 `/kb` 构建或查看 Creative KB。
-8. 使用 `/writer` 开始或恢复分层续写。
-9. 在每个审阅节点中修改、保存、确认产物，确认后系统才会进入下一步。
+1. 运行 `./novel-agent-web` 打开浏览器工作台。
+2. 点击左侧“创建任务”，填写 task id / book id 和原文路径。
+3. 任务创建后系统会启动原文导入；也可以在任务菜单点击“导入原文”继续导入。
+4. 在任务菜单点击“开始阅读”，运行精读建模。
+5. 按需点击“构建叙事场景索引”和“构建 Creative KB”。
+6. 在右侧“阅读”tab 查看总览、章节摘要、人物百科、世界观、故事大纲和源作品篇章地图。
+7. 在会话区点击“小说专家意见”，与 Outline Analyzer 讨论剧情方向；点击“退出专家意见”回到普通会话。
+8. 点击“开始续写”，填写 Writer wizard 的续写方向、章节数和每章字数。
+9. 按照会话区的 Writer 问题卡、artifact 审阅卡和草稿决策卡逐步确认或修订。
+10. 在右侧“Writer”tab 查看全书规划、批次大纲、章节梗概、执行输入、正文草稿、连续性检查和写回摘要。
 
-其中 `task_id` 对应同一本书在粗读、精读、Creative KB 和 Writer 中共用的 `book_id`。
+## 任务栏按钮
 
-## 主要命令
+左侧任务栏用于管理 book / task 和启动后台流程。
 
-| 命令 | 用法 |
+| 按钮或菜单项 | 作用 |
 | --- | --- |
-| `/status` | 查看当前项目的原文、精读记忆、人物档案、世界观、故事大纲、Creative KB 与 Writer 状态。 |
-| `/tasks` | 列出所有任务，以及 documents、chapters、粗读进度和精读进度。 |
-| `/task <task_id>` | 进入指定任务。 |
-| `/new-task <task_id> <source_path>` | 创建新任务并记录原文路径。 |
-| `/reset-close-read` | 清空当前任务的精读进度与派生产物，保留粗读 documents。 |
-| `/read` | 进入原文导入/粗读流程。 |
-| `/close-read` | 进入精读与记忆抽取流程。 |
-| `/query summary total` | 查看当前任务的精读总览。 |
-| `/query character <name>` | 查询指定人物档案。 |
-| `/query outline` | 查看故事大纲建模结果。 |
-| `/query source_arc` | 查看源作品篇章地图。 |
-| `/kb` | 构建或查看 Creative KB。 |
-| `/benchmark longzu-32kb` | 运行端到端 Agentic benchmark，并把 Reviewer 摘要回流到消息流。 |
-| `/benchmark --source <path>` | 使用指定原文运行 benchmark。 |
-| `/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model` | 运行 Creative KB benchmark；`--writer-ab` 会比较 Writer A/B 增益，`--dry-run-model` 用于无真实 LLM 的测试链路。 |
-| `/writer` | 开始或恢复 Writer 分层生成。 |
-| `/resume` | 恢复最近一次未完成流程。 |
-| `/artifacts` | 查看当前会话产物。 |
-| `/open` | 打开当前重点产物。 |
-| `/save` | 保存当前 artifact 编辑内容。 |
-| `/confirm` | 确认当前审阅步骤，并允许系统继续推进。 |
-| `/back` | 在 Writer 审阅流程中返回上一层可修改节点。 |
-| `/help` | 查看当前上下文可用操作。 |
-| `/debug` | 查看内部 stage、run id、artifact path 等技术详情。 |
+| `创建任务` | 打开创建任务弹窗，填写 task id 和原文路径。创建成功后会选择该任务并启动导入。 |
+| `刷新` | 重新加载任务列表、进度和结果树。 |
+| 点击 task card | 选择当前任务，并刷新会话、状态和右侧结果。 |
+| `导入原文` | 启动或继续原文导入 / 粗读。 |
+| `开始阅读` | 运行精读建模，生成章节摘要、人物、世界观、故事大纲等 Memory 产物。 |
+| `构建叙事场景索引` | 构建 Narrative SceneCard 等用于 Analyzer / Writer / Reviewer 的紧凑证据索引。 |
+| `构建 Creative KB` | 构建桥段卡、结构模式和风格参考。 |
+| `开始续写` | 先做 Writer preflight 检查，再打开“创建续写任务”wizard。 |
+| `恢复续写` | 回到上一次 Writer 的可恢复问题、审阅或草稿决策点。 |
+| `删除续写任务` | 预览并删除最近 Writer run，不删除阅读记忆和任务索引。 |
+| `重置阅读` | 清空当前任务的精读进度和派生产物，保留原文 documents。 |
+| `删除任务` | 先预览会删除的本地建模产物，再确认删除任务。 |
 
-常用快捷键：
+## 会话区按钮
 
-| 快捷键 | 行为 |
+中间会话区是作者与 Agent 协作的主区域。
+
+| 按钮 | 作用 |
 | --- | --- |
-| `Enter` | 发送当前输入。 |
-| `Shift+Enter` | 在输入框内换行。 |
-| `Ctrl+P` | 打开命令面板。 |
-| `Ctrl+S` | 保存当前 artifact。 |
-| `Ctrl+Enter` | 确认当前审阅步骤。 |
-| `Ctrl+O` | 打开当前重点 artifact。 |
-| `Ctrl+D` | 展开或收起技术详情。 |
-| `Ctrl+L` | 切换运行日志显示。 |
-| `Esc` | 关闭弹层；运行中可请求暂停。 |
+| `小说专家意见` | 切换到 Outline Analyzer 只读分析模式。发送的问题会带 `outline_analyzer` 语义，不推进 Writer。 |
+| `退出专家意见` | 退出 Analyzer 模式，恢复普通会话或 Writer 审阅上下文。 |
+| `开始续写` | 从会话区直接打开 Writer wizard。若建模基础不足，会显示缺失项和恢复建议。 |
+| `发送` | 记录当前输入。普通模式下是自然语言消息；Writer 问题或审阅上下文中会绑定对应 question / review。 |
+| `取消` | 取消当前输入框绑定的问题、审阅或草稿反馈上下文。 |
 
-## Writer 审阅节点
+输入框会根据当前上下文变化：
 
-Writer 不会直接“一键吐出全文”，而是按可审阅、可修改、可恢复的方式推进：
+- Analyzer 模式：向小说专家提问，例如“当前未解之谜哪条最适合下一阶段回收？”
+- Writer 问题卡：回答当前大纲研究或正文研究问题。
+- Artifact 审阅卡：输入通过补充或调整反馈。
+- 草稿决策卡：输入草稿重写、重规划或作废原因。
+- 普通模式：输入自然语言续写方向或备注。
 
-1. 生成并审阅全书续写规划。
-2. 生成并审阅本批剧情大纲。
-3. 生成并审阅章节标题与故事梗概。
-4. 规划并确认章节长度。
-5. 整理并确认本章写作材料。
-6. 生成正文草稿并进行连续性检查。
-7. 用户接受、调整长度重生成、退回重规划或作废。
-8. 接受后写回章节、记忆与运行产物。
+## Writer Wizard
 
-用户在审阅节点修改后的内容，会作为后续流程的准绳。例如修改批次剧情大纲后，章节梗概会基于修改后的大纲继续生成。
+点击“开始续写”后，Web 会先检查原文、精读 Memory、故事大纲、Creative KB 等建模基础是否足够。通过 preflight 后打开“创建续写任务”弹窗。
 
-在规划类审阅节点中，还可以选择“按我的反馈修改”。这个路径会把当前 review state、当前 artifact 和用户反馈交给 workflow 层，由 workflow 生成受控候选修改、校验 scope 和 schema、展示修改摘要与 diff。只有用户接受候选后，当前 artifact 才会被写回；保存后仍停留在原审阅节点，不会自动确认，也不会越权修改 Memory、KB、workflow state 或其它产物。
+Wizard 字段：
 
-### Writer 分层功能
+- `User prompt`：本次续写方向、希望人物做什么、避免什么、倾向结局或阶段目标。
+- `续写章节数`：目标章节数量。
+- `每章字数`：默认单章字数预算。
 
-Writer 层不是单个“续写 prompt”，而是一条带冻结点、回滚和写回门禁的工作流：
+按钮：
 
-- 建模检查：启动 Writer 前检查原文索引、精读记忆、人物档案、世界观、故事大纲、Creative KB 是否足以支撑续写。
-- 续写意图：记录本次想写什么、主要角色、避免项、期望结果和补充说明。
-- 全书续写规划：生成 `book_continuation_plan.json`，决定后续主线、阶段高潮、必须保留的设定和未决问题。
-- 世界观补全：生成 `world_expansion_pack.json`，只补本轮续写需要的最小设定约束。
-- 人物需求与补充：区分“用户点名但 Memory 未建档的人”和“剧情结构缺位的人”，必要时生成计划人物、人物引入计划和角色方案。
-- 批次剧情规划：生成 `batch_plan.json`，把长线目标拆成本批次入口、冲突、中点、出口和不得提前消费的信息。
-- 章节标题与梗概：生成 `chapter_package.json`，明确章节目标、冲突、关系推进、必须出现和禁止出现的内容。
-- 章节长度计划：生成 `chapter_length_plan.json`，把默认字数、重点章、高潮章和单章 override 变成正式预算。
-- 写作材料冻结：生成 `chapter_execution_input.json`，把章节 brief、长度预算、事实约束、风格参考、人物关系门禁和 Creative KB 检索结果汇总成正文层输入。
-- 正文生成与连续性检查：生成 `draft.md`、`continuity_report.json` 和状态变化候选。
-- 章节验收与写回：用户接受后才会进入写回确认，最终更新续写记忆和正式产物；未验收草稿不会污染 Memory / KB。
+- `取消`：关闭 wizard，不启动 Writer。
+- `创建续写任务`：提交 `start_writer` action，进入 Writer Agent Loop。
 
-### 当前限制
+## Writer 问题卡
 
-当前代码已经有 Writer 状态机、冻结点、artifact 摘要、受控修订、决策面板和恢复能力，但 TUI 的 Writer 启动与部分审阅体验仍然偏开发者工具：
+当 Outline Research Loop、Draft Research Loop、人物对齐或新角色确认需要用户补充时，会话区会出现 Writer 问题卡。
 
-- `/writer` 目前会直接用默认参数启动 Writer，没有完整的字段化续写意图向导。
-- 自然语言输入已能进入消息流，但还没有完整接入 `intent_payload`、`user_world_notes`、章节数和新角色需求表单。
-- “手动编辑”仍会打开 JSON / Markdown artifact，这是高级调试入口，不应该是普通作者完成 Writer 配置的主路径。
-- `BookContinuationPlan`、`BatchPlan`、`ChapterPackage`、`ChapterLengthPlan` 等 JSON 应继续保留为可追踪 contract，但主界面应提供带注释的表单或摘要编辑器来修改这些字段。
+| 按钮 | 作用 |
+| --- | --- |
+| `提交回答并继续研究` | 把输入框中的回答绑定到当前 `question_set_id`，继续 Writer research。 |
+| `稍后继续` | 保留当前等待态，不推进 workflow。 |
 
-因此，如果界面要求用户“去填某个 JSON 文件”才能继续，这应视为待修的交互缺口。短期内优先使用“按我的反馈修改”表达修改意图；长期应该把 Writer 启动和每个审阅节点都做成分步向导。
+普通聊天消息不会自动越过 Writer 的 `needs_user_input`。只有点击结构化按钮，后端才会继续执行。
 
-## Benchmark 与回归
+## Artifact 审阅卡
 
-CLI / TUI 已接入以下回归能力：
+全书续写规划、世界观补全、人物补充、批次计划、章节梗概和写回摘要都会以审阅卡形式出现。
 
-- 最小续写回归：从指定原文窗口读取 prefix，生成后续内容并输出 Reviewer 报告。
-- 端到端 Agentic benchmark：通过 `/benchmark longzu-32kb` 或 `/benchmark --source <path>` 驱动 Writer benchmark，并把综合 Reviewer 摘要显示在消息流。
-- Creative KB benchmark：通过 `/creative-kb-benchmark longzu-32kb --writer-ab --dry-run-model` 检查建卡、聚类、检索/rerank 和 Writer A/B 增益。
-- Benchmark 失败恢复：未知目标、非法参数、未显式选择真实/干跑模型、artifact 写入失败、Reviewer 失败等路径会保留用户命令记录，并显示恢复建议，输入区仍可继续编辑。
+| 按钮 | 作用 |
+| --- | --- |
+| `查看详情` | 在右侧 Writer 结果详情中打开当前 artifact 的用户可读视图。 |
+| `Reviewer：大纲合理性` | 对大纲类 artifact 运行只读 Reviewer，检查剧情承接、因果链和阶段推进。 |
+| `Reviewer：梗概与人物` | 对章节梗概运行只读 Reviewer，检查人物动机、关系推进和剧情可执行性。 |
+| `通过并继续` | 提交 approved 决策；输入框里的补充会作为后续模型 prompt 材料。 |
+| `不通过并调整` | 提交 revision feedback；Writer 会修订当前 artifact，并回到同一审阅点。 |
+| `稍后继续` | 暂停在当前审阅点，保留可恢复状态。 |
 
-真实 LLM 的 CLI / TUI benchmark smoke 默认不会运行。需要显式设置环境变量后再执行慢速测试：
+Web 只提交用户决策语义；Writer workflow 负责 prompt 组装、模型修订、状态推进和下游失效。
+
+## 草稿决策卡
+
+正文草稿生成后，会话区会展示草稿预览、字数、连续性检查摘要和决策按钮。
+
+| 按钮 | 作用 |
+| --- | --- |
+| `查看完整正文` | 在右侧 Writer 结果详情中打开完整 `draft.md`。 |
+| `Reviewer：局部连续性` | 检查草稿与最近上下文之间的场景、视角、节奏和文风衔接。 |
+| `Reviewer：历史一致性` | 核查草稿中的人物、事件、地点、关系和设定是否与 Memory 冲突。 |
+| `Reviewer：文风氛围` | 使用 Creative KB 对照草稿的文风、氛围、桥段执行和细节密度。 |
+| `接受本章` | 接受当前草稿，进入写回摘要审阅；只有接受后才允许正式写回 Memory / KB。 |
+| `基于反馈重写` | 把输入框反馈交给 Draft Research Loop，生成受控重写计划后重写本章。 |
+| `修改章节梗概后重写` | 反馈指向上游结构问题时，回到章节梗概层修订再重写。 |
+| `作废本次草稿` | 放弃当前草稿，不写回 Memory / KB。 |
+| `稍后再决定` | 保留当前草稿决策点，稍后恢复。 |
+
+`continuity_report` 和 Reviewer 报告只作为风险提示；是否接受仍由用户决定。
+
+## 右侧结果浏览器
+
+右侧不是文件浏览器，而是“用户理解用内容浏览器”。它把数据库、Memory 文件和 Writer runs 转成目录树、卡片、表格、Markdown 和折叠技术详情。
+
+### 阅读 Tab
+
+“阅读”tab 用于查看 close-read 结果：
+
+- 总览：建模准备度、总体剧情摘要、已处理章节范围。
+- 章节摘要：按章节 / document title index 展示剧情概括、角色状态变化、伏笔和信息增量。
+- 人物百科：基本信息、当前目标、关系网络、说话方式、秘密、禁止误写点和最近变化。
+- 世界观：地点、组织、规则、物品、时间线。
+- 故事大纲：主线、支线、未回收伏笔。
+- 源作品篇章地图：篇章结构、节奏节点、高潮与转折。
+
+### Writer Tab
+
+“Writer”tab 用于查看续写产物：
+
+- Run 总览：当前状态、待确认步骤、产物路径、下一步动作。
+- 大纲研究：当前问题、已确认信息、仍缺口、可用假设、research trace 摘要。
+- 全书续写规划：续写目标、世界观补充、人物补充、高潮与回收。
+- 本批剧情大纲：起点状态、阶段目标、主要冲突、情绪节奏、预计收束。
+- 章节标题与梗概：章节目标、冲突、关系推进、scene beats、禁止项。
+- 章节写作指导：用户补充、派生长度预算、风格与节奏要求。
+- 本章执行输入：事实型上下文、风格与桥段参考、禁止项。
+- 正文草稿：字数、开头预览、连续性检查、完整正文。
+- 写回确认：人物状态变化、世界状态变化、新伏笔和已回收信息。
+
+详情页中的 `技术详情` 按钮用于查看原始 artifact 路径、trace、内部状态和 JSON。普通阅读路径默认不展示内部 stage、checkpoint id 或 artifact id。
+
+## Outline Analyzer
+
+Outline Analyzer 是只读的小说专家聊天模式。它适合在正式续写前讨论：
+
+- 当前剧情处在什么结构位置。
+- 哪些主线、支线、伏笔或谜团适合推进或延后。
+- 某个后续走向是否有足够因果和人物动机。
+- 关系变化、世界规则突破、终局秘密等高风险安排是否需要用户授权。
+- 哪些章节值得回读原文，以及为什么摘要层证据不够。
+
+Analyzer 不会把整本书一次性塞进 prompt。它先构造轻量 `AnalyzerSeedPacket`，随后模型用结构化 research request 主动查询 `story_detail`、`character_profile`、`world_concept`、`chapter_summary`、`raw_excerpt`、`structure_pattern` 等证据。最终回答会区分已确认事实、合理推断、证据缺口、用户偏好和纯候选方案。
+
+Analyzer 不写 Memory、不修改 Writer artifact、不自动提交 Writer 决策。想采纳 Analyzer 建议时，需要把建议手动写入 Writer 的补充说明或修订反馈。
+
+## Reviewer Agent
+
+Reviewer Agent 是模型驱动、只读、可插拔的评审运行时。Web 会在合适的 Writer 审阅卡片、草稿卡片和右侧 artifact 详情里显示 Reviewer 按钮。
+
+当前设计覆盖的 Reviewer 类型包括：
+
+- `outline_plot_development`：评审大纲是否承接前文、因果是否成立、阶段推进是否失衡。
+- `chapter_synopsis_plot_character`：评审章节梗概的人物动机、关系推进和剧情可执行性。
+- `local_draft_continuity`：评审正文草稿和最近上下文的局部衔接、视角、节奏和文风惯性。
+- `memory_draft_consistency`：核查草稿中的事件、人物、地点、关系和设定是否与 Memory 冲突。
+- `kb_draft_style_atmosphere`：用 Creative KB 对照草稿的文风、氛围、桥段执行和细节密度。
+- `source_chapter_literary_diagnostic`：面向已入库原文章节的文学性和人物塑造诊断，目前属于扩展诊断能力。
+
+Reviewer 报告是参考意见，不是 Writer 或 benchmark 的硬性通过标准。Reviewer 只读 Memory / KB / artifact，不写回，也不替用户点击“通过并继续”。
+
+## Writer Agent
+
+Writer 的核心是模型主导的 Agent Loop：
+
+```text
+用户意图 / Memory / KB / runs artifacts
+  -> 模型判断需要查询、提问、生成或修订
+  -> Agent 执行本地查询或用户交互
+  -> 生成或修订可审阅 artifact
+  -> 用户通过并补充，或拒绝并给出修订反馈
+  -> Draft Research Loop 准备正文事实
+  -> Draft Prose Executor 生成草稿
+  -> 用户验收、重写、重规划或写回
+```
+
+关键规则：
+
+- 用户确认或修改后的规划、梗概、长度预算和写作材料会成为后续输入。
+- 上游 artifact 重新通过后，下游依赖产物需要失效或局部重跑。
+- 草稿未被用户接受前，不会污染 Memory / KB。
+- Draft Prose Executor 不主动查询 Memory，不私自改变上游规划，只消费 Draft Research Loop 整理后的事实包和写作约束。
+
+## 未来开发方向 / TODO
+
+以下方向不是为了把 Novel Agent 改造成通用 Agent 平台，而是继续增强垂直领域 Agent Harness 的可评测性、可编排性和可接入性。
+
+- 模型横向评测矩阵：在同一本小说、同一套固定输入下评测不同模型的续写效果。优先建设 Writer-only 固定输入评测，复用同一份 Memory、叙事索引、Creative KB、SourceArc、用户续写方向、章节目标和授权输入，只替换 Writer / Reviewer 使用的模型，输出事实一致性、人物关系一致性、章节目标完成度、风格贴合度、禁止项违规、人工偏好评分和 Reviewer 分维度报告。后续再扩展到端到端全链路评测，比较不同模型完成原文导入、精读建模、叙事索引、Creative KB 和 Writer 的综合表现。
+- 形式化执行图：当前 Writer 已具备 Agent Loop、artifact review gate、Web 决策卡、resume 和 rollback 能力，但部分执行依赖仍隐含在业务代码中。后续可将 Writer / Reviewer / Benchmark 的关键步骤显式建模为 typed graph node，声明每个节点消费和产出的 artifact、可进入条件、失败出口、重试策略、上游修改后的下游失效规则、可并行执行的 Reviewer suite，以及每个节点的耗时、模型、token、工具调用和失败原因，方便 Web 展示、恢复、调试和横向评测。
+- MCP / 外部生态接入：将已经具备清晰边界的子能力抽象为 MCP server 或标准 typed tools，供其他 Agent 调用。第一阶段优先暴露只读能力，例如 `memory.query`、`narrative_index.search`、`kb.retrieve`、`outline_analyzer.ask`、`reviewer.review` 和 `artifacts.read`；第二阶段再暴露带副作用的 Writer 能力，例如 `writer.start_or_resume`、`writer.submit_review_decision` 和 `benchmark.run_model_matrix`，并配套 `book_id`、`run_id`、`review_id`、权限边界与 dry-run 模式，避免外部 Agent 绕过人工确认和写回规则。
+
+## Benchmark 与调试 Runner
+
+日常使用请走 Web 工作台。以下 Python runner 主要用于开发、QA 和回归：
 
 ```bash
-NOVEL_AGENT_RUN_REAL_CLI_TUI_SMOKE=1 python -m pytest -m slow novel_agent/tests/test_cli_textual_components.py
+python -m novel_agent.app.run_outline_analyzer_benchmark longzu-120kb --json
+python -m novel_agent.app.run_reviewer_smoke --source novel_agent/tests/longzu_120kb.txt
+python -m novel_agent.app.run_creative_kb_benchmark longzu-32kb --writer-ab --dry-run-model
 ```
 
 ## 运行产物
@@ -198,10 +294,14 @@ NOVEL_AGENT_RUN_REAL_CLI_TUI_SMOKE=1 python -m pytest -m slow novel_agent/tests/
 - `.indexes/`：每个任务对应的本地 SQLite 索引。
 - `.memory/`：世界观、故事大纲、源作品篇章地图等长期记忆产物。
 - `runs/`：Writer 运行过程中的规划、草稿、连续性检查和写回产物。
+- `runs/web_jobs/<job_id>/events.jsonl`：Web 后台任务事件日志，用于 SSE 断线恢复和调试。
 - `runs/benchmarks/`：端到端 Agentic benchmark 产物。
+- `runs/benchmarks/outline_analyzer/`：Outline Analyzer benchmark 的 baseline、Analyzer 回答、trace 和评分摘要。
 - `runs/creative_kb_benchmarks/`：Creative KB benchmark 产物。
+- `runs/reviewer_smoke/`：Reviewer smoke suite 的建模产物、构造评审目标、tool trace 和 review report。
+- `runs/analyzer/<session_id>/trace.json`：Analyzer debug trace，只有 debug 路径需要落盘。
 
-大体量正文默认在界面中只展示摘要和路径，完整内容通过 artifact 文件访问。
+大体量正文默认在 Web 中只展示摘要和路径，完整内容通过右侧详情或 artifact 文件访问。
 
 ## 与 smolagents 的关系
 
@@ -212,7 +312,7 @@ NOVEL_AGENT_RUN_REAL_CLI_TUI_SMOKE=1 python -m pytest -m slow novel_agent/tests/
 - OpenAI-compatible、LiteLLM、InferenceClient、Transformers 等模型接入方式
 - 原有 `smolagent`、`webagent` 命令
 
-Novel Agent 是在这些能力之上扩展出的小说续写产品层。正式小说续写入口请使用 `./novel-agent` 或 `novel-agent`。
+Novel Agent 是在这些能力之上扩展出的小说续写产品层。正式小说续写入口请使用 `./novel-agent-web` 或 `novel-agent-web`。
 
 ## 开发与测试
 
@@ -228,10 +328,12 @@ pip install -e ".[dev,openai]"
 python -m pytest novel_agent/tests tests
 ```
 
-只验证 CLI / TUI 入口时可运行：
+验证 Web 工作台：
 
 ```bash
-python -m pytest novel_agent/tests/test_cli_tui_entrypoint.py novel_agent/tests/test_cli_textual_components.py
+cd web
+npm test
+npm run typecheck
 ```
 
 验证受控 artifact 修订链路：

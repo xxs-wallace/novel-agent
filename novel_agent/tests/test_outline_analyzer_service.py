@@ -107,16 +107,13 @@ def _seed_memory(repo_root: Path, *, book_id: str = "book-one") -> NovelAgentDB:
                 "summary_short": "证据线索出现，来源未明。",
                 "mentioned_characters": ["调查者"],
                 "outline_update": {
-                    "timeline_events": [
-                        {
-                            "event_id": "chapter-1:event-01-evidence-source",
-                            "label": "证据线索出现",
-                            "summary": "证据来源未明，调查者选择暂时隐瞒。",
-                            "participants": ["调查者"],
-                            "source_doc_ids": [1],
-                            "source_doc_range": "1",
-                        }
-                    ]
+                    "chapter_line": "[1] 第一章: 证据线索出现，来源未明。",
+                    "outline_segment_id": "outline-segment:chapter-1:docs-1",
+                    "outline_segment": "证据来源未明，调查者选择暂时隐瞒。",
+                    "source_doc_ids": [1],
+                    "source_doc_range": "1",
+                    "source_title_indexes": [1],
+                    "status": "committed",
                 },
                 "summary_status": "committed",
                 "outline_status": "committed",

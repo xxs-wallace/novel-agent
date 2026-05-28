@@ -1009,20 +1009,18 @@ class DocumentIngestService:
             pending_resume_context = ""
             pending_overlap_source = ""
 
-            # Stabilize chapter continuity: prefer explicit headings; otherwise keep current chapter title.
+            # Resolve title continuity in source order so continuation chunks after
+            # a confirmed heading inherit the newly opened chapter immediately.
             for raw in processed_doc_items:
                 content = str(raw.get("content", "")).lstrip()
                 explicit_title = self._extract_explicit_title(content)
                 if raw.get("boundary_status") == "confirmed" and str(raw.get("normalized_heading") or "").strip():
                     raw["document_title"] = str(raw.get("normalized_heading")).strip()
-                    continue
-                if explicit_title:
+                elif explicit_title:
                     raw["document_title"] = explicit_title
-                    continue
-                if current_title:
+                elif current_title:
                     raw["document_title"] = current_title
 
-            for raw in processed_doc_items:
                 title = str(raw.get("document_title", "")).strip() or "Untitled"
                 if current_title is not None and title == current_title and current_title_index is not None:
                     raw["document_title_index"] = current_title_index

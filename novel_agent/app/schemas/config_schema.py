@@ -136,6 +136,8 @@ class CloseReadRuntimeConfig:
     character_evidence_coverage_audit: bool = True
     character_reduce_max_workers: int = 4
     world_evidence_signal_threshold: int = 70
+    profile_update_detailed_min_doc_count: int = 2
+    profile_update_detailed_min_total_chars: int = 1000
 
 
 @dataclass(slots=True)

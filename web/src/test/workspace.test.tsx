@@ -85,6 +85,21 @@ describe("Novel Agent Web workspace", () => {
     expect(calls.actions.find((call) => call.body.action === "select_task")?.body.payload).toEqual({ task_id: "task-beta" });
   });
 
+  it("keeps the selected task at the top of the task rail", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "task-beta" }));
+    await user.click(screen.getByRole("button", { name: "切换" }));
+
+    await waitFor(() => expect(calls.actions.filter((call) => call.body.action === "select_task")).toHaveLength(1));
+    const taskButtons = within(screen.getByRole("region", { name: "任务列表" })).getAllByRole("button", {
+      name: /^task-/
+    });
+    expect(taskButtons.map((button) => button.textContent)).toEqual(["task-beta", "task-alpha"]);
+  });
+
   it("does not reselect the current task when clicking it again", async () => {
     const user = userEvent.setup();
     renderWorkspace();
@@ -149,6 +164,8 @@ describe("Novel Agent Web workspace", () => {
     await screen.findByText("阅读总览");
 
     await screen.findByText("导入原文进度已更新");
+    expect(within(screen.getByRole("status")).getByText("导入原文进度已更新")).toBeInTheDocument();
+    expect(within(screen.getByRole("log")).queryByText("导入原文进度已更新")).not.toBeInTheDocument();
   });
 
   it("refreshes conversation messages when a Writer job reaches review", async () => {
@@ -352,6 +369,13 @@ describe("Novel Agent Web workspace", () => {
     expect(await screen.findByText("雨落下来，巷口的灯忽明忽暗。")).toBeInTheDocument();
     expect(screen.queryByText("调整字数后重写")).not.toBeInTheDocument();
     expect(within(screen.getByRole("log")).queryByRole("button", { name: "输入重写反馈" })).not.toBeInTheDocument();
+    const composer = document.querySelector("form.composer") as HTMLElement;
+    expect(within(composer).queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
+    expect(within(composer).queryByRole("button", { name: "稍后再决定" })).not.toBeInTheDocument();
+    expect(within(composer).queryByRole("button", { name: "作废本次草稿" })).not.toBeInTheDocument();
+    expect(within(composer).getByRole("button", { name: "接受本章" })).toBeInTheDocument();
+    expect(within(composer).getByRole("button", { name: "基于反馈重写" })).toBeInTheDocument();
+    expect(within(composer).getByRole("button", { name: "修改章节梗概后重写" })).toBeInTheDocument();
     const input = await screen.findByLabelText("输入给 Agent 的自然语言");
     await user.type(input, "节奏太慢，冲突提前。");
     const rewriteButtons = await screen.findAllByRole("button", { name: "基于反馈重写" });
@@ -366,6 +390,19 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() =>
       expect(within(document.querySelector("form.composer") as HTMLElement).queryByRole("button", { name: "基于反馈重写" })).not.toBeInTheDocument()
     );
+  });
+
+  it("does not show stale draft decisions while a Writer resume job is running", async () => {
+    setWriterDraftReviewMessage("task-alpha");
+    setTaskActiveJob("task-alpha", "job-existing-writer_resume", "writer_resume");
+    renderWorkspace();
+    await waitForInitialTask();
+
+    const composer = document.querySelector("form.composer") as HTMLElement;
+    await screen.findByText("正在根据反馈重写当前章。");
+    expect(within(composer).queryByRole("button", { name: "接受本章" })).not.toBeInTheDocument();
+    expect(within(composer).queryByRole("button", { name: "基于反馈重写" })).not.toBeInTheDocument();
+    expect(within(composer).getByLabelText("输入给 Agent 的自然语言")).toBeDisabled();
   });
 
   it("shows three draft Reviewers and runs the selected one", async () => {

@@ -73,6 +73,8 @@ WRITER_LOOP_EVENT_KINDS = {
     "user_question",
     "artifact_generated",
     "artifact_review",
+    "draft_research",
+    "draft_execution",
     "draft_review",
     "writeback_review",
 }
@@ -134,6 +136,23 @@ SUFFICIENCY_STATUSES = {
     "blocked",
 }
 OUTLINE_RESEARCH_QUESTION_SET_STATUSES = {"pending", "submitted", "deferred"}
+DRAFT_RESEARCH_STATUSES = {"ready_for_draft", "needs_user_input", "replan_requested", "blocked"}
+DRAFT_RESEARCH_NEXT_ACTIONS = {
+    "run_draft_prose_executor",
+    "ask_user",
+    "return_to_artifact_review",
+    "halted",
+}
+DRAFT_REWRITE_MODES = {"full_rewrite", "targeted_rewrite", "regenerate_from_brief", "replan_required"}
+DRAFT_FEEDBACK_CLASSIFICATIONS = {
+    "prose_only",
+    "scene_emphasis",
+    "continuity_fix",
+    "character_voice_fix",
+    "structure_fix",
+    "upstream_conflict",
+    "other",
+}
 
 
 def _normalize_text(value: object) -> str:
@@ -184,6 +203,8 @@ WriterLoopEventKind = Literal[
     "user_question",
     "artifact_generated",
     "artifact_review",
+    "draft_research",
+    "draft_execution",
     "draft_review",
     "writeback_review",
 ]
@@ -216,6 +237,23 @@ CharacterMentionStatus = Literal["resolved", "ambiguous", "missing"]
 CharacterMentionType = Literal["name", "alias", "title", "new_character_hint"]
 SufficiencyStatus = Literal["enough", "needs_user_input", "proceed_with_assumptions", "blocked"]
 OutlineResearchQuestionSetStatus = Literal["pending", "submitted", "deferred"]
+DraftResearchStatus = Literal["ready_for_draft", "needs_user_input", "replan_requested", "blocked"]
+DraftResearchNextAction = Literal[
+    "run_draft_prose_executor",
+    "ask_user",
+    "return_to_artifact_review",
+    "halted",
+]
+DraftRewriteMode = Literal["full_rewrite", "targeted_rewrite", "regenerate_from_brief", "replan_required"]
+DraftFeedbackClassification = Literal[
+    "prose_only",
+    "scene_emphasis",
+    "continuity_fix",
+    "character_voice_fix",
+    "structure_fix",
+    "upstream_conflict",
+    "other",
+]
 
 
 @dataclass(slots=True)
@@ -1139,6 +1177,207 @@ class OutlineResearchAnswerSubmission:
 
 
 @dataclass(slots=True)
+class DraftResearchDecision:
+    draft_research_id: str
+    run_id: str
+    chapter_id: str
+    status: DraftResearchStatus
+    schema_version: str = "1.0"
+    draft_id: str = ""
+    seed_packet_path: str = ""
+    notebook_path: str = ""
+    trace_path: str = ""
+    question_set_id: str = ""
+    replan_target: str = ""
+    blocked_reason: str = ""
+    next_action: DraftResearchNextAction = "run_draft_prose_executor"
+    created_at: str = field(default_factory=_utc_now_iso)
+
+    def __post_init__(self) -> None:
+        self.schema_version = _normalize_text(self.schema_version) or "1.0"
+        self.draft_research_id = _normalize_text(self.draft_research_id)
+        self.run_id = _normalize_text(self.run_id)
+        self.chapter_id = _normalize_text(self.chapter_id)
+        self.draft_id = _normalize_text(self.draft_id)
+        normalized_status = _normalize_text(self.status).lower()
+        if normalized_status not in DRAFT_RESEARCH_STATUSES:
+            raise ValueError("status must be ready_for_draft, needs_user_input, replan_requested, or blocked")
+        self.status = cast(DraftResearchStatus, normalized_status)
+        self.seed_packet_path = _normalize_text(self.seed_packet_path)
+        self.notebook_path = _normalize_text(self.notebook_path)
+        self.trace_path = _normalize_text(self.trace_path)
+        self.question_set_id = _normalize_text(self.question_set_id)
+        self.replan_target = _normalize_text(self.replan_target)
+        self.blocked_reason = _normalize_text(self.blocked_reason)
+        normalized_action = _normalize_text(self.next_action).lower()
+        if normalized_action not in DRAFT_RESEARCH_NEXT_ACTIONS:
+            normalized_action = {
+                "ready_for_draft": "run_draft_prose_executor",
+                "needs_user_input": "ask_user",
+                "replan_requested": "return_to_artifact_review",
+                "blocked": "halted",
+            }[self.status]
+        self.next_action = cast(DraftResearchNextAction, normalized_action)
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        if not self.draft_research_id:
+            raise ValueError("draft_research_id is required")
+        if not self.run_id:
+            raise ValueError("run_id is required")
+        if not self.chapter_id:
+            raise ValueError("chapter_id is required")
+        if self.status == "ready_for_draft" and not self.notebook_path:
+            raise ValueError("ready_for_draft requires notebook_path")
+        if self.status == "needs_user_input" and not self.question_set_id:
+            raise ValueError("needs_user_input requires question_set_id")
+        if self.status == "replan_requested" and not self.replan_target:
+            raise ValueError("replan_requested requires replan_target")
+        if self.status == "blocked" and not self.blocked_reason:
+            raise ValueError("blocked requires blocked_reason")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "draft_research_id": self.draft_research_id,
+            "run_id": self.run_id,
+            "chapter_id": self.chapter_id,
+            "draft_id": self.draft_id,
+            "status": self.status,
+            "seed_packet_path": self.seed_packet_path,
+            "notebook_path": self.notebook_path,
+            "trace_path": self.trace_path,
+            "question_set_id": self.question_set_id,
+            "replan_target": self.replan_target,
+            "blocked_reason": self.blocked_reason,
+            "next_action": self.next_action,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "DraftResearchDecision":
+        return cls(
+            schema_version=str(data.get("schema_version") or "1.0"),
+            draft_research_id=str(data.get("draft_research_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            chapter_id=str(data.get("chapter_id") or ""),
+            draft_id=str(data.get("draft_id") or ""),
+            status=cast(DraftResearchStatus, str(data.get("status") or "")),
+            seed_packet_path=str(data.get("seed_packet_path") or ""),
+            notebook_path=str(data.get("notebook_path") or ""),
+            trace_path=str(data.get("trace_path") or ""),
+            question_set_id=str(data.get("question_set_id") or ""),
+            replan_target=str(data.get("replan_target") or ""),
+            blocked_reason=str(data.get("blocked_reason") or ""),
+            next_action=cast(DraftResearchNextAction, str(data.get("next_action") or "")),
+            created_at=str(data.get("created_at") or ""),
+        )
+
+
+@dataclass(slots=True)
+class DraftRewritePlan:
+    rewrite_plan_id: str
+    run_id: str
+    chapter_id: str
+    source_decision_id: str
+    source_draft_id: str
+    rewrite_mode: DraftRewriteMode
+    feedback_classification: DraftFeedbackClassification
+    feedback_text: str
+    requires_replan: bool
+    schema_version: str = "1.0"
+    preserve: list[str] = field(default_factory=list)
+    remove_or_change: list[str] = field(default_factory=list)
+    new_memory_notes: list[str] = field(default_factory=list)
+    character_constraints: list[str] = field(default_factory=list)
+    style_constraints: list[str] = field(default_factory=list)
+    must_not_change: list[str] = field(default_factory=list)
+    replan_target: str = ""
+    created_at: str = field(default_factory=_utc_now_iso)
+
+    def __post_init__(self) -> None:
+        self.schema_version = _normalize_text(self.schema_version) or "1.0"
+        self.rewrite_plan_id = _normalize_text(self.rewrite_plan_id)
+        self.run_id = _normalize_text(self.run_id)
+        self.chapter_id = _normalize_text(self.chapter_id)
+        self.source_decision_id = _normalize_text(self.source_decision_id)
+        self.source_draft_id = _normalize_text(self.source_draft_id)
+        normalized_mode = _normalize_text(self.rewrite_mode).lower()
+        if normalized_mode not in DRAFT_REWRITE_MODES:
+            raise ValueError("rewrite_mode must be full_rewrite, targeted_rewrite, regenerate_from_brief, or replan_required")
+        self.rewrite_mode = cast(DraftRewriteMode, normalized_mode)
+        normalized_classification = _normalize_text(self.feedback_classification).lower()
+        if normalized_classification not in DRAFT_FEEDBACK_CLASSIFICATIONS:
+            normalized_classification = "other"
+        self.feedback_classification = cast(DraftFeedbackClassification, normalized_classification)
+        self.feedback_text = _normalize_text(self.feedback_text)
+        self.preserve = _normalize_string_list(self.preserve)
+        self.remove_or_change = _normalize_string_list(self.remove_or_change)
+        self.new_memory_notes = _normalize_string_list(self.new_memory_notes)
+        self.character_constraints = _normalize_string_list(self.character_constraints)
+        self.style_constraints = _normalize_string_list(self.style_constraints)
+        self.must_not_change = _normalize_string_list(self.must_not_change)
+        self.replan_target = _normalize_text(self.replan_target)
+        self.created_at = _normalize_text(self.created_at) or _utc_now_iso()
+        if not self.rewrite_plan_id:
+            raise ValueError("rewrite_plan_id is required")
+        if not self.run_id:
+            raise ValueError("run_id is required")
+        if not self.chapter_id:
+            raise ValueError("chapter_id is required")
+        if not self.feedback_text:
+            raise ValueError("feedback_text is required")
+        if self.requires_replan or self.rewrite_mode == "replan_required":
+            self.requires_replan = True
+            self.rewrite_mode = "replan_required"
+            if not self.replan_target:
+                raise ValueError("replan_required requires replan_target")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "rewrite_plan_id": self.rewrite_plan_id,
+            "run_id": self.run_id,
+            "chapter_id": self.chapter_id,
+            "source_decision_id": self.source_decision_id,
+            "source_draft_id": self.source_draft_id,
+            "rewrite_mode": self.rewrite_mode,
+            "feedback_classification": self.feedback_classification,
+            "feedback_text": self.feedback_text,
+            "preserve": list(self.preserve),
+            "remove_or_change": list(self.remove_or_change),
+            "new_memory_notes": list(self.new_memory_notes),
+            "character_constraints": list(self.character_constraints),
+            "style_constraints": list(self.style_constraints),
+            "must_not_change": list(self.must_not_change),
+            "requires_replan": bool(self.requires_replan),
+            "replan_target": self.replan_target,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "DraftRewritePlan":
+        return cls(
+            schema_version=str(data.get("schema_version") or "1.0"),
+            rewrite_plan_id=str(data.get("rewrite_plan_id") or ""),
+            run_id=str(data.get("run_id") or ""),
+            chapter_id=str(data.get("chapter_id") or ""),
+            source_decision_id=str(data.get("source_decision_id") or ""),
+            source_draft_id=str(data.get("source_draft_id") or ""),
+            rewrite_mode=cast(DraftRewriteMode, str(data.get("rewrite_mode") or "")),
+            feedback_classification=cast(DraftFeedbackClassification, str(data.get("feedback_classification") or "other")),
+            feedback_text=str(data.get("feedback_text") or ""),
+            preserve=[str(item) for item in (data.get("preserve") or [])],
+            remove_or_change=[str(item) for item in (data.get("remove_or_change") or [])],
+            new_memory_notes=[str(item) for item in (data.get("new_memory_notes") or [])],
+            character_constraints=[str(item) for item in (data.get("character_constraints") or [])],
+            style_constraints=[str(item) for item in (data.get("style_constraints") or [])],
+            must_not_change=[str(item) for item in (data.get("must_not_change") or [])],
+            requires_replan=bool(data.get("requires_replan", False)),
+            replan_target=str(data.get("replan_target") or ""),
+            created_at=str(data.get("created_at") or ""),
+        )
+
+
+@dataclass(slots=True)
 class ChapterSummaryIndexEntry:
     chapter_id: str
     document_title_index: int
@@ -1287,6 +1526,7 @@ class ModelingStatus:
 
 @dataclass(slots=True)
 class ContinuationIntent:
+    raw_user_prompt: str = ""
     major_characters: list[str] = field(default_factory=list)
     desired_actions: list[str] = field(default_factory=list)
     avoidances: list[str] = field(default_factory=list)
@@ -1297,6 +1537,7 @@ class ContinuationIntent:
     sources: list[TraceableSource] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.raw_user_prompt = _normalize_text(self.raw_user_prompt)
         self.major_characters = _normalize_string_list(self.major_characters)
         self.desired_actions = _normalize_string_list(self.desired_actions)
         self.avoidances = _normalize_string_list(self.avoidances)
@@ -1305,6 +1546,7 @@ class ContinuationIntent:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "raw_user_prompt": self.raw_user_prompt,
             "major_characters": list(self.major_characters),
             "desired_actions": list(self.desired_actions),
             "avoidances": list(self.avoidances),

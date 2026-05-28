@@ -116,17 +116,14 @@ def _seed_chapter(
             "mentioned_characters": mentioned,
             "world_update": {"灵脉封禁": "不能无代价突破"},
             "outline_update": {
+                "chapter_line": f"[{index}] {title}: {summary}",
+                "outline_segment_id": f"outline-segment:chapter-{index}:docs-1",
+                "outline_segment": summary,
                 "outcome": "事件结束后两人只达成有限合作。",
-                "timeline_events": [
-                    {
-                        "event_id": f"chapter-{index}:event-01-trust-conflict",
-                        "label": "旧案证据信任冲突",
-                        "summary": summary,
-                        "participants": mentioned,
-                        "source_doc_ids": [1],
-                        "source_doc_range": "1",
-                    }
-                ],
+                "source_doc_ids": [1],
+                "source_doc_range": "1",
+                "source_title_indexes": [index],
+                "status": status,
             },
             "outline_status": status,
             "outline_evidence_window": f"{index}-{index}",
@@ -609,6 +606,47 @@ def test_outline_seed_packet_marks_latest_written_chapter_as_completed_anchor(tm
                 "updated_at": "now",
             },
         )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "document_title_index": 11,
+                "chapter_title": "第十一章 已完成锚点",
+                "source_doc_start_id": 2,
+                "source_doc_end_id": 2,
+                "source_doc_count": 1,
+                "source_total_chars": 24,
+                "summary_intermediate": [],
+                "summary_md": "沈青已经完成上一段行动，顾迟确认下一章应写新的后续。",
+                "summary_short": "沈青完成上一段行动，顾迟确认下一章应写新的后续。",
+                "summary_status": "provisional",
+                "summary_evidence_window": "11-11",
+                "summary_target_range": "11-11",
+                "importance_score": 80,
+                "importance_reason": "writer writeback",
+                "related_chapters": [],
+                "mentioned_characters": ["沈青", "顾迟"],
+                "world_update": {},
+                "outline_update": {
+                    "chapter_line": "[11] 第十一章 已完成锚点: 沈青完成上一段行动，顾迟确认下一章应写新的后续。",
+                    "timeline_events": [
+                        {
+                            "label": "已完成行动",
+                            "participants": ["沈青", "顾迟"],
+                            "summary": "沈青完成上一段行动，顾迟确认下一章应写新的后续。",
+                            "source_doc_ids": [2],
+                            "source_doc_range": "2",
+                        }
+                    ],
+                },
+                "outline_status": "provisional",
+                "outline_evidence_window": "11-11",
+                "outline_target_range": "11-11",
+                "close_read_run_id": "run-1",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
         conn.commit()
 
         intent = orchestrator.build_continuation_intent(
@@ -633,7 +671,61 @@ def test_outline_seed_packet_marks_latest_written_chapter_as_completed_anchor(tm
     assert boundary["next_document_title_index"] == 12
     assert boundary["completed_anchor_is_past_context"] is True
     assert "不得重写" in serialized["current_continuation_anchor"]
+    assert "顾迟确认下一章应写新的后续" in serialized["current_continuation_anchor"]
+    assert any(
+        item.get("summary_level") == "chapter_summary" and item.get("ends_at") == "document_title_index=11"
+        for item in serialized["historical_story_overview"]
+    )
     assert "document_title_index=12" in boundary["instruction"]
+
+
+def test_outline_seed_packet_limits_recent_chapter_overview_budget(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-recent-budget"
+    long_summary = "这一章有大量需要压缩的剧情推进。" * 80
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        for index in range(1, 13):
+            _seed_chapter(
+                conn,
+                book_id=book_id,
+                index=index,
+                title=f"第{index}章",
+                summary=f"第{index}章: {long_summary}",
+                mentioned=["沈青"],
+            )
+        conn.commit()
+
+        intent = orchestrator.build_continuation_intent(
+            {
+                "desired_actions": ["继续最近章节之后的剧情"],
+                "story_scale": {"target_chapter_count": 1},
+                "climax_plan": {"climax_mode": "none", "no_climax": True},
+            }
+        )
+        packet = OutlineSeedPacketBuilder(repo_root=orchestrator.repo_root).build(
+            conn,
+            book_id=book_id,
+            intent=intent,
+            mentions=orchestrator.character_mention_extractor.extract({}),
+            resolutions=[],
+        )
+
+    chapter_items = [
+        item
+        for item in packet.to_dict()["historical_story_overview"]
+        if item.get("summary_level") == "chapter_summary"
+    ]
+    total_summary_chars = sum(len(str(item.get("summary") or "")) for item in chapter_items)
+    assert total_summary_chars <= OutlineSeedPacketBuilder.RECENT_CHAPTER_OVERVIEW_TOTAL_CHARS
+    assert all(
+        len(str(item.get("summary") or "")) <= OutlineSeedPacketBuilder.RECENT_CHAPTER_OVERVIEW_ITEM_CHARS
+        for item in chapter_items
+    )
+    assert len(chapter_items) < OutlineSeedPacketBuilder.RECENT_CHAPTER_OVERVIEW_MAX_ITEMS
+    assert chapter_items[-1]["ends_at"] == "document_title_index=12"
 
 
 def test_model_sufficiency_prompt_forbids_questions_about_completed_anchor() -> None:
@@ -659,6 +751,41 @@ def test_model_sufficiency_prompt_forbids_questions_about_completed_anchor() -> 
     assert "不得询问用户是否要详细描写" in system_prompt
     assert "next_document_title_index" in system_prompt
     assert "continuation_boundary" in user_prompt
+
+
+def test_model_research_request_adapter_accepts_common_request_wrappers() -> None:
+    client = _PromptLengthModelClient(
+        {
+            "research_requests": {
+                "items": [
+                    {
+                        "request_type": "story_detail",
+                        "query": "最近已写回章节后的续写依据",
+                        "purpose": "确认下一批大纲承接点",
+                        "priority": "high",
+                    }
+                ]
+            }
+        }
+    )
+    adapter = ModelOutlineResearchModelAdapter(model_client=client)
+    packet = OutlineSeedPacket(
+        packet_id="packet-1",
+        book_id="book-1",
+        user_intent={"desired_actions": ["继续最新章节之后的剧情"]},
+        story_scale={"target_chapter_count": 1},
+        climax_input={"climax_mode": "none", "no_climax": True},
+    )
+
+    requests = adapter.propose_research_requests(
+        seed_packet=packet,
+        notebook=PlanningNotebook(notebook_id="nb-1"),
+        prior_results=[],
+        budget_state={},
+    )
+
+    assert requests[0]["request_type"] == "story_detail"
+    assert requests[0]["query"] == "最近已写回章节后的续写依据"
 
 
 def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_path: Path) -> None:
@@ -779,6 +906,234 @@ def test_outline_research_story_detail_uses_narrative_scene_cards_first(tmp_path
     assert scene_trace[0]["target_card_types"] == ["narrative_scene"]
 
 
+def test_story_detail_prefers_recent_generated_chapter_over_stale_scene_card(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-generated-recent"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_chapter(
+            conn,
+            book_id=book_id,
+            index=11,
+            title="第十一章 信任裂缝",
+            summary="沈青和顾迟因为旧案证据来源爆发早前一次信任冲突，结束后只保持有限合作。",
+            mentioned=["沈青", "顾迟"],
+        )
+        _write_scene_cards(orchestrator.repo_root, book_id=book_id)
+        doc_id = DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": book_id,
+                "path": "generated/chapter-0012.md",
+                "scope": "generated",
+                "title": "第十二章 刚写回的信任冲突",
+                "document_title": "第十二章 刚写回的信任冲突",
+                "document_title_index": 12,
+                "inferred_chapter_no": 12,
+                "content": "沈青在最新写回章节中发现镜匣线索，顾迟确认下一步转向北塔。",
+                "content_chars": 31,
+                "character_keywords": ["沈青", "顾迟"],
+                "content_tags": ["writer_generated", "user_accepted"],
+                "source_path": "generated/chapter-0012.md",
+                "source_file_name": "chapter-0012.md",
+                "source_start_offset": 0,
+                "source_end_offset": 31,
+                "ingestion_run_id": "run-generated",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "document_title_index": 12,
+                "chapter_title": "第十二章 刚写回的信任冲突",
+                "source_doc_start_id": doc_id,
+                "source_doc_end_id": doc_id,
+                "source_doc_count": 1,
+                "source_total_chars": 31,
+                "summary_intermediate": [],
+                "summary_md": "沈青在最新写回章节中发现镜匣线索，顾迟确认下一步转向北塔。",
+                "summary_short": "沈青发现镜匣线索，顾迟确认下一步转向北塔。",
+                "summary_status": "provisional",
+                "summary_evidence_window": "12-12",
+                "summary_target_range": "12-12",
+                "importance_score": 80,
+                "importance_reason": "writer writeback",
+                "related_chapters": [],
+                "mentioned_characters": ["沈青", "顾迟"],
+                "world_update": {},
+                "outline_update": {
+                    "outcome": "下一步转向北塔。",
+                    "timeline_events": [
+                        {
+                            "event_id": "chapter-12:event-01-generated",
+                            "label": "镜匣线索转向北塔",
+                            "summary": "沈青在最新写回章节中发现镜匣线索，顾迟确认下一步转向北塔。",
+                            "participants": ["沈青", "顾迟"],
+                            "source_doc_ids": [doc_id],
+                            "source_doc_range": str(doc_id),
+                        }
+                    ],
+                },
+                "outline_status": "provisional",
+                "outline_evidence_window": "12-12",
+                "outline_target_range": "12-12",
+                "close_read_run_id": "run-generated",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        resolver = StoryDetailResolver(repo_root=orchestrator.repo_root)
+        result = resolver.resolve(
+            conn,
+            book_id=book_id,
+            request=ResearchRequest(
+                request_id="recent-generated",
+                request_type="story_detail",
+                query="上一批刚写回章节里的信任冲突和镜匣线索结果",
+                priority="high",
+            ),
+            max_chars=500,
+        )
+
+    assert result.results[0]["memory_query_protocol"] == "recent_generated_chapter_summary"
+    assert result.results[0]["source_doc_ids"] == [doc_id]
+    assert "北塔" in result.results[0]["summary"]
+
+
+def test_writer_writeback_character_events_are_scoped_from_state_delta(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(layout=RunLayout(base_dir=tmp_path / "runs")),
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    state_delta = {
+        "mentioned_characters": ["沈青", "顾迟"],
+        "outline_update": {
+            "chapter_line": "[12] 第十二章: 沈青发现镜匣线索。",
+            "outline_segment_id": "outline-segment:chapter-12:docs-42",
+            "outline_segment": "沈青发现镜匣线索，顾迟确认下一步转向北塔。",
+        },
+    }
+
+    events = executor._story_events_by_name_from_state_delta(  # noqa: SLF001
+        state_delta=state_delta,
+        chapter_index=12,
+        doc_id=42,
+    )
+    activity = executor._recent_activity_for_character(  # noqa: SLF001
+        name="沈青",
+        state_delta=state_delta,
+        fallback="第十二章",
+    )
+
+    assert events["沈青"][0]["source_doc_ids"] == [42]
+    assert events["顾迟"][0]["source_chapter_indexes"] == [12]
+    assert events["沈青"][0]["outline_segment_id"] == "outline-segment:chapter-12:docs-42"
+    assert "北塔" in activity
+
+
+def test_writer_state_delta_extracts_character_names_instead_of_plot_beats(tmp_path: Path) -> None:
+    model_client = _PromptLengthModelClient(
+        {
+            "mentioned_characters": ["沈青", "林澈"],
+            "outline_update": {
+                "chapter_line": "[2] 新的会面: 沈青与林澈完成线索交接。",
+                "outline_segment": "沈青与林澈完成线索交接。",
+            },
+            "world_update": {"should_update": False, "changes": []},
+        }
+    )
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(layout=RunLayout(base_dir=tmp_path / "runs")),
+        model_client=model_client,
+    )
+    execution_input = {
+        "chapter_id": "chapter-2",
+        "chapter_title": "新的会面",
+        "document_title_index": 2,
+        "chapter_brief": {
+            "title": "新的会面",
+            "goal": "沈青与林澈完成线索交接。",
+            "must_include": ["沈青在旧码头完成调查，并把线索交给林澈。"],
+        },
+        "fact_inputs": {
+            "character_profiles": [
+                {"canonical_name": "沈青", "aliases": ["阿青"], "matched_names": []},
+            ]
+        },
+    }
+
+    state_delta = executor._extract_state_delta(  # noqa: SLF001
+        execution_input=execution_input,
+        draft_text="沈青把资料递给林澈，两人确认下一步行动。",
+        blocked=False,
+    )
+
+    assert state_delta["mentioned_characters"] == ["沈青", "林澈"]
+    assert "沈青在旧码头完成调查" not in json.dumps(state_delta, ensure_ascii=False)
+    assert state_delta["outline_update"]["outline_segment"] == "沈青与林澈完成线索交接。"
+    assert "timeline_events" not in state_delta["outline_update"]
+
+
+def test_writer_writeback_creates_profile_for_model_extracted_new_character(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    executor = RestrictedWriterExecutor(
+        repo_root=orchestrator.repo_root,
+        run_writer=orchestrator.run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    book_id = "book-writeback-new-character"
+    state_delta = {
+        "mentioned_characters": ["沈青", "林澈"],
+        "outline_update": {
+            "chapter_line": "[2] 新的会面: 沈青与林澈完成线索交接。",
+            "timeline_events": [
+                {
+                    "label": "线索交接",
+                    "participants": ["沈青", "林澈"],
+                    "summary": "沈青与林澈完成线索交接。",
+                }
+            ],
+        },
+    }
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_base_memory(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        updates, activated = executor._build_character_updates(  # noqa: SLF001
+            conn,
+            book_id=book_id,
+            execution_input={"chapter_title": "新的会面", "document_title_index": 2},
+            state_delta=state_delta,
+        )
+        executor.character_profile_service.merge_updates(
+            conn,
+            book_id=book_id,
+            chapter_index=2,
+            doc_ids=[99],
+            updates=updates,
+            story_events_by_name=executor._story_events_by_name_from_state_delta(  # noqa: SLF001
+                state_delta=state_delta,
+                chapter_index=2,
+                doc_id=99,
+            ),
+        )
+        conn.commit()
+        new_row = CharacterProfilesRepo().get(conn, book_id=book_id, canonical_name="林澈")
+
+    assert activated == ["林澈"]
+    assert new_row is not None
+    assert "已通过审阅并写回" in str(new_row["personhood_evidence_summary"])
+
+
 def test_narrative_memory_query_btree_drills_to_documents_and_trace(tmp_path: Path) -> None:
     db, orchestrator = _build_db_and_orchestrator(tmp_path)
     book_id = "book-memory-query"
@@ -803,22 +1158,22 @@ def test_narrative_memory_query_btree_drills_to_documents_and_trace(tmp_path: Pa
             query="信任冲突的经过和后果",
             budget=MemoryQueryBudget(max_root_candidates=4, max_child_candidates=4),
         )
-        events = service.drill_down(
+        segments = service.drill_down(
             conn,
             book_id=book_id,
             state=root,
             selected_ids=[root.current_candidates[0]["id"]],
-            query_suffix="确认相关事件",
+            query_suffix="确认相关剧情段",
             selection_reason="root summary covers the conflict",
             confidence=0.8,
         )
         chapters = service.drill_down(
             conn,
             book_id=book_id,
-            state=events,
-            selected_ids=[events.current_candidates[0]["id"]],
+            state=segments,
+            selected_ids=[segments.current_candidates[0]["id"]],
             query_suffix="展开章节摘要",
-            selection_reason="event mentions trust conflict",
+            selection_reason="segment mentions trust conflict",
             confidence=0.8,
         )
         documents = service.drill_down(
@@ -832,10 +1187,10 @@ def test_narrative_memory_query_btree_drills_to_documents_and_trace(tmp_path: Pa
         )
         bundle = service.resolve_document_refs(conn, book_id=book_id, doc_ids=[1], excerpt_budget=120)
 
-    assert root.current_level == "event_summary"
-    assert root.current_candidates[0]["start_event_id"]
-    assert events.current_level == "event"
-    assert events.current_candidates[0]["event_id"].startswith("chapter-11:event")
+    assert root.current_level == "outline_root"
+    assert root.current_candidates[0]["outline_segment_ids"]
+    assert segments.current_level == "outline_segment"
+    assert segments.current_candidates[0]["outline_segment_id"].startswith("outline-segment:chapter-11")
     assert chapters.current_level == "chapter"
     assert documents.current_level == "document"
     assert bundle.excerpts[0]["doc_id"] == 1
@@ -1111,6 +1466,10 @@ def test_outline_research_freeform_answer_can_satisfy_question_set(tmp_path: Pat
     submission = _load_run_data(planner.run_writer, "run-freeform-answer", "outline_research_answer_submission.json")
     assert submission["answer_text"] == "下一章先确认人物关系，再用慢节奏推进调查。"
     assert submission["user_answers"] == []
+    intent = _load_run_data(planner.run_writer, "run-freeform-answer", "continuation_intent.json")
+    assert "下一章先确认人物关系" in intent["notes"]
+    assert "顾迟是否为新增人物" in intent["raw_user_prompt"]
+    assert "下一章先确认人物关系" in intent["raw_user_prompt"]
     notebook = _load_run_data(planner.run_writer, "run-freeform-answer", "planning_notebook.json")
     assert any(fact["fact_status"] == "user_authorized" for fact in notebook["confirmed_facts"])
 

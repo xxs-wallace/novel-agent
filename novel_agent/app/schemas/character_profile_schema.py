@@ -70,6 +70,9 @@ class CharacterStoryEventItem:
     event_id: str
     label: str
     summary: str
+    outline_segment_id: str = ""
+    role_in_segment: str = ""
+    compression_level: str = ""
     source_chapter_indexes: list[int] = field(default_factory=list)
     source_doc_ids: list[int] = field(default_factory=list)
     source_doc_range: str = ""

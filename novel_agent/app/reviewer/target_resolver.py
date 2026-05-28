@@ -63,6 +63,8 @@ class ReviewTargetResolver:
         }
         max_chars = request.budget.max_target_chars
         if len(resolved_text) > max_chars:
+            if target.target_type == "source_chapter":
+                raise ValueError(f"source_chapter 目标原文超过 {max_chars} 字符，请缩小章节范围后再分析。")
             resolved_text = resolved_text[:max_chars].rstrip()
             truncation = {
                 "truncated": True,

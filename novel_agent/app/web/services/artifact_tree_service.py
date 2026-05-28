@@ -290,7 +290,21 @@ class ArtifactTreeService:
         return [dict(row) for row in rows]
 
     def _person_rows(self, task_id: str) -> list[dict[str, Any]]:
-        db_path = self.facade.db_path_for_book(task_id)
+        rows_by_name = {
+            str(row.get("canonical_name") or ""): row
+            for row in self._person_rows_from_db(self.facade.db_path_for_book(task_id), task_id)
+            if str(row.get("canonical_name") or "")
+        }
+        for row in self._person_rows_from_db(self._writer_memory_db_path(task_id), task_id):
+            name = str(row.get("canonical_name") or "")
+            if name:
+                rows_by_name[name] = row
+        return sorted(
+            rows_by_name.values(),
+            key=lambda row: (-int(row.get("importance_score") or 0), str(row.get("canonical_name") or "")),
+        )
+
+    def _person_rows_from_db(self, db_path: Path, task_id: str) -> list[dict[str, Any]]:
         if not db_path.exists():
             return []
         db = NovelAgentDB(db_path)
@@ -308,6 +322,9 @@ class ArtifactTreeService:
                 (task_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def _writer_memory_db_path(self, task_id: str) -> Path:
+        return self.repo_root / ".indexes" / "writer" / f"{task_id}.db"
 
     @staticmethod
     def _person_group(row: dict[str, Any]) -> str:

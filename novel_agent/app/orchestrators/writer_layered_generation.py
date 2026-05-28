@@ -367,6 +367,7 @@ class WriterLayeredGenerationOrchestrator:
                 existing_climax=climax_plan,
             )
         return ContinuationIntent(
+            raw_user_prompt=str(payload.get("raw_user_prompt") or _normalize_text(raw_text) or ""),
             major_characters=major_characters,
             desired_actions=[str(item) for item in (payload.get("desired_actions") or [])],
             avoidances=[str(item) for item in (payload.get("avoidances") or [])],
@@ -2282,6 +2283,7 @@ class WriterLayeredGenerationOrchestrator:
 
     def _continuation_intent_from_dict(self, data: Mapping[str, Any]) -> ContinuationIntent:
         return ContinuationIntent(
+            raw_user_prompt=str(data.get("raw_user_prompt") or ""),
             major_characters=[str(item) for item in (data.get("major_characters") or [])],
             desired_actions=[str(item) for item in (data.get("desired_actions") or [])],
             avoidances=[str(item) for item in (data.get("avoidances") or [])],

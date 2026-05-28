@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,30 +13,35 @@ from novel_agent.app.orchestrators import (
     WriterLayeredGenerationOrchestrator,
     WriterRollbackManager,
 )
-from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
+from novel_agent.app.orchestrators.scoped_artifact_revision import ScopedArtifactRevisionLLMInput
+from novel_agent.app.orchestrators.writer_planning_types import (
+    CharacterRequirementReport,
+    NamedNewCharacter,
+)
+from novel_agent.app.prompts.writer_planning_prompt import build_chapter_package_prompt
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
+from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
 from novel_agent.app.repos.db import NovelAgentDB
+from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.run_interactive import build_writer_workflow
+from novel_agent.app.schemas.orchestration_schema import (
+    BatchPlan,
+    BookContinuationPlan,
+    FreezeRecord,
+    ModelingStatus,
+    WorldExpansionPack,
+)
+from novel_agent.app.services.draft_research_service import DraftResearchService
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 from novel_agent.schemas import (
     ArtifactReviewDecision,
     ChapterReplanRequest,
+    DraftResearchDecision,
+    DraftRewritePlan,
     GenerationReviewDecision,
     LengthPlanUpdate,
-)
-from novel_agent.app.prompts.writer_planning_prompt import build_chapter_package_prompt
-from novel_agent.app.schemas.orchestration_schema import (
-    BatchPlan,
-    BookContinuationPlan,
-    ModelingStatus,
-    WorldExpansionPack,
-)
-from novel_agent.app.orchestrators.scoped_artifact_revision import ScopedArtifactRevisionLLMInput
-from novel_agent.app.orchestrators.writer_planning_types import (
-    CharacterRequirementReport,
-    NamedNewCharacter,
 )
 from novel_agent.tests.test_writer_layered_generation_orchestrator import (
     FakeWriterModelClient,
@@ -83,6 +89,438 @@ def test_generation_review_decision_status_variants_are_available_from_runtime_e
     assert accepted.to_dict()["next_action_checkpoint"] == "freeze_e"
     assert discarded.to_dict()["status"] == "discarded"
     assert discarded.to_dict()["next_action_checkpoint"] == "halted"
+
+
+def test_draft_research_contracts_are_available_from_runtime_exports() -> None:
+    decision = DraftResearchDecision(
+        draft_research_id="draft-research-001",
+        run_id="run-001",
+        chapter_id="chapter-001",
+        status="ready_for_draft",
+        notebook_path="runs/writer/run-001/draft_context_notebook.json",
+        next_action="run_draft_prose_executor",
+    )
+    rewrite_plan = DraftRewritePlan(
+        rewrite_plan_id="draft-rewrite-001",
+        run_id="run-001",
+        chapter_id="chapter-001",
+        source_decision_id="decision-001",
+        source_draft_id="draft-001",
+        rewrite_mode="full_rewrite",
+        feedback_classification="continuity_fix",
+        feedback_text="修正早期设定冲突。",
+        requires_replan=False,
+    )
+
+    assert decision.to_dict()["status"] == "ready_for_draft"
+    assert decision.to_dict()["next_action"] == "run_draft_prose_executor"
+    assert rewrite_plan.to_dict()["feedback_text"] == "修正早期设定冲突。"
+
+
+def test_draft_research_loop_writes_seed_notebook_and_uses_outline_segments(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "draft-research.db")
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    service = DraftResearchService(
+        repo_root=tmp_path,
+        run_writer=run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    book_id = "book-draft-research"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": book_id,
+                "path": "docs/chapter-1.md",
+                "scope": "docs",
+                "title": "第一章",
+                "document_title": "第一章",
+                "document_title_index": 1,
+                "inferred_chapter_no": 1,
+                "content": "沈青在旧案现场发现密令，顾迟隐瞒了关键线索。",
+                "content_chars": 24,
+                "character_keywords": ["沈青", "顾迟"],
+                "content_tags": ["旧案"],
+                "source_path": "docs/chapter-1.md",
+                "source_file_name": "chapter-1.md",
+                "source_start_offset": 0,
+                "source_end_offset": 24,
+                "ingestion_run_id": "seed",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "document_title_index": 1,
+                "chapter_title": "第一章",
+                "source_doc_start_id": 1,
+                "source_doc_end_id": 1,
+                "source_doc_count": 1,
+                "source_total_chars": 24,
+                "summary_md": "沈青发现旧案密令，顾迟隐瞒线索造成信任裂痕。",
+                "summary_short": "旧案密令与信任裂痕。",
+                "summary_status": "committed",
+                "summary_evidence_window": "1",
+                "summary_target_range": "1",
+                "mentioned_characters": ["沈青", "顾迟"],
+                "outline_update": {
+                    "outline_segment_id": "outline-seg-0001",
+                    "outline_segment": "沈青调查旧案时发现密令，顾迟隐瞒线索，二人关系转向警惕。",
+                    "source_doc_ids": [1],
+                    "source_title_indexes": [1],
+                    "source_doc_range": "1",
+                    "status": "committed",
+                },
+                "outline_status": "committed",
+                "outline_evidence_window": "1",
+                "outline_target_range": "1",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "canonical_name": "沈青",
+                "aliases": [],
+                "profile_summary_md": "沈青持续追查旧案，对顾迟保持警惕。",
+                "story_events": [
+                    {
+                        "experience_id": "exp-001",
+                        "outline_segment_id": "outline-seg-0001",
+                        "label": "旧案密令",
+                        "summary": "沈青发现密令后与顾迟产生信任裂痕。",
+                        "source_doc_ids": [1],
+                        "source_doc_range": "1",
+                    }
+                ],
+                "chapter_indexes": [1],
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        decision, notebook = service.run(
+            conn,
+            run_id="run-draft-research",
+            book_id=book_id,
+            execution_input={
+                "run_id": "run-draft-research",
+                "book_id": book_id,
+                "chapter_id": "chapter-002",
+                "chapter_title": "第二章",
+                "chapter_brief": {
+                    "chapter_id": "chapter-002",
+                    "title": "第二章",
+                    "goal": "沈青需要决定是否短暂相信顾迟继续追查密令。",
+                },
+                "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+            },
+        )
+
+    run_dir = run_writer.layout.run_dir("run-draft-research")
+    seed = _load_run_artifact_data(run_dir / "draft_seed_packet.json")
+    assert decision.status == "ready_for_draft"
+    assert (run_dir / "draft_context_notebook.json").exists()
+    assert seed["outline_root_map"]
+    assert "event_summary" not in json.dumps(seed, ensure_ascii=False)
+    assert notebook["story_continuity_notes"]
+    trace = _load_run_artifact_data(run_dir / "draft_research_trace.json")
+    assert "outline_segment" in json.dumps(trace, ensure_ascii=False)
+
+
+def test_draft_research_chapter_excerpt_parses_query_doc_id_and_tail(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "draft-research-query.db")
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    service = DraftResearchService(
+        repo_root=tmp_path,
+        run_writer=run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    book_id = "book-draft-research-query"
+    opening = "开头信息不应该出现在尾部摘录。" + "前情。" * 160
+    ending = "结尾场景：沈青换上黑色短裙，顾迟把钥匙放回桌面。"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        doc_id = DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": book_id,
+                "path": "generated/chapter-54.md",
+                "scope": "generated",
+                "title": "第五十四章",
+                "document_title": "第五十四章",
+                "document_title_index": 54,
+                "inferred_chapter_no": 54,
+                "content": opening + ending,
+                "content_chars": len(opening + ending),
+                "character_keywords": ["沈青", "顾迟"],
+                "content_tags": ["结尾"],
+                "source_path": "generated/chapter-54.md",
+                "source_file_name": "chapter-54.md",
+                "source_start_offset": 0,
+                "source_end_offset": len(opening + ending),
+                "ingestion_run_id": "writer-run",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "document_title_index": 54,
+                "chapter_title": "第五十四章",
+                "source_doc_start_id": doc_id,
+                "source_doc_end_id": doc_id,
+                "source_doc_count": 1,
+                "source_total_chars": len(opening + ending),
+                "summary_md": "沈青与顾迟来到结尾场景。",
+                "summary_short": "结尾场景。",
+                "summary_status": "committed",
+                "summary_evidence_window": "54",
+                "summary_target_range": "54",
+                "mentioned_characters": ["沈青", "顾迟"],
+                "outline_status": "committed",
+                "outline_evidence_window": "54",
+                "outline_target_range": "54",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        result = service._query_chapter_excerpt(
+            conn,
+            book_id=book_id,
+            request={
+                "type": "chapter_excerpt",
+                "query": f"doc_id:{doc_id}, chapter:chapter-54, range: last ~300 chars, ending scene clothing and props",
+            },
+        )
+
+    rendered = json.dumps(result, ensure_ascii=False)
+    assert result["status"] == "answered"
+    assert "resolve_document_tail_refs" in rendered
+    assert "黑色短裙" in rendered
+    assert "开头信息不应该出现在尾部摘录" not in rendered
+
+
+def test_writer_executor_builds_previous_accepted_chapter_tail_context(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "writer-tail-context.db")
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=run_writer,
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    book_id = "book-writer-tail-context"
+    previous_body = "前情。" * 220 + "上一章结尾：沈青披着湿外套站在门边，顾迟手里还拿着银色钥匙。"
+    with db.connect() as conn:
+        db.init_schema(conn)
+        doc_id = DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": book_id,
+                "path": "generated/chapter-10.md",
+                "scope": "generated",
+                "title": "第十章",
+                "document_title": "第十章",
+                "document_title_index": 10,
+                "inferred_chapter_no": 10,
+                "content": previous_body,
+                "content_chars": len(previous_body),
+                "character_keywords": ["沈青", "顾迟"],
+                "content_tags": ["结尾"],
+                "source_path": "generated/chapter-10.md",
+                "source_file_name": "chapter-10.md",
+                "source_start_offset": 0,
+                "source_end_offset": len(previous_body),
+                "ingestion_run_id": "writer-run",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "document_title_index": 10,
+                "chapter_title": "第十章",
+                "source_doc_start_id": doc_id,
+                "source_doc_end_id": doc_id,
+                "source_doc_count": 1,
+                "source_total_chars": len(previous_body),
+                "summary_md": "沈青与顾迟停在门边。",
+                "summary_short": "门边承接。",
+                "summary_status": "committed",
+                "summary_evidence_window": "10",
+                "summary_target_range": "10",
+                "mentioned_characters": ["沈青", "顾迟"],
+                "outline_status": "committed",
+                "outline_evidence_window": "10",
+                "outline_target_range": "10",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        tail_context = executor._build_previous_accepted_chapter_tail_excerpt(
+            conn,
+            book_id=book_id,
+            before_document_title_index=11,
+            max_chars=300,
+        )
+
+    execution_input = {
+        "chapter_title": "第十一章",
+        "chapter_brief": {
+            "chapter_id": "chapter-011",
+            "title": "第十一章",
+            "combined_synopsis": "沈青从门边进入下一场。",
+            "coverage_plot_beats": ["沈青承接上一章状态进入下一场。"],
+        },
+        "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+        "fact_inputs": {
+            "previous_accepted_chapter_tail_excerpt": tail_context,
+            "previous_chapter_tail_policy": "previous_accepted_chapter_tail_excerpt is hard continuity context.",
+        },
+    }
+    prompt = executor.build_draft_prompt(execution_input)
+
+    assert tail_context["excerpt_scope"] == "tail"
+    assert "湿外套" in tail_context["excerpt"]
+    assert "银色钥匙" in prompt["user_prompt"]
+    assert "硬连续性材料" in prompt["user_prompt"]
+
+
+def test_writer_executor_uses_long_timeout_for_draft_prose(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class _RecordingModelClient:
+        def __init__(self) -> None:
+            self.timeout_seconds = 0
+
+        def generate_text(
+            self,
+            *,
+            system_prompt: str,
+            user_prompt: str,
+            fallback_text: str | None = None,
+            timeout_seconds: int | None = None,
+        ) -> str:
+            _ = (system_prompt, user_prompt, fallback_text)
+            self.timeout_seconds = int(timeout_seconds or 0)
+            return "正文"
+
+    monkeypatch.delenv("NOVEL_AGENT_DRAFT_PROSE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("NOVEL_AGENT_WEB_WRITER_DRAFT_TIMEOUT_SECONDS", raising=False)
+    model_client = _RecordingModelClient()
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+        model_client=model_client,
+    )
+
+    draft = executor._generate_draft(
+        {
+            "chapter_title": "第二章",
+            "chapter_brief": {"chapter_id": "chapter-2", "title": "第二章", "combined_synopsis": "继续。"},
+            "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+            "fact_inputs": {},
+        }
+    )
+
+    assert draft == "正文\n"
+    assert model_client.timeout_seconds == 900
+
+
+def test_draft_research_answer_updates_frozen_execution_input_before_resume(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "writer-draft-answer.db")
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    run_id = "run-draft-answer"
+
+    class _RecordingExecutor:
+        def __init__(self) -> None:
+            self.seen_execution_input: dict[str, Any] = {}
+
+        def execute_frozen_chapter(self, conn: Any, **kwargs: Any) -> dict[str, Any]:
+            freeze_path = run_writer.layout.freeze_dir(run_id, "freeze_d") / "chapter_execution_input.json"
+            self.seen_execution_input = json.loads(freeze_path.read_text(encoding="utf-8"))["data"]
+            return {
+                "status": "draft_research_not_ready",
+                "draft_research_status": "blocked",
+                "draft_research_decision_path": str(run_writer.layout.run_dir(run_id) / "draft_research_decision.json"),
+                "canon_ready": False,
+                "accepted_for_writeback": False,
+                "review_decision_status": "",
+                "writeback_committed": False,
+            }
+
+    executor = _RecordingExecutor()
+    workflow = WriterInteractiveWorkflow(
+        planner=SimpleNamespace(model_client=None),  # type: ignore[arg-type]
+        executor=executor,  # type: ignore[arg-type]
+        rollback_manager=WriterRollbackManager(run_writer=run_writer),
+        run_writer=run_writer,
+        revision_adapter=_EchoRevisionAdapter(),
+    )
+    execution_input = {
+        "run_id": run_id,
+        "book_id": "book-1",
+        "chapter_id": "chapter-2",
+        "chapter_title": "第二章",
+        "chapter_brief": {"chapter_id": "chapter-2", "title": "第二章"},
+        "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+        "fact_inputs": {},
+        "user_supplement": {},
+    }
+    run_writer.write_json(run_id, "chapter_brief.json", execution_input["chapter_brief"])
+    run_writer.write_json(run_id, "chapter_length_budget.json", execution_input["length_budget"])
+    run_writer.write_json(run_id, "style_reference_bundle.json", {})
+    run_writer.write_json(run_id, "chapter_execution_input.json", execution_input)
+    run_writer.write_json(
+        run_id,
+        "draft_research_question_set.json",
+        {
+            "question_set_id": "draft-research-run-draft-answer-questions",
+            "run_id": run_id,
+            "stage": "draft_research_user_input",
+            "status": "pending",
+            "questions": [{"question_id": "q1", "prompt": "如何处理时间线？", "required": True}],
+            "actions": {"submit": "submit_draft_research_answers", "defer": "defer_draft_research_answers"},
+        },
+    )
+    run_writer.write_freeze_record(
+        run_id,
+        FreezeRecord(freeze_stage="freeze_d", summary="seed", depends_on=["freeze_c"]),
+        artifact_payloads={
+            "chapter_brief.json": execution_input["chapter_brief"],
+            "chapter_length_budget.json": execution_input["length_budget"],
+            "style_reference_bundle.json": {},
+            "chapter_execution_input.json": execution_input,
+        },
+    )
+    workflow.initialize_workflow(run_id=run_id, book_id="book-1", product_mode="assist")
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        workflow.continue_after_draft_research_input(
+            conn,
+            run_id=run_id,
+            book_id="book-1",
+            product_mode="assist",
+            question_set_id="draft-research-run-draft-answer-questions",
+            answer_text="放到第二天，由我主动允许。",
+            user_answers=[{"question_id": "q1", "answer_text": "放到第二天，由我主动允许。"}],
+        )
+
+    frozen_input = json.loads(
+        (run_writer.layout.freeze_dir(run_id, "freeze_d") / "chapter_execution_input.json").read_text(encoding="utf-8")
+    )["data"]
+    assert frozen_input["user_supplement"]["draft_research_answers"][0]["answer_text"] == "放到第二天，由我主动允许。"
+    assert executor.seen_execution_input["user_supplement"]["draft_research_answers"][0]["answer_text"] == "放到第二天，由我主动允许。"
 
 
 def test_generation_review_decision_rewrite_requested_preserves_feedback_text() -> None:
@@ -259,6 +697,22 @@ def test_requirement_coverage_accepts_runtime_writer_aliases(tmp_path: Path) -> 
     assert "固定第一人称或固定限知视角" in prompt["user_prompt"]
     assert "男主角" not in prompt["user_prompt"]
     assert "女主角" not in prompt["user_prompt"]
+
+
+def test_requirement_coverage_does_not_use_legacy_default_aliases(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+
+    assert not executor._requirement_covered(  # noqa: SLF001
+        draft_text="客厅里摆着圣诞树，三个人在沙发区吃晚饭。",
+        requirement="聚会场景",
+    )
+    assert executor._requirement_covered(  # noqa: SLF001
+        draft_text="客厅里摆着圣诞树，三个人在沙发区吃晚饭。",
+        requirement="客厅场景",
+    )
 
 
 def test_restricted_writer_executor_exposes_draft_generation_interface(tmp_path: Path) -> None:
@@ -1018,6 +1472,37 @@ def test_legacy_wait_length_state_recovers_to_chapter_review_migration_target(tm
     assert checkpoint["legacy_stage"] == "wait_length_review"
     assert checkpoint["stage"] == "chapter_review"
     assert checkpoint["artifact_path"] == str(chapter_package_path)
+
+
+def test_chapter_review_approval_preserves_current_chapter_after_replan(tmp_path: Path) -> None:
+    run_writer = RunWriter(RunLayout(tmp_path / "runs"))
+    workflow = WriterInteractiveWorkflow(
+        planner=WriterLayeredGenerationOrchestrator(repo_root=tmp_path, run_writer=run_writer),
+        executor=RestrictedWriterExecutor(repo_root=tmp_path, run_writer=run_writer),
+        rollback_manager=WriterRollbackManager(run_writer=run_writer),
+        run_writer=run_writer,
+    )
+    run_writer.prepare_run_dir("run-replan")
+    run_writer.write_json(
+        "run-replan",
+        "chapter_package.json",
+        {
+            "package_id": "pkg-1",
+            "batch_id": "batch-1",
+            "chapters": [
+                {"chapter_id": "chapter-1", "title": "第一章"},
+                {"chapter_id": "chapter-2", "title": "第二章"},
+            ],
+        },
+    )
+
+    selected = workflow._select_chapter_id_after_chapter_review(  # noqa: SLF001
+        run_id="run-replan",
+        requested_chapter_id="",
+        prior_state={"current_chapter_id": "chapter-2"},
+    )
+
+    assert selected == "chapter-2"
 
 
 def test_approved_chapter_review_supplement_enters_execution_prompt_without_legacy_gates(tmp_path: Path) -> None:

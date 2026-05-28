@@ -64,12 +64,14 @@
 - `chapter_brief`
 - `planning_note`
 - `raw_text`
+- `source_chapter`
 
 ### 3.5 Rules
 
 - `text`、`document_ids`、`artifact_path` 至少一个必须存在。
 - `document_ids` 是可选来源引用，不是 Reviewer 的唯一输入。
 - `target_type` 决定可用 reviewer、prompt rubric 和上下文查询策略。
+- `source_chapter` 表示已入库、可定位到 source document / chapter boundary 的原文章节或章节片段；用于原文文学性和人物塑造诊断时，调用方必须提供 `text` 或可解析的 `document_ids` / `source_refs`。
 
 ## 4. Contract B: ReviewContextPolicy
 

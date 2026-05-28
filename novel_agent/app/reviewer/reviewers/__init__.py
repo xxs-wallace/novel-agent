@@ -6,6 +6,7 @@ from .local_draft_continuity import LocalDraftContinuityReviewer
 from .memory_draft_consistency import MemoryDraftConsistencyReviewer
 from .model_only import ModelOnlyReviewer
 from .outline_plot_development import OutlinePlotDevelopmentReviewer
+from .source_chapter_literary_diagnostic import SourceChapterLiteraryDiagnosticReviewer
 
 
 def default_reviewers() -> list[ModelOnlyReviewer]:
@@ -15,6 +16,7 @@ def default_reviewers() -> list[ModelOnlyReviewer]:
         LocalDraftContinuityReviewer(),
         MemoryDraftConsistencyReviewer(),
         KBDraftStyleAtmosphereReviewer(),
+        SourceChapterLiteraryDiagnosticReviewer(),
     ]
 
 
@@ -25,5 +27,6 @@ __all__ = [
     "MemoryDraftConsistencyReviewer",
     "ModelOnlyReviewer",
     "OutlinePlotDevelopmentReviewer",
+    "SourceChapterLiteraryDiagnosticReviewer",
     "default_reviewers",
 ]

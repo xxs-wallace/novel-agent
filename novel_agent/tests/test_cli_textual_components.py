@@ -1096,7 +1096,7 @@ def test_decision_panel_widget_chapter_acceptance_options() -> None:
     widget = DecisionPanelWidget(panel)
     rendered = widget.render_panel()
 
-    assert "接受本章 -> 请确认写回续写记忆" in rendered
+    assert "提交本章正文 -> 提交正文并更新续写记忆" in rendered
     assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
     assert "action=show_chapter_acceptance_form" in rendered

@@ -1,5 +1,5 @@
 import { Plus, RefreshCw } from "lucide-react";
-import { type MouseEvent, useState } from "react";
+import { type MouseEvent, useMemo, useState } from "react";
 
 import type { CreateTaskRequest, DeleteTaskPreview, TaskSummary, WriterRunDeletePreview } from "../../api/types";
 import {
@@ -50,6 +50,16 @@ export function TaskRail({
   const [deletePreview, setDeletePreview] = useState<{ taskId: string; preview: DeleteTaskPreview } | null>(null);
   const [writerRunDeletePreview, setWriterRunDeletePreview] = useState<{ taskId: string; preview: WriterRunDeletePreview } | null>(null);
   const [pendingSwitchTaskId, setPendingSwitchTaskId] = useState("");
+  const visibleTasks = useMemo(() => {
+    if (!selectedTaskId) {
+      return tasks;
+    }
+    const selectedTask = tasks.find((task) => task.task_id === selectedTaskId);
+    if (!selectedTask) {
+      return tasks;
+    }
+    return [selectedTask, ...tasks.filter((task) => task.task_id !== selectedTaskId)];
+  }, [selectedTaskId, tasks]);
 
   async function previewDelete(taskId: string) {
     const preview = await onDeleteTask(taskId, false);
@@ -147,7 +157,7 @@ export function TaskRail({
 
       <div className="task-list" aria-live="polite">
         {tasks.length === 0 && !isLoading ? <div className="empty-state">还没有任务。</div> : null}
-        {tasks.map((task) => {
+        {visibleTasks.map((task) => {
           const selected = task.task_id === selectedTaskId;
           const readPct = percent(task.read_completed, task.total_documents);
           const closeReadPct = percent(task.close_read_completed, task.total_documents);

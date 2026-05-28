@@ -31,6 +31,14 @@ CHAPTER_SYNOPSIS_REVIEWER = ReviewerActionSpec(
     user_focus="重点评估章节梗概中的事件推进、人物动机、关系状态和历史设定是否冲突。",
 )
 
+SOURCE_CHAPTER_LITERARY_REVIEWER = ReviewerActionSpec(
+    reviewer_id="source_chapter_literary_diagnostic",
+    label="分析原文",
+    target_type="source_chapter",
+    description="阅读本章原文，并结合人物档案和历史章节证据诊断文学性与人物塑造。",
+    user_focus="重点评价本章原文的文学性优缺点、人物特点体现、人物一致性，以及是否需要回读前文原文确认。",
+)
+
 DRAFT_REVIEWERS = (
     ReviewerActionSpec(
         reviewer_id="local_draft_continuity",
@@ -141,6 +149,42 @@ def artifact_reviewer_actions(
         )
         for spec in specs
     ]
+
+
+def source_chapter_reviewer_action(
+    *,
+    task_id: str,
+    target_id: str,
+    document_title_index: int,
+    chapter_title: str,
+    document_ids: list[str],
+    source_total_chars: int,
+) -> ArtifactAction:
+    payload = _reviewer_payload(
+        SOURCE_CHAPTER_LITERARY_REVIEWER,
+        task_id=task_id,
+        run_id="",
+        target_id=target_id,
+        artifact_id="",
+        artifact_kind="source_chapter",
+        artifact_path="",
+        chapter_id=f"chapter-{document_title_index}",
+        source="chapter_summary_panel",
+    )
+    payload.update(
+        {
+            "document_title_index": document_title_index,
+            "chapter_title": chapter_title,
+            "document_ids": list(document_ids),
+            "target_raw_chars": source_total_chars,
+        }
+    )
+    return ArtifactAction(
+        action="run_reviewer",
+        label=SOURCE_CHAPTER_LITERARY_REVIEWER.label,
+        payload=payload,
+        description=SOURCE_CHAPTER_LITERARY_REVIEWER.description,
+    )
 
 
 def _reviewer_payload(

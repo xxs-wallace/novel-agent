@@ -378,6 +378,11 @@ class CharacterMentionResolver:
 
 
 class OutlineSeedPacketBuilder:
+    RECENT_CHAPTER_OVERVIEW_MAX_ITEMS = 8
+    RECENT_CHAPTER_OVERVIEW_TOTAL_CHARS = 2400
+    RECENT_CHAPTER_OVERVIEW_ITEM_CHARS = 420
+    RECENT_CHAPTER_OVERVIEW_MIN_ITEM_CHARS = 120
+
     def __init__(
         self,
         *,
@@ -385,11 +390,13 @@ class OutlineSeedPacketBuilder:
         assets_repo: AssetsRepo | None = None,
         character_profiles_repo: CharacterProfilesRepo | None = None,
         documents_repo: DocumentsRepo | None = None,
+        chapters_repo: ChaptersRepo | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.assets_repo = assets_repo or AssetsRepo()
         self.character_profiles_repo = character_profiles_repo or CharacterProfilesRepo()
         self.documents_repo = documents_repo or DocumentsRepo()
+        self.chapters_repo = chapters_repo or ChaptersRepo()
 
     def build(
         self,
@@ -405,11 +412,9 @@ class OutlineSeedPacketBuilder:
         except sqlite3.OperationalError:
             assets = None
         world_path = self._asset_path(assets, "world_summary_path")
-        outline_path = self._asset_path(assets, "outline_markdown_path")
         world_text = self._read_text(world_path)
-        outline_text = self._read_text(outline_path)
         source_arc_path = self.repo_root / ".memory" / "arcs" / f"{book_id}.source_arc_map.json"
-        event_summary_path = self.repo_root / ".memory" / "outlines" / f"{book_id}.event_summaries.json"
+        outline_segments_path = self.repo_root / ".memory" / "outlines" / f"{book_id}.outline_segments.json"
         pattern_paths = [
             self.repo_root / ".memory" / "structure_patterns" / f"{book_id}.narrative_structure_patterns.json",
             self.repo_root / ".memory" / "structure_patterns" / f"{book_id}.arc_pattern_cards.json",
@@ -418,6 +423,14 @@ class OutlineSeedPacketBuilder:
             last_doc = self.documents_repo.fetch_latest_title_document(conn, book_id=book_id)
         except sqlite3.OperationalError:
             last_doc = None
+        try:
+            last_chapter = (
+                self.chapters_repo.get(conn, book_id=book_id, document_title_index=last_doc.document_title_index)
+                if last_doc is not None
+                else None
+            )
+        except sqlite3.OperationalError:
+            last_chapter = None
         boundary = self._continuation_boundary(last_doc)
 
         return OutlineSeedPacket(
@@ -431,25 +444,18 @@ class OutlineSeedPacketBuilder:
             character_index=self._character_index(conn, book_id=book_id),
             world_overview=self._world_overview(world_text),
             world_concept_index=self._world_concept_index(world_text),
-            historical_story_overview=[
-                {
-                    "work_id": book_id,
-                    "summary": _safe_excerpt(outline_text, limit=1000),
-                    "starts_at": "已入库故事开端",
-                    "ends_at": f"document_title_index={last_doc.document_title_index}" if last_doc else "",
-                }
-            ]
-            + self._event_summary_index(event_summary_path, book_id=book_id),
+            historical_story_overview=self._outline_root_overview(outline_segments_path, book_id=book_id)
+            + self._recent_chapter_overview(conn, book_id=book_id),
             current_continuation_anchor=(
                 f"已完成锚点，不得重写或要求用户决定其写法；下一章从 "
                 f"document_title_index={last_doc.document_title_index + 1} 及之后开始。"
                 f"\n{last_doc.document_title or last_doc.title or last_doc.path}: "
-                f"{_safe_excerpt(last_doc.content, limit=220)}"
+                f"{self._continuation_anchor_summary(last_doc=last_doc, last_chapter=last_chapter)}"
                 if last_doc is not None
                 else ""
             ),
             continuation_boundary=boundary,
-            optional_open_thread_index=self._open_thread_index(outline_text),
+            optional_open_thread_index=[],
             source_arc_index=self._source_arc_index(source_arc_path),
             structure_pattern_index=self._structure_pattern_index(pattern_paths),
             sources=[
@@ -467,23 +473,12 @@ class OutlineSeedPacketBuilder:
                 *(
                     [
                         TraceableSource(
-                            type="story_outline",
-                            path=str(outline_path),
+                            type="outline_segments",
+                            path=str(outline_segments_path),
                             evidence_level="structured_state",
                         )
                     ]
-                    if outline_path
-                    else []
-                ),
-                *(
-                    [
-                        TraceableSource(
-                            type="event_summaries",
-                            path=str(event_summary_path),
-                            evidence_level="structured_state",
-                        )
-                    ]
-                    if event_summary_path.exists()
+                    if outline_segments_path.exists()
                     else []
                 ),
             ],
@@ -580,6 +575,78 @@ class OutlineSeedPacketBuilder:
                 break
         return _safe_excerpt(" ".join(lines), limit=600)
 
+    def _recent_chapter_overview(self, conn: sqlite3.Connection, *, book_id: str) -> list[dict[str, Any]]:
+        try:
+            rows = self.chapters_repo.list_by_book(conn, book_id=book_id)
+        except sqlite3.OperationalError:
+            return []
+        remaining_chars = self.RECENT_CHAPTER_OVERVIEW_TOTAL_CHARS
+        newest_first_items: list[dict[str, Any]] = []
+        for row in reversed(rows[-self.RECENT_CHAPTER_OVERVIEW_MAX_ITEMS :]):
+            summary = self._chapter_memory_summary(row)
+            if not summary:
+                continue
+            summary_limit = min(self.RECENT_CHAPTER_OVERVIEW_ITEM_CHARS, remaining_chars)
+            if summary_limit < self.RECENT_CHAPTER_OVERVIEW_MIN_ITEM_CHARS:
+                break
+            summary_excerpt = _safe_excerpt(summary, limit=max(1, summary_limit - 3))
+            index = int(row["document_title_index"] or 0)
+            newest_first_items.append(
+                {
+                    "work_id": book_id,
+                    "summary_id": f"chapter-summary-{index}",
+                    "summary_level": "chapter_summary",
+                    "summary": summary_excerpt,
+                    "source_doc_ids": self._source_doc_ids_from_chapter_row(row),
+                    "source_doc_range": self._source_doc_range_from_chapter_row(row),
+                    "starts_at": f"document_title_index={index}",
+                    "ends_at": f"document_title_index={index}",
+                    "status": str(row["summary_status"] or "provisional"),
+                }
+            )
+            remaining_chars -= len(summary_excerpt)
+        return list(reversed(newest_first_items))
+
+    def _continuation_anchor_summary(self, *, last_doc: Any, last_chapter: sqlite3.Row | None) -> str:
+        if last_chapter is not None:
+            summary = self._chapter_memory_summary(last_chapter)
+            if summary:
+                return _safe_excerpt(summary, limit=700)
+        return _safe_excerpt(str(getattr(last_doc, "content", "") or ""), limit=700)
+
+    def _chapter_memory_summary(self, row: sqlite3.Row) -> str:
+        outline_update = _json_dict(row["outline_update_json"])
+        parts: list[str] = []
+        chapter_line = _normalize_text(outline_update.get("chapter_line"))
+        if chapter_line:
+            parts.append(chapter_line)
+        outline_segment = _normalize_text(outline_update.get("outline_segment"))
+        if outline_segment:
+            parts.append(outline_segment)
+        summary_short = _normalize_text(row["summary_short"])
+        if summary_short:
+            parts.append(summary_short)
+        if not parts:
+            parts.append(_safe_excerpt(str(row["summary_md"] or ""), limit=260))
+        return " ".join(part for part in parts if part)
+
+    def _source_doc_ids_from_chapter_row(self, row: sqlite3.Row) -> list[int]:
+        start = int(row["source_doc_start_id"] or 0)
+        end = int(row["source_doc_end_id"] or 0)
+        if start <= 0 or end <= 0:
+            return []
+        if end < start:
+            return [start]
+        if end - start > 512:
+            return [start, end]
+        return list(range(start, end + 1))
+
+    def _source_doc_range_from_chapter_row(self, row: sqlite3.Row) -> str:
+        source_doc_ids = self._source_doc_ids_from_chapter_row(row)
+        if not source_doc_ids:
+            return ""
+        return str(source_doc_ids[0]) if len(source_doc_ids) == 1 else f"{source_doc_ids[0]}-{source_doc_ids[-1]}"
+
     def _open_thread_index(self, outline_text: str) -> list[dict[str, Any]]:
         threads = []
         in_unresolved = False
@@ -615,38 +682,31 @@ class OutlineSeedPacketBuilder:
             if isinstance(item, Mapping)
         ][:8]
 
-    def _event_summary_index(self, path: Path, *, book_id: str) -> list[dict[str, Any]]:
+    def _outline_root_overview(self, path: Path, *, book_id: str) -> list[dict[str, Any]]:
         payload = self._load_json_payload(path)
-        segments = payload.get("segments") or []
+        roots = payload.get("roots") or []
         items: list[dict[str, Any]] = []
-        for segment in segments if isinstance(segments, list) else []:
-            if not isinstance(segment, Mapping):
+        for root in roots if isinstance(roots, list) else []:
+            if not isinstance(root, Mapping):
                 continue
-            summary = _normalize_text(segment.get("summary"))
+            summary = _normalize_text(root.get("summary"))
             if not summary:
                 continue
+            title_indexes = [int(value) for value in (root.get("source_title_indexes") or []) if str(value).isdigit()]
             items.append(
                 {
                     "work_id": book_id,
-                    "summary_id": str(segment.get("summary_id") or ""),
-                    "summary_level": str(segment.get("event_summary_level") or "event_group"),
+                    "summary_id": str(root.get("outline_root_id") or ""),
+                    "summary_level": "outline_root",
                     "summary": _safe_excerpt(summary, limit=900),
-                    "source_event_ids": [str(value) for value in (segment.get("event_ids") or [])],
-                    "source_doc_ids": [int(value) for value in (segment.get("source_doc_ids") or []) if str(value).isdigit()],
-                    "source_doc_range": str(segment.get("source_doc_range") or ""),
-                    "starts_at": self._first_title_hint(segment),
-                    "ends_at": self._last_title_hint(segment),
+                    "outline_segment_ids": [str(value) for value in (root.get("outline_segment_ids") or [])],
+                    "source_doc_ids": [int(value) for value in (root.get("source_doc_ids") or []) if str(value).isdigit()],
+                    "source_doc_range": str(root.get("source_doc_range") or ""),
+                    "starts_at": f"document_title_index={title_indexes[0]}" if title_indexes else "",
+                    "ends_at": f"document_title_index={title_indexes[-1]}" if title_indexes else "",
                 }
             )
         return items[-8:]
-
-    def _first_title_hint(self, segment: Mapping[str, Any]) -> str:
-        indexes = [int(value) for value in (segment.get("source_title_indexes") or []) if str(value).isdigit()]
-        return f"document_title_index={indexes[0]}" if indexes else ""
-
-    def _last_title_hint(self, segment: Mapping[str, Any]) -> str:
-        indexes = [int(value) for value in (segment.get("source_title_indexes") or []) if str(value).isdigit()]
-        return f"document_title_index={indexes[-1]}" if indexes else ""
 
     def _structure_pattern_index(self, paths: Sequence[Path]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -746,6 +806,14 @@ class StoryDetailResolver:
         max_chars: int,
         selection_adapter: object | None = None,
     ) -> ResearchResult:
+        recent_generated_result = self._resolve_recent_generated_chapters(
+            conn,
+            book_id=book_id,
+            request=request,
+            max_chars=max_chars,
+        )
+        if recent_generated_result is not None:
+            return recent_generated_result
         scene_card_result = self._resolve_with_scene_cards(
             conn,
             book_id=book_id,
@@ -764,6 +832,125 @@ class StoryDetailResolver:
         if btree_result is not None:
             return btree_result
         return self._resolve_legacy(conn, book_id=book_id, request=request, max_chars=max_chars)
+
+    def _resolve_recent_generated_chapters(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        request: ResearchRequest,
+        max_chars: int,
+    ) -> ResearchResult | None:
+        generated_title_indexes = self._generated_title_indexes(conn, book_id=book_id)
+        if not generated_title_indexes:
+            return None
+        summary_index = self.build_chapter_summary_index(conn, book_id=book_id)
+        generated_entries = [
+            entry
+            for entry in summary_index.entries
+            if int(entry.document_title_index) in generated_title_indexes
+        ]
+        if not generated_entries:
+            return None
+        query = str(request.query or "")
+        query_tokens = _tokenize_query(query)
+        recent_hint = self._has_recent_generated_hint(query)
+        scored: list[tuple[ChapterSummaryIndexEntry, float]] = []
+        latest_index = max(generated_title_indexes)
+        for entry in generated_entries:
+            haystack = json.dumps(
+                {
+                    "title": entry.title,
+                    "characters": entry.characters,
+                    "concepts": entry.concepts,
+                    "event_summary": entry.event_summary,
+                    "outcome": entry.outcome,
+                    "outline_update": entry.outline_update,
+                },
+                ensure_ascii=False,
+            )
+            overlap = sum(1.0 for token in query_tokens if token and token in haystack)
+            recency = max(0.0, 1.0 - (latest_index - int(entry.document_title_index)) * 0.15)
+            score = overlap + recency * (1.25 if recent_hint else 0.35)
+            if score > 0:
+                scored.append((entry, score))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: (item[1], item[0].document_title_index), reverse=True)
+        best_score = scored[0][1]
+        if best_score < (0.8 if recent_hint else 1.2):
+            return None
+        matches = [self._chapter_entry_to_story_match(entry=entry, max_chars=max_chars) for entry, _ in scored[:3]]
+        covered = self._covered_facets(matches, request.facets_needed or ["event_summary", "outcome"])
+        fact_status = "confirmed" if any(entry.summary_status == "committed" for entry, _ in scored[:1]) else "candidate"
+        sources = [
+            TraceableSource(
+                type="chapter_summary",
+                path=entry.source_document,
+                evidence_level="structured_state",
+                snippet=_safe_excerpt(entry.event_summary or entry.outcome, limit=180),
+            )
+            for entry, _ in scored[:3]
+        ]
+        detail = StoryDetailResult(
+            request_id=request.request_id,
+            matches=matches,
+            confidence=min(0.95, max(0.55, best_score / max(3.0, len(query_tokens) or 1))),
+            covered_facets=covered,
+            missing_facets=[facet for facet in (request.facets_needed or []) if facet not in covered],
+            fact_status=fact_status,  # type: ignore[arg-type]
+            sources=sources,
+        )
+        result = ResearchResult.from_story_detail(detail, request_type="story_detail", query=request.query)
+        result.results.append(
+            {
+                "memory_query_protocol": "recent_generated_chapter_summary",
+                "source_scope": "prefix_memory_generated_chapters",
+                "final_evidence_ids": {
+                    "chapter_refs": [entry.chapter_id for entry, _ in scored[:3]],
+                    "source_doc_ids": sorted({doc_id for entry, _ in scored[:3] for doc_id in entry.source_doc_ids}),
+                    "document_title_indexes": [entry.document_title_index for entry, _ in scored[:3]],
+                },
+            }
+        )
+        return result
+
+    def _generated_title_indexes(self, conn: sqlite3.Connection, *, book_id: str) -> set[int]:
+        try:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT document_title_index
+                FROM documents
+                WHERE book_id = ? AND scope = 'generated'
+                ORDER BY document_title_index
+                """,
+                (book_id,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        return {int(row["document_title_index"]) for row in rows if int(row["document_title_index"] or 0) > 0}
+
+    @staticmethod
+    def _has_recent_generated_hint(query: str) -> bool:
+        return bool(re.search(r"上一批|上一章|上一轮|上一次|上次|最近|刚刚|刚写|最新|已写回|已完成|前一章", query))
+
+    def _chapter_entry_to_story_match(self, *, entry: ChapterSummaryIndexEntry, max_chars: int) -> dict[str, Any]:
+        summary = entry.event_summary
+        return {
+            "event_id": f"chapter-{entry.document_title_index}",
+            "title": entry.title,
+            "summary": _safe_excerpt(summary, limit=max(160, max_chars // 2)),
+            "outcome": _safe_excerpt(entry.outcome or entry.event_summary, limit=max(120, max_chars // 3)),
+            "characters": list(entry.characters),
+            "concepts": list(entry.concepts),
+            "time_hint": f"document_title_index={entry.document_title_index}",
+            "source_doc_ids": list(entry.source_doc_ids),
+            "source_doc_range": entry.source_doc_range,
+            "source_path": entry.source_document,
+            "event_summary_level": "chapter_summary",
+            "status": entry.summary_status,
+            "memory_query_protocol": "recent_generated_chapter_summary",
+        }
 
     def _resolve_with_scene_cards(
         self,
@@ -1180,8 +1367,6 @@ class StoryDetailResolver:
                     fact_status="confirmed" if entry.summary_status == "committed" else "candidate",
                 )
             )
-            for event in self._timeline_events_from_entry(entry):
-                events.append(event)
         return HistoricalOutlineEventIndex(events=events)
 
     def _source_doc_ids_from_chapter_row(self, row: sqlite3.Row) -> list[int]:
@@ -1200,38 +1385,6 @@ class StoryDetailResolver:
         if not source_doc_ids:
             return ""
         return str(source_doc_ids[0]) if len(source_doc_ids) == 1 else f"{source_doc_ids[0]}-{source_doc_ids[-1]}"
-
-    def _timeline_events_from_entry(self, entry: ChapterSummaryIndexEntry) -> list[HistoricalOutlineEventCard]:
-        events: list[HistoricalOutlineEventCard] = []
-        outline_update = getattr(entry, "outline_update", None)
-        if not isinstance(outline_update, Mapping):
-            return events
-        for index, item in enumerate(outline_update.get("timeline_events") or [], start=1):
-            if not isinstance(item, Mapping):
-                continue
-            event_id = _normalize_text(item.get("event_id")) or f"chapter-{entry.document_title_index}:event-{index:02d}"
-            label = _normalize_text(item.get("label")) or f"chapter {entry.document_title_index} event {index}"
-            summary = _normalize_text(item.get("summary")) or label
-            source_doc_ids = [int(value) for value in item.get("source_doc_ids") or [] if str(value).isdigit()]
-            source_doc_range = _normalize_text(item.get("source_doc_range"))
-            events.append(
-                HistoricalOutlineEventCard(
-                    event_id=event_id,
-                    title=label,
-                    characters=[str(value) for value in item.get("participants") or []],
-                    concepts=entry.concepts,
-                    event_intent=summary,
-                    outcome=_normalize_text(item.get("outcome")),
-                    time_hint=f"document_title_index={entry.document_title_index}",
-                    source_chapter_id=entry.chapter_id,
-                    source_path=entry.source_document,
-                    source_doc_ids=source_doc_ids,
-                    source_doc_range=source_doc_range,
-                    event_summary_level=_normalize_text(item.get("event_summary_level")) or "chapter_event",
-                    fact_status="confirmed" if entry.summary_status == "committed" else "candidate",
-                )
-            )
-        return events
 
     def _event_intent(self, query: str) -> str:
         if re.search(r"信任|关系|冲突", query):
@@ -1898,7 +2051,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             },
             fallback={"requests": fallback_requests},
         )
-        requests = payload.get("requests")
+        requests = self._request_items_from_model_payload(payload)
         if not isinstance(requests, list):
             raise RuntimeError("Outline research model returned invalid requests field")
         normalized = []
@@ -1916,6 +2069,25 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             if desired_actions:
                 raise RuntimeError("Outline research model omitted required story_detail request")
         return normalized
+
+    def _request_items_from_model_payload(self, payload: Mapping[str, Any]) -> object:
+        requests = payload.get("requests")
+        if isinstance(requests, list):
+            return requests
+        if isinstance(requests, Mapping):
+            for key in ("items", "requests", "research_requests"):
+                nested = requests.get(key)
+                if isinstance(nested, list):
+                    return nested
+        for key in ("research_requests", "next_requests", "request_items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, Mapping):
+                nested = value.get("items")
+                if isinstance(nested, list):
+                    return nested
+        return requests
 
     def decide_sufficiency(
         self,

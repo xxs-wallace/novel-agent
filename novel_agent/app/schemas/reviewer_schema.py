@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = "1.0"
 
-TARGET_TYPES = {"draft", "synopsis", "outline", "chapter_brief", "planning_note", "raw_text"}
+TARGET_TYPES = {"draft", "synopsis", "outline", "chapter_brief", "planning_note", "raw_text", "source_chapter"}
 PURPOSES = {"writer_assist", "benchmark", "user_review", "diagnostic"}
 LEAKAGE_GUARDS = {"prefix_only", "benchmark_authorized_reference", "user_authorized", "none"}
 TOOLS = {"memory_query", "kb_retrieval", "artifact_read"}

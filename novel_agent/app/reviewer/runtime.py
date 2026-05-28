@@ -327,12 +327,31 @@ class ReviewerRuntime:
 
     def _tool_call_from_request(self, data: Mapping[str, Any], *, index: int) -> ReviewerToolCall:
         tool = str(data.get("tool") or "").strip()
+        budget = dict(data.get("budget") or {}) if isinstance(data.get("budget"), Mapping) else {}
+        for key in (
+            "request_type",
+            "type",
+            "expected_evidence",
+            "priority",
+            "expected_depth",
+            "name",
+            "concept",
+            "chapter_refs",
+            "document_ids",
+            "source_doc_ids",
+            "read_reason",
+            "expected_confirmation",
+            "affects_analysis",
+            "excerpt_focus",
+        ):
+            if key in data and key not in budget:
+                budget[key] = data[key]
         return ReviewerToolCall(
             tool_call_id=str(data.get("tool_call_id") or f"tool-call-{index:03d}"),
             tool=tool,
             intent=str(data.get("intent") or data.get("query") or data.get("expected_evidence") or ""),
             query=str(data.get("query") or data.get("intent") or ""),
-            budget=dict(data.get("budget") or {}) if isinstance(data.get("budget"), Mapping) else {},
+            budget=budget,
             reason_zh=str(data.get("reason_zh") or data.get("notes_zh") or ""),
         )
 

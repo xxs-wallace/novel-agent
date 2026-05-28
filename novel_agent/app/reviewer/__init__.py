@@ -6,6 +6,7 @@ from .reviewers import (
     LocalDraftContinuityReviewer,
     MemoryDraftConsistencyReviewer,
     OutlinePlotDevelopmentReviewer,
+    SourceChapterLiteraryDiagnosticReviewer,
     default_reviewers,
 )
 from .runtime import ReviewerRuntime
@@ -30,5 +31,6 @@ __all__ = [
     "ReviewerRegistry",
     "ReviewerRuntime",
     "ReviewerSuite",
+    "SourceChapterLiteraryDiagnosticReviewer",
     "default_reviewers",
 ]

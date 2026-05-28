@@ -891,9 +891,132 @@ def test_chapter_acceptance_action_runs_writer_workflow_action(tmp_path: Path) -
 
     asyncio.run(run_action())
 
-    assert calls
-    assert calls[0]["action"] == "accept_chapter"
+    assert [call["action"] for call in calls] == ["accept_chapter", "approve_writeback"]
     assert calls[0]["payload"]["user_feedback"] == "这一章可以接受。"  # type: ignore[index]
+
+
+def test_chapter_acceptance_surfaces_next_chapter_draft_research_questions(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _DraftQuestionFacade(_FakeWriterFacade):
+        def writer_action(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            action = str(kwargs.get("action") or "")
+            run_dir = self.tmp_path / "runs" / "writer" / "run-1"
+            if action == "prepare_execution":
+                _write_writer_state(
+                    tmp_path=self.tmp_path,
+                    task_id="book-one",
+                    run_id="run-1",
+                    stage="freeze_d",
+                    pending_checkpoint=False,
+                )
+                state_path = run_dir / "workflow_state.json"
+                state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+                state_doc["data"]["current_chapter_id"] = "batch01-ch02"
+                state_doc["data"]["terminal_stage"] = None
+                state_path.write_text(json.dumps(state_doc, ensure_ascii=False), encoding="utf-8")
+                return {"status": "prepared", "chapter_id": "batch01-ch02"}
+            if action == "execute_current_chapter":
+                question_path = run_dir / "draft_research_question_set.json"
+                question_path.write_text(
+                    json.dumps(
+                        {
+                            "data": {
+                                "schema_version": "1.0",
+                                "question_set_id": "draft-research-run-1-questions",
+                                "run_id": "run-1",
+                                "stage": "draft_research_user_input",
+                                "status": "pending",
+                                "artifact_path": str(question_path),
+                                "questions": [{"question_id": "q1", "prompt": "是否需要读取上一章原文？", "required": True}],
+                                "actions": {
+                                    "submit": "submit_draft_research_answers",
+                                    "defer": "defer_draft_research_answers",
+                                },
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                _write_writer_state(
+                    tmp_path=self.tmp_path,
+                    task_id="book-one",
+                    run_id="run-1",
+                    stage="draft_research_user_input",
+                    artifact_path=str(question_path),
+                )
+                state_path = run_dir / "workflow_state.json"
+                state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+                state_doc["data"]["current_chapter_id"] = "batch01-ch02"
+                state_path.write_text(json.dumps(state_doc, ensure_ascii=False), encoding="utf-8")
+                return {
+                    "status": "draft_research_not_ready",
+                    "draft_research_status": "needs_user_input",
+                    "draft_research_decision": {
+                        "status": "needs_user_input",
+                        "question_set_id": "draft-research-run-1-questions",
+                        "next_action": "ask_user",
+                    },
+                }
+            return {"status": "waiting_for_review", "run_id": kwargs.get("run_id", "")}
+
+    fake_facade = _DraftQuestionFacade(tmp_path=tmp_path, calls=calls)
+    run_dir = tmp_path / "runs" / "writer" / "run-1"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="wait_chapter_acceptance",
+        artifact_path=str(run_dir / "draft.md"),
+        pending_checkpoint=True,
+    )
+    state_path = run_dir / "workflow_state.json"
+    state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+    state_doc["data"]["current_chapter_id"] = "batch01-ch01"
+    state_path.write_text(json.dumps(state_doc, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "chapter_package.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "chapters": [
+                        {"chapter_id": "batch01-ch01", "title": "第一章"},
+                        {"chapter_id": "batch01-ch02", "title": "第二章"},
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action_service, job_manager = _writer_action_service(tmp_path=tmp_path, fake_facade=fake_facade)
+
+    async def run_action() -> None:
+        result = await action_service.execute(
+            task_id="book-one",
+            request=WebActionRequest(action="accept_chapter", payload={"feedback": "这一章可以接受。"}),
+        )
+        assert result.job is not None
+        summary = await job_manager.wait(result.job.job_id, timeout=4.0)
+        assert summary.status == "succeeded"
+
+    asyncio.run(run_action())
+
+    assert [call["action"] for call in calls] == [
+        "accept_chapter",
+        "approve_writeback",
+        "prepare_execution",
+        "execute_current_chapter",
+    ]
+    messages = action_service.session_service.messages("book-one")
+    rendered = json.dumps(
+        [message.model_dump() if hasattr(message, "model_dump") else message.dict() for message in messages],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert "正文研究需要你补充几个关键问题。" in rendered
+    assert "writer_completion_next_step" not in rendered
 
 
 def test_writeback_artifact_approval_maps_to_writeback_action(tmp_path: Path) -> None:
@@ -914,7 +1037,7 @@ def test_writeback_artifact_approval_maps_to_writeback_action(tmp_path: Path) ->
             task_id="book-one",
             request=WebActionRequest(action="approve_writer_artifact", payload={"run_id": "run-1"}),
         )
-        assert result.message == "已确认写回续写记忆。"
+        assert result.message == "已提交本章正文并更新续写记忆。"
         assert result.job is not None
         summary = await job_manager.wait(result.job.job_id, timeout=2.0)
         assert summary.status == "succeeded"
@@ -1201,6 +1324,68 @@ def test_submit_outline_research_answers_runs_structured_writer_bridge(tmp_path:
     assert payload["user_answers"] == [{"question_id": "q1", "answer_text": "不是新增人物，本轮不加入。"}]  # type: ignore[index]
 
 
+def test_submit_draft_research_answers_runs_structured_writer_bridge(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=calls)
+    run_dir = tmp_path / "runs" / "writer" / "run-1"
+    artifact_path = run_dir / "draft_research_question_set.json"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="draft_research_user_input",
+        artifact_path=str(artifact_path),
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "schema_version": "1.0",
+                    "question_set_id": "draft-research-run-1-questions",
+                    "run_id": "run-1",
+                    "stage": "draft_research_user_input",
+                    "status": "pending",
+                    "questions": [{"question_id": "q1", "prompt": "是否需要读取上一章原文？", "required": True}],
+                    "actions": {
+                        "submit": "submit_draft_research_answers",
+                        "defer": "defer_draft_research_answers",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action_service, job_manager = _writer_action_service(tmp_path=tmp_path, fake_facade=fake_facade)
+
+    async def run_action() -> None:
+        result = await action_service.execute(
+            task_id="book-one",
+            request=WebActionRequest(
+                action="submit_draft_research_answers",
+                payload={
+                    "run_id": "run-1",
+                    "question_set_id": "draft-research-run-1-questions",
+                    "source_message_id": "message-123",
+                    "answer_text": "请读取上一章正文，重点确认人物语气。",
+                    "user_answers": [{"question_id": "q1", "answer_text": "请读取上一章正文，重点确认人物语气。"}],
+                },
+            ),
+        )
+        assert result.job is not None
+        summary = await job_manager.wait(result.job.job_id, timeout=2.0)
+        assert summary.status == "succeeded"
+
+    asyncio.run(run_action())
+
+    assert calls
+    assert calls[0]["action"] == "continue_after_draft_research_input"
+    payload = calls[0]["payload"]
+    assert payload["question_set_id"] == "draft-research-run-1-questions"  # type: ignore[index]
+    assert payload["source_message_id"] == "message-123"  # type: ignore[index]
+    assert payload["answer_text"] == "请读取上一章正文，重点确认人物语气。"  # type: ignore[index]
+
+
 def test_defer_outline_research_answers_keeps_waiting_without_writer_action(tmp_path: Path) -> None:
     calls: list[dict[str, object]] = []
     fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=calls)
@@ -1289,7 +1474,52 @@ def test_web_session_replays_pending_outline_research_question_card(tmp_path: Pa
     assert len(messages) == 1
     assert messages[0].writer_question_set is not None
     assert messages[0].writer_question_set.question_set_id == "outline-research-run-1-needs-answer"
+    assert messages[0].writer_question_set.submit_action == "submit_outline_research_answers"
+    assert messages[0].writer_question_set.defer_action == "defer_outline_research_answers"
     assert messages[0].content == "大纲研究需要你补充几个关键问题。"
+
+
+def test_web_session_replays_pending_draft_research_question_card(tmp_path: Path) -> None:
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="draft_research_user_input",
+        artifact_path=str(tmp_path / "runs" / "writer" / "run-1" / "draft_research_question_set.json"),
+    )
+    question_path = tmp_path / "runs" / "writer" / "run-1" / "draft_research_question_set.json"
+    question_path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "schema_version": "1.0",
+                    "question_set_id": "draft-research-run-1-questions",
+                    "run_id": "run-1",
+                    "stage": "draft_research_user_input",
+                    "status": "pending",
+                    "source_artifact_id": "writer:run-1:draft-research",
+                    "artifact_path": str(question_path),
+                    "questions": [{"question_id": "q1", "prompt": "是否需要展开前章正文？", "required": True}],
+                    "actions": {
+                        "submit": "submit_draft_research_answers",
+                        "defer": "defer_draft_research_answers",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+
+    messages = session.messages("book-one")
+
+    assert len(messages) == 1
+    assert messages[0].writer_question_set is not None
+    assert messages[0].writer_question_set.question_set_id == "draft-research-run-1-questions"
+    assert messages[0].writer_question_set.submit_action == "submit_draft_research_answers"
+    assert messages[0].content == "正文研究需要你补充几个关键问题。"
 
 
 def test_web_session_replays_writer_artifact_review_card(tmp_path: Path) -> None:
@@ -1466,6 +1696,69 @@ def test_web_session_recovers_orphan_writer_draft_as_review_card(tmp_path: Path)
     assert "没有可恢复的问题或审阅卡" not in messages[0].content
 
 
+def test_web_session_does_not_recover_orphan_draft_while_generating(tmp_path: Path) -> None:
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
+    run_dir = tmp_path / "runs" / "writer" / "run-1"
+    draft_path = run_dir / "draft.md"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="freeze_d",
+        pending_checkpoint=False,
+    )
+    state_path = run_dir / "workflow_state.json"
+    state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+    state_doc["data"]["agent_state"] = "generating_draft"
+    state_doc["data"]["current_state"] = "generating_draft"
+    state_path.write_text(json.dumps(state_doc, ensure_ascii=False), encoding="utf-8")
+    draft_path.write_text("上一版草稿仍在等待新版覆盖。", encoding="utf-8")
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+
+    messages = session.messages("book-one")
+
+    rendered = json.dumps(
+        [message.model_dump() if hasattr(message, "model_dump") else message.dict() for message in messages],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert "请决定当前章节草稿" not in rendered
+    assert all(message.writer_draft_review is None for message in messages)
+
+
+def test_web_session_does_not_recover_stale_previous_chapter_draft(tmp_path: Path) -> None:
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
+    run_dir = tmp_path / "runs" / "writer" / "run-1"
+    draft_path = run_dir / "draft.md"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="freeze_d",
+        pending_checkpoint=False,
+    )
+    state_path = run_dir / "workflow_state.json"
+    state_doc = json.loads(state_path.read_text(encoding="utf-8"))
+    state_doc["data"]["current_chapter_id"] = "ch-2"
+    state_path.write_text(json.dumps(state_doc, ensure_ascii=False), encoding="utf-8")
+    draft_path.write_text("上一章旧草稿。", encoding="utf-8")
+    (run_dir / "continuity_report.json").write_text(
+        json.dumps({"data": {"state_delta": {"chapter_id": "ch-1"}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+
+    messages = session.messages("book-one")
+
+    rendered = json.dumps(
+        [message.model_dump() if hasattr(message, "model_dump") else message.dict() for message in messages],
+        ensure_ascii=False,
+        default=str,
+    )
+    assert "上一章旧草稿" not in rendered
+    assert "章节草稿决策" not in rendered
+
+
 def test_web_session_recovers_incomplete_writer_run_without_gate(tmp_path: Path) -> None:
     fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
     _write_writer_state(
@@ -1479,8 +1772,8 @@ def test_web_session_recovers_incomplete_writer_run_without_gate(tmp_path: Path)
     messages = session.messages("book-one")
 
     assert len(messages) == 1
-    assert "没有可恢复的问题或审阅卡" in messages[0].content
-    assert messages[0].decision_cards[0].title == "没有可恢复审阅点"
+    assert "还没有生成可审阅的大纲或问题卡" in messages[0].content
+    assert messages[0].decision_cards[0].title == "续写任务未生成可审阅内容"
     assert messages[0].decision_cards[0].actions == []
 
 
@@ -1586,8 +1879,56 @@ def test_web_session_starts_new_batch_after_last_chapter_completion(tmp_path: Pa
     card = messages[0].decision_cards[0]
     assert card.title == "本批次已写完"
     assert card.actions[0]["action"] == "start_writer"
-    assert card.actions[0]["label"] == "开始新一轮规划"
+    assert card.actions[0]["label"] == "提交下一批续写规划"
+    assert card.actions[0]["requires_input"] is True
     assert card.actions[0]["payload"]["requested_from"] == "writer_new_batch"
+
+
+def test_task_progress_after_last_batch_prompts_new_plan_submission(tmp_path: Path) -> None:
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
+    run_dir = tmp_path / "runs" / "writer" / "run-1"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="completed",
+        pending_checkpoint=False,
+    )
+    (run_dir / "workflow_state.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "run_id": "run-1",
+                    "book_id": "book-one",
+                    "current_stage": "completed",
+                    "current_chapter_id": "chapter-11",
+                    "pending_checkpoint": None,
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "chapter_package.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "chapters": [
+                        {"chapter_id": "chapter-10", "title": "上一章"},
+                        {"chapter_id": "chapter-11", "title": "最后一章"},
+                    ]
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+
+    progress = session.task_progress("book-one")
+
+    assert progress.step == "继续提交下一批章节的续写规划"
+    assert progress.next_action == "在输入框补充下一批方向后开始新一轮规划"
 
 
 def test_writer_question_answer_message_offers_submit_action(tmp_path: Path) -> None:
@@ -1702,6 +2043,60 @@ def test_web_session_offers_next_resume_after_previous_review_gate(tmp_path: Pat
 
     assert messages[-1].decision_cards[0].title == "本批剧情大纲已确认"
     assert messages[-1].decision_cards[0].actions[0]["label"] == "生成章节标题与梗概"
+
+
+def test_writer_replan_result_surfaces_generate_draft_resume_card(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    class _ReplanFacade(_FakeWriterFacade):
+        def writer_action(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(kwargs)
+            if kwargs.get("action") == "replan_chapter":
+                _write_writer_state(
+                    tmp_path=self.tmp_path,
+                    task_id="book-one",
+                    run_id="run-1",
+                    stage="freeze_d",
+                    pending_checkpoint=False,
+                )
+                return {"status": "ready_for_execution", "run_id": "run-1"}
+            return {"status": "waiting_for_review", "run_id": "run-1"}
+
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="wait_chapter_acceptance",
+        pending_checkpoint=False,
+    )
+    fake_facade = _ReplanFacade(tmp_path=tmp_path, calls=calls)
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+    job_manager = JobManager(repo_root=tmp_path)
+    action_service = WebActionService(
+        session_service=session,
+        job_manager=job_manager,
+        artifact_view_service=ArtifactViewService(repo_root=tmp_path, facade=fake_facade),
+    )
+
+    async def run_action() -> str:
+        result = await action_service.execute(
+            task_id="book-one",
+            request=WebActionRequest(action="replan_chapter", payload={"feedback_text": "重写梗概后继续生成草稿。"}),
+        )
+        assert result.job is not None
+        summary = await job_manager.wait(result.job.job_id, timeout=2.0)
+        assert summary.status == "succeeded"
+        return result.job.job_id
+
+    job_id = asyncio.run(run_action())
+
+    terminal_event = job_manager.events(job_id)[-1]
+    assert terminal_event.kind == "succeeded"
+    assert terminal_event.payload["decision_cards"][0]["actions"][0]["action"] == "resume"
+    assert terminal_event.payload["decision_cards"][0]["actions"][0]["label"] == "生成当前章草稿"
+    messages = session.messages("book-one")
+    assert messages[-1].decision_cards[0].actions[0]["action"] == "resume"
+    assert messages[-1].decision_cards[0].actions[0]["label"] == "生成当前章草稿"
 
 
 def test_resume_action_replays_writer_review_card_without_workflow_call(tmp_path: Path) -> None:
@@ -1878,7 +2273,67 @@ def test_resume_action_does_not_reoffer_creative_kb_when_current_db_is_ready(tmp
 
     assert calls == []
     messages = action_service.session_service.messages("book-one")
-    assert messages[-1].decision_cards[0].title == "没有可恢复审阅点"
+    assert messages[-1].decision_cards[0].title == "续写任务未生成可审阅内容"
+
+
+def test_resume_action_ignores_optional_modeling_checks_when_missing_steps_empty(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=calls)
+    run_dir = tmp_path / "runs" / "writer" / "run-optional"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "workflow_state.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "run_id": "run-optional",
+                    "book_id": "book-one",
+                    "current_stage": "freeze_a",
+                    "pending_checkpoint": None,
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "modeling_status.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "book_id": "book-one",
+                    "ready_for_continuation": True,
+                    "missing_modeling_steps": [],
+                    "checks": [
+                        {"name": "documents_index", "ready": True},
+                        {"name": "character_profiles", "ready": True},
+                        {"name": "story_outline", "ready": True},
+                        {"name": "world_summary", "ready": True},
+                        {"name": "creative_kb", "ready": True},
+                        {"name": "source_arc_map", "ready": False},
+                        {"name": "narrative_structure_patterns", "ready": False},
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action_service, job_manager = _writer_action_service(tmp_path=tmp_path, fake_facade=fake_facade)
+
+    async def run_action() -> None:
+        result = await action_service.execute(
+            task_id="book-one",
+            request=WebActionRequest(action="resume", payload={"run_id": "run-optional"}),
+        )
+        assert result.job is not None
+        summary = await job_manager.wait(result.job.job_id, timeout=2.0)
+        assert summary.status == "succeeded"
+
+    asyncio.run(run_action())
+
+    assert calls
+    assert calls[0]["action"] == "prepare_batch_plan"
+    messages = action_service.session_service.messages("book-one")
+    assert all("源作品篇章地图" not in message.content for message in messages)
 
 
 def test_latest_writer_state_ignores_cancelled_start_writer_run(tmp_path: Path) -> None:

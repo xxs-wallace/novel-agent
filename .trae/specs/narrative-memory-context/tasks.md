@@ -1,33 +1,15 @@
 # Tasks
 
-这份清单已从历史实现账本压缩为当前仍需要跟踪的任务。已经落地且代码仍在仓库中的内容合并到“已落地能力”中，不再逐条保留旧任务编号。
+这份清单只保留当前仍需要跟踪的任务。已经完成的历史实现项不在此文件中继续列账。
 
 ## Status Legend
 
-- `已落地`：当前仓库代码已具备主要能力，后续只作为背景能力引用
 - `部分落地`：已有基础实现，但 contract、schema、测试或服务边界仍需收口
 - `待处理`：设计明确，但当前仓库尚未形成稳定实现
-
-## 已落地能力
-
-- `Memory` 模块边界已明确：本层负责事实型长期上下文，不负责桥段去重、代表片段选择、SceneBrief 检索或 rerank。
-- SQLite/Markdown 基础载体已存在：`documents`、`chapters`、`character_profiles`、`reading_progress`、`book_assets`，以及世界观、世界观概要、故事大纲 Markdown 资产。
-- Close-read 主流程已落地：`CloseReadRunner` 读取 `documents`，使用 `ChapterAssemblerService` 按 `document_title_index` 组装章节批次，支持预算切批、fallback、debug 导出和 `reading_progress` 恢复。
-- 人物档案更新链路已落地：`CharacterProfileService`、`CharacterProfilesRepo` 支持别名、发言状态、人物性证据、近期行动、关系、出现范围、重要性和事实型摘要合并。
-- 世界观与大纲更新链路已落地：`WorldStateService`、`OutlineService` 支持世界观 section 合并、概要重压缩、大纲增量更新与长度裁剪。
-- Character Evidence 链路已落地但当前实现按单 document 运行：`CharacterEvidenceBatchAssemblerService` 保留 batch 输入结构，`CloseReadRunner` 对章节批次内每个 document 单独运行 `character_evidence`，再汇合给 `MemoryCandidateService` 和 character reduce。
-- Memory Candidate / Reduce 链路已落地：`MemoryCandidateService` 汇合章节摘要、人物证据和世界观证据，过滤低置信伪人物，并生成人物/世界观更新候选。
-- 上下文装配已落地：`ContextAssemblyService` 输出章节摘要、世界观概要、相关人物档案、故事大纲、缺失信号，并可兼容读取旧 `SourceArcMap` 片段。
-- Writer 边界已对齐：Writer 常规输入消费已沉淀的 Memory 资产，不直接消费 Character Evidence 原始输出。
-- 旧 `SourceArcMap` 已有实现：`SourceArcMappingService`、`PlotSummaryUnitCompressionService`、`build_source_arc_map` 支持 close-read 后生成 `.memory/arcs/<book_id>.source_arc_map.json` 与 Markdown debug 导出；该路径保留为 legacy / fallback，标准新链路改由 Narrative Indexer 的 SceneCards 聚合生成 SourceArcMap。
-- 已有测试覆盖人物档案合并、上下文装配 contract、Character Evidence 汇合、章节调度、旧 SourceArcMap 生成/压缩/查询、Writer 对 Memory 资产的消费。
 
 ## 当前有效任务
 
 - [ ] Task 1: 收口章节摘要与故事大纲的稳定 schema（部分落地）
-  - [x] 当前 `chapters` 已保存 `summary_md`、`summary_short`、`summary_intermediate_json`、`importance_score`、`related_chapters_json`、`mentioned_characters_json`、`world_update_json`、`outline_update_json`
-  - [x] 当前故事大纲 Markdown 已可增量更新并做长度裁剪
-  - [x] `spec.md` / `design.md` 已明确需要区分 `provisional` 与 `committed`
   - [ ] 设计并实现 `summary_status`、`summary_evidence_window`、`summary_target_range` 的持久化方案
   - [ ] 设计并实现 `outline_status`、`outline_evidence_window`、`outline_target_range` 的持久化方案
   - [ ] 兼容旧数据：缺失状态字段的旧章节摘要和旧大纲片段默认视为 `provisional`
@@ -35,41 +17,32 @@
   - [ ] 强化 `related_chapters`、章节重要性、弱支线淘汰的后处理规则
 
 - [ ] Task 2: 拆分 Close-read 持久化边界（部分落地）
-  - [x] 当前 `CloseReadRunner` 已完成章节摘要、人物档案、世界观、大纲、进度的完整写回
   - [ ] 将 `_persist_batch()` 中的持久化逻辑拆为独立 Memory Update service，降低 runner 体积
   - [ ] 定义 Chapter Summary、Character Evidence、Memory Candidate、Global Memory、Memory Update 之间的运行顺序与失败恢复策略
   - [ ] 保持现有 dry-run、fallback、debug markdown 和旧数据兼容读取
 
 - [ ] Task 3: 明确 SQLite 与 Markdown 资产职责边界（部分落地）
-  - [x] 当前 SQLite 保存结构化运行结果，Markdown 保存世界观、概要、大纲和 legacy SourceArcMap debug 资产
   - [ ] 在文档与接口中固化 SQLite / Markdown 的读写职责、source of truth 和重建策略
   - [ ] 评估是否需要 alias、关系、证据级别、source arc 的辅助表
   - [ ] 若新增证据或调试记录，不保存 offset、原文连续子串或 doc 级人物证据索引
 
 - [ ] Task 4: 强化超长章节拆批与恢复测试（部分落地）
-  - [x] 当前 `ChapterAssemblerService` 支持整章优先、超预算切批、从 `reading_progress` 继续处理
-  - [x] 当前 `_persist_batch()` 支持 `summary_intermediate_json` 与完整章节二次合并
   - [ ] 明确整章输入、跨章合批、超长章节拆批的稳定阈值 contract
   - [ ] 增加覆盖整章输入、跨章预算合批、超长章节拆批、中间摘要合并的单元测试
   - [ ] 增加 `reading_progress` 恢复测试，覆盖 checkpoint token 与 `last_completed_doc_id`
 
 - [ ] Task 5: 对齐 Character Evidence contract 与当前实现（部分落地）
-  - [x] 当前代码按单 document 运行 Character Evidence，并将多个 document 结果汇合为 `character_evidence_batches`
-  - [x] 当前输出包含 `is_speaking_character`、`personhood_evidence`、`activity_or_state_evidence`、`relationship_evidence`、`source_doc_ids`、`source_title_indexes`
   - [ ] 清理 spec/design 中仍暗示“多 document batch 直接由模型一次处理”的旧描述，改成当前 per-document evidence + batch 汇合语义，或重新实现真正的多 document batch
   - [ ] 将 `prompt_io_schema.py` 中 Character Evidence dataclass 与 prompt / runner 实际输出保持一致
   - [ ] 保持不输出 offset、原文连续子串和逐 doc_id 人物列表的约束
 
 - [ ] Task 6: 收口旧 SourceArcMap 与 Narrative Indexer Handoff 边界（部分落地）
-  - [x] 旧 `SourceArcMap` JSON/Markdown 生成、压缩窗口、上下文装配片段选择已实现
-  - [x] Writer 能识别可选 `memory.source_arc_map` 缺失与就绪状态
   - [ ] 将旧 `SourceArcMap` 标注为 legacy / fallback 输入，避免它继续作为 Memory 层标准结构判断路径
   - [ ] 定义 `NarrativeIndexerHandoffService`，输出 Scene Indexer 所需的连续 raw window、前后压缩梗概和 trace
   - [ ] 明确 Context Assembly 中的 source arc 片段来自 Narrative Indexer 生成结果；旧文件仅兼容读取
   - [ ] 增加端到端验收：`documents -> close-read -> handoff bundle -> Narrative Indexer -> context assembly readiness`
 
 - [ ] Task 7: 补齐端到端测试与文档验收（部分落地）
-  - [x] 已有人物档案、上下文装配、legacy SourceArcMap、Character Evidence 汇合等局部测试
   - [ ] 增加端到端测试：`documents -> chapter summaries -> memory updates -> context assembly`
   - [ ] 增加世界观 schema / 概要压缩测试
   - [ ] 增加章节摘要与整书大纲 schema 测试
@@ -131,7 +104,11 @@
   - [ ] 从连续 chapter summaries 直接压缩生成 `outline_segment`，不得先生成 `timeline_events`
   - [ ] 实现 `outline_segment` 滚动压缩服务：在存在 N 个未覆盖 chapter summaries 时，直接生成连续自然语言摘要
   - [ ] 支持多 `outline_segment` Page；每个 Page 目标覆盖配置指定的连续 N 个 document/chapter 或约 10-20 万字原文
-  - [ ] 人物档案新增人物维度关键经历索引，但其结构应从 Narrative Indexer 的 character/event cards 派生，不依赖 outline `timeline_events`
+  - [ ] 人物档案新增持久化 `profile_brief`，并把 `recent_activity_json` 定义为热层增量队列、`story_events_json` 定义为长期经历索引
+  - [ ] 实现 Brief Compact Gate：按当前窗口 document 覆盖率、连续出场、发言/行动/关系证据和重大变化类型输出 `append_delta` / `needs_brief_compact` / `needs_full_profile_compact` / `index_only`
+  - [ ] Character Reduce 输入改为持久化 `profile_brief` + 当前 evidence + 当前 outline segment / 章节短摘要；不得生成或依赖每批临时完整档案压缩上下文
+  - [ ] 所有 profile / experience 压缩必须调用模型抽象概括；生产路径禁止用 `clamp_text`、取前 N 条、取后 N 条或切句硬截断伪装压缩
+  - [ ] `relationships_json.status_summary` 收紧为短关系状态，剧情因果进入 `recent_activity_json` / `story_events_json`
   - [ ] `mentioned_doc_ids` / `speaking_doc_ids` 只作为底层倒排索引，不作为 Writer 理解人物过往的主要入口
   - [ ] 增加 close-read 索引构建测试，覆盖 outline segment doc range、chapter range、人物关键经历索引和旧数据回退
 

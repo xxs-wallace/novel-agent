@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from novel_agent.app.reviewer.target_resolver import ReviewTargetResolver
 from novel_agent.app.reviewer.tools import ReviewerArtifactTool, ReviewerKBTool, ReviewerMemoryTool
 from novel_agent.app.schemas.creative_kb_schema import (
@@ -87,13 +89,19 @@ class _FakeInquiryBroker:
                     sources=[{"card_id": "scene-card-1", "card_type": "narrative_scene"}],
                     trace=[{"operation": "narrative_index_search", "consumer": "reviewer"}],
                 ),
-                EvidenceBundle(
-                    request_id=requests[1].request_id,
-                    request_type=requests[1].request_type,
-                    query=requests[1].query,
-                    evidence_items=[{"page_id": "outline-segment-1", "page_type": "outline_segment", "summary": "连续剧情压缩"}],
-                    sources=[{"path": "memory:outline_segment:outline-segment-1", "type": "outline_segment"}],
-                    trace=[{"operation": "narrative_inquiry_outline_segment_scan"}],
+                *(
+                    [
+                        EvidenceBundle(
+                            request_id=requests[1].request_id,
+                            request_type=requests[1].request_type,
+                            query=requests[1].query,
+                            evidence_items=[{"page_id": "outline-segment-1", "page_type": "outline_segment", "summary": "连续剧情压缩"}],
+                            sources=[{"path": "memory:outline_segment:outline-segment-1", "type": "outline_segment"}],
+                            trace=[{"operation": "narrative_inquiry_outline_segment_scan"}],
+                        )
+                    ]
+                    if len(requests) > 1
+                    else []
                 ),
             ],
             {"total_requests_used": 2, "raw_requests_used": 0},
@@ -145,6 +153,39 @@ def test_reviewer_memory_tool_blocks_unauthorized_memory_query() -> None:
     assert result.status == "blocked"
     assert fake_service.calls == []
     assert "未授权" in result.error
+
+
+def test_reviewer_memory_tool_honors_explicit_raw_excerpt_request_type() -> None:
+    fake_broker = _FakeInquiryBroker()
+    tool = ReviewerMemoryTool(inquiry_broker=fake_broker)  # type: ignore[arg-type]
+    call = ReviewerToolCall(
+        tool_call_id="call-memory",
+        tool="memory_query",
+        intent="回读历史原文",
+        query="确认人物此前面对同类冲突时的语气",
+        budget={
+            "request_type": "raw_excerpt",
+            "document_ids": [1, 2],
+            "read_reason": "摘要不足以判断人物语气。",
+            "expected_confirmation": "确认人物此前语气和行动细节。",
+            "affects_analysis": "影响目标章节人物特点是否失真判断。",
+            "max_raw_excerpt_requests": 1,
+        },
+    )
+
+    result = tool.query(
+        sqlite3.connect(":memory:"),
+        book_id="book-1",
+        tool_call=call,
+        context_policy=ReviewContextPolicy(purpose="user_review", allow_memory=True),
+        review_budget=ReviewBudget(max_context_chars=65536),
+    )
+
+    assert result.status == "success"
+    requests = fake_broker.calls[0]["requests"]  # type: ignore[index]
+    assert [request.request_type for request in requests] == ["raw_excerpt"]
+    assert requests[0].document_ids == [1, 2]
+    assert requests[0].read_reason == "摘要不足以判断人物语气。"
 
 
 def test_reviewer_kb_tool_uses_read_only_retrieval_facade() -> None:
@@ -242,3 +283,18 @@ def test_review_target_resolver_supports_text_document_and_artifact(tmp_path: Pa
     assert "document" not in source_types
     assert "target_text" in source_types
     assert "writer_artifact" in source_types
+
+
+def test_source_chapter_target_is_not_silently_truncated() -> None:
+    request = ReviewRequest(
+        review_request_id="req-source-long",
+        book_id="book-1",
+        target=ReviewTarget(target_id="target-source", target_type="source_chapter", text="甲" * 240),
+        reviewer_ids=["source_chapter_literary_diagnostic"],
+        context_policy=ReviewContextPolicy(purpose="user_review"),
+        budget=ReviewBudget(max_target_chars=10),
+        created_at="2026-05-20T10:00:00Z",
+    )
+
+    with pytest.raises(ValueError, match="source_chapter"):
+        ReviewTargetResolver(repo_root=Path.cwd()).resolve(request)

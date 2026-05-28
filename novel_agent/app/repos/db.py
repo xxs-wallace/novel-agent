@@ -173,6 +173,34 @@ class NovelAgentDB:
             )
             '''
         )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS character_identity_merge_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                book_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                gate_level TEXT NOT NULL,
+                recommended_action TEXT NOT NULL,
+                same_person_score INTEGER NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                evidence_summary TEXT NOT NULL DEFAULT '',
+                left_character_id INTEGER,
+                left_name TEXT NOT NULL DEFAULT '',
+                right_character_id INTEGER,
+                right_name TEXT NOT NULL DEFAULT '',
+                survivor_canonical_name TEXT NOT NULL DEFAULT '',
+                aliases_to_keep_json TEXT NOT NULL DEFAULT '[]',
+                source_doc_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_title_indexes_json TEXT NOT NULL DEFAULT '[]',
+                outline_segment_ids_json TEXT NOT NULL DEFAULT '[]',
+                decision_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                resolved_at TEXT NOT NULL DEFAULT ''
+            )
+            '''
+        )
         self._ensure_book_assets_columns(conn)
         self._ensure_character_profiles_columns(conn)
         conn.execute('CREATE INDEX IF NOT EXISTS idx_documents_book_title_index ON documents(book_id, document_title_index, doc_id)')
@@ -181,6 +209,7 @@ class NovelAgentDB:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_character_profiles_book_name ON character_profiles(book_id, canonical_name)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_reading_progress_stage ON reading_progress(book_id, agent_stage)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_narrative_memory_pages_book_type ON narrative_memory_pages(book_id, page_type)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_identity_merge_candidates_book_status ON character_identity_merge_candidates(book_id, status)')
 
     def _ensure_documents_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
@@ -231,6 +260,18 @@ class NovelAgentDB:
             conn.execute("ALTER TABLE character_profiles ADD COLUMN evidence_level TEXT NOT NULL DEFAULT 'inferred'")
         if "story_events_json" not in columns:
             conn.execute("ALTER TABLE character_profiles ADD COLUMN story_events_json TEXT NOT NULL DEFAULT '[]'")
+        if "profile_brief_json" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN profile_brief_json TEXT NOT NULL DEFAULT '{}'")
+        if "profile_brief_status" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN profile_brief_status TEXT NOT NULL DEFAULT 'missing'")
+        if "profile_brief_version" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN profile_brief_version INTEGER NOT NULL DEFAULT 0")
+        if "brief_compacted_until_doc_id" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN brief_compacted_until_doc_id INTEGER")
+        if "brief_compacted_until_segment_id" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN brief_compacted_until_segment_id TEXT NOT NULL DEFAULT ''")
+        if "profile_brief_updated_at" not in columns:
+            conn.execute("ALTER TABLE character_profiles ADD COLUMN profile_brief_updated_at TEXT NOT NULL DEFAULT ''")
 
     def _ensure_documents_fts(self, conn: sqlite3.Connection) -> None:
         table_exists = conn.execute(

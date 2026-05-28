@@ -186,11 +186,11 @@ export function setWriterArtifactReviewAfterJobReplay(taskId = "task-alpha", job
   deferredMessageJobIds[jobId] = taskId;
 }
 
-export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_close_read") {
+export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_close_read", type = "close_read") {
   const job: JobSummary = {
     job_id: jobId,
     task_id: taskId,
-    type: "close_read",
+    type,
     status: "running",
     message: "后台任务正在运行",
     cancel_requested: false,
@@ -561,7 +561,7 @@ function jobEvents(jobId: string): JobEventView[] {
       event_id: "000001",
       job_id: jobId,
       kind: "progress",
-      message: "导入原文进度已更新",
+      message: jobId.includes("writer_resume") ? "正在根据反馈重写当前章。" : "导入原文进度已更新",
       payload: jobId.includes("start_close_read") ? { stage: "close_reading", event: "batch_done" } : {},
       created_at: now
     }

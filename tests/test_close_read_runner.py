@@ -123,6 +123,191 @@ def test_close_read_runner_augments_partial_character_updates_from_source_verifi
     assert updates[1]["evidence_level"] == "inferred"
 
 
+def test_profile_update_gate_marks_only_batch_wide_direct_characters_detailed(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-profile-gate", sqlite_path=str(tmp_path / "profile_gate.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "profile_gate.db", config=config)
+
+    gates = runner._profile_update_gates_for_evidence(  # noqa: SLF001
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [1],
+                    "characters": [
+                        {
+                            "character_id": "1",
+                            "canonical_name": "主角",
+                            "activity_or_state_evidence": "主角推进调查。",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        },
+                        {
+                            "character_id": "2",
+                            "canonical_name": "旁观者",
+                            "personhood_evidence": "旁观者被提及。",
+                            "candidate_type": "character",
+                            "confidence": 0.8,
+                        },
+                    ],
+                },
+                {
+                    "doc_ids": [2],
+                    "characters": [
+                        {
+                            "character_id": "1",
+                            "canonical_name": "主角",
+                            "activity_or_state_evidence": "主角继续行动。",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        }
+                    ],
+                },
+                {
+                    "doc_ids": [3],
+                    "characters": [
+                        {
+                            "character_id": "1",
+                            "canonical_name": "主角",
+                            "is_speaking_character": True,
+                            "speaking_evidence": "主角说出判断。",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert gates["id:1"]["detail_level"] == "detailed"
+    assert gates["id:2"]["detail_level"] == "index_only"
+
+
+def test_profile_update_gate_does_not_mark_single_doc_character_detailed(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-profile-gate-single", sqlite_path=str(tmp_path / "profile_gate_single.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "profile_gate_single.db", config=config)
+
+    gates = runner._profile_update_gates_for_evidence(  # noqa: SLF001
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [1],
+                    "characters": [
+                        {
+                            "character_id": "1",
+                            "canonical_name": "主角",
+                            "is_speaking_character": True,
+                            "activity_or_state_evidence": "主角在单个 document 中推进当前场景。",
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ]
+        },
+        current_total_chars=5000,
+    )
+
+    assert gates["id:1"]["detail_level"] == "compact"
+    assert gates["id:1"]["reason"] == "has_current_direct_signal_but_not_batch_wide"
+
+
+def test_character_reduce_skips_model_for_index_only_characters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = CloseReadAgentConfig(book_id="book-index-only-reduce", sqlite_path=str(tmp_path / "index_only.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "index_only.db", config=config)
+    doc = _make_document_row(
+        doc_id=1,
+        book_id="book-index-only-reduce",
+        title_index=1,
+        title="第一章",
+        content="旁观者在人群中短暂出现。",
+    )
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="第一章",
+        documents=[doc],
+        chapter_doc_count=1,
+        chapter_total_chars=doc.content_chars,
+    )
+
+    def _raise_if_called(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("index-only characters should not call character_reduce model")
+
+    monkeypatch.setattr(runner, "_generate_agent_payload", _raise_if_called)
+    payload = runner._run_character_reduce_agents(  # noqa: SLF001
+        model_client=object(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book-index-only-reduce",
+            "character_profiles": [
+                {
+                    "character_id": "2",
+                    "canonical_name": "旁观者",
+                    "aliases": [],
+                    "profile_brief": {"identity": {"character_id": "2", "canonical_name": "旁观者"}},
+                    "profile_brief_status": "ready",
+                    "character_update_gate": {
+                        "detail_level": "index_only",
+                        "update_policy": "defer_index_only",
+                        "reason": "low_frequency_or_background_role",
+                    },
+                }
+            ],
+        },
+        summary_payload={"chapter_summary_short": "旁观者在人群中短暂出现。"},
+        evidence_payload={
+            "character_evidence_batches": [
+                {
+                    "doc_ids": [1],
+                    "document_title_indexes": [1],
+                    "characters": [
+                        {
+                            "character_id": "2",
+                            "canonical_name": "旁观者",
+                            "personhood_evidence": "旁观者被提及。",
+                            "candidate_type": "character",
+                            "confidence": 0.8,
+                        }
+                    ],
+                }
+            ]
+        },
+        current_outline_segment={
+            "outline_segment_id": "outline-segment:chapter-1:docs-1",
+            "outline_segment": "主线角色推进当前场景，旁观者只短暂出现。",
+            "source_doc_ids": [1],
+            "source_doc_range": "1",
+        },
+    )
+
+    assert payload["character_updates"][0]["canonical_name"] == "旁观者"
+    assert payload["character_updates"][0]["profile_update_policy"] == "defer_index_only"
+    assert payload["character_updates"][0]["recent_key_experiences"][0]["compression_level"] == "index_only"
+
+
+def test_prompt_input_metrics_measure_character_reduce_context(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-prompt-metrics", sqlite_path=str(tmp_path / "prompt_metrics.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "prompt_metrics.db", config=config)
+
+    metrics = runner._prompt_input_metrics(  # noqa: SLF001
+        {
+            "existing_profile": {
+                "profile_brief": {
+                    "identity": {"character_id": "1", "canonical_name": "主角"},
+                    "current_state": "旧档案压缩摘要",
+                }
+            },
+            "chapter_context_text": "[outline-segment:chapter-1:docs-1-2] 当前剧情压缩。",
+            "current_outline_segment": {"outline_segment_id": "outline-segment:chapter-1:docs-1-2"},
+            "ordered_character_evidence": [{"canonical_name": "主角", "source_doc_ids": [1, 2]}],
+        }
+    )
+
+    assert metrics["profile_brief_chars"] > 0
+    assert metrics["chapter_context_chars"] > 0
+    assert metrics["current_outline_segment_chars"] > 0
+    assert metrics["ordered_character_evidence_chars"] > 0
+
+
 def test_character_evidence_agent_reruns_with_full_roster_on_request(tmp_path: Path) -> None:
     config = CloseReadAgentConfig(book_id="book-roster-loop", sqlite_path=str(tmp_path / "roster_loop.db"))
     runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "roster_loop.db", config=config)
@@ -301,8 +486,19 @@ def test_close_read_coverage_audit_adds_model_detected_missing_character(
                 },
                 "",
             )
+        if "Chapter Outline Segment Agent" in system_prompt:
+            return (
+                {
+                    "chapter_line": "[1] 第一章: 林初与周衡会面。",
+                    "outline_segment": "林初进入场景后与周衡会面，周衡明确发言并带她前往旧剧院，二人建立直接行动关系。",
+                    "compression_notes": "",
+                },
+                "",
+            )
         if "Chapter Event Summary Agent" in system_prompt:
             return {"event_summary": "林初与周衡会面，周衡随后带她去旧剧院。", "compression_notes": ""}, ""
+        if "Outline Root Summary Agent" in system_prompt:
+            return {"root_summary": "林初与周衡会面后前往旧剧院。", "compression_notes": ""}, ""
         if (
             "Character Reduce Agent" in system_prompt
             or "Global Memory Agent" in system_prompt
@@ -960,6 +1156,17 @@ def test_close_read_runner_persists_complete_multi_chapter_synopses_in_non_dry_r
             )
         if "Character Evidence Agent" in system_prompt:
             return {"character_evidence_batch_id": "partial_multi_book:character-evidence:1-2", "characters": []}, ""
+        if "Chapter Outline Segment Agent" in system_prompt:
+            return (
+                {
+                    "chapter_line": "[1-2] 连续推进。",
+                    "outline_segment": "路明非进入学院并作出回应，随后楚子航说明龙族相关真相，批次形成从人物入场到设定揭示的连续推进。",
+                    "compression_notes": "",
+                },
+                "",
+            )
+        if "Outline Root Summary Agent" in system_prompt:
+            return {"root_summary": "路明非入场后，楚子航揭示龙族真相，学院主线继续推进。", "compression_notes": ""}, ""
         return {"character_updates": [], "world_update": {"should_update": False, "changes": []}, "outline_update": {"chapter_line": "[1-2] 连续推进。", "timeline_events": []}}, ""
 
     monkeypatch.setattr(JsonModelClient, "generate_json", fake_generate_json)
@@ -1139,6 +1346,37 @@ def test_close_read_runner_accepts_low_signal_noise_summary(tmp_path: Path) -> N
             "importance_reason": "仅提供结构背景。",
             "related_chapters": [],
             "noise_documents": [{"doc_id": 1, "document_title_index": 1, "reason": "无具体剧情"}],
+        },
+    )
+
+
+def test_close_read_runner_accepts_low_signal_summary_that_mentions_short_source_title(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="noise_title_book", sqlite_path=str(tmp_path / "noise_title.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "noise_title.db", config=config)
+    batch = ChapterBatch(
+        document_title_index=25,
+        chapter_title="序幕 雨落狂流之暗 A Dark Rainy Night",
+        documents=[
+            _make_document_row(
+                doc_id=67,
+                book_id="noise_title_book",
+                title_index=25,
+                title="序幕 雨落狂流之暗 A Dark Rainy Night",
+                content="序幕 雨落狂流之暗 A Dark Rainy Night\n第一幕 生日蛋糕就是青春的墓碑 Birthday Cake is the Grave of You",
+            )
+        ],
+    )
+
+    runner._validate_single_plot_synopsis(
+        batch=batch,
+        payload={
+            "summary_quality": "low_signal_needs_review",
+            "chapter_summary_md": "本段是目录式标题页，列出序幕 雨落狂流之暗 A Dark Rainy Night 和后续幕名，没有形成具体剧情。",
+            "chapter_summary_short": "目录式标题页，无实质剧情。",
+            "importance_score": 1,
+            "importance_reason": "低信号章节标题。",
+            "related_chapters": [],
+            "noise_documents": [{"doc_id": 67, "document_title_index": 25, "reason": "目录式标题页"}],
         },
     )
 

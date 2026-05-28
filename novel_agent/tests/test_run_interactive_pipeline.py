@@ -142,6 +142,28 @@ def _document_row(*, doc_id: int, title_index: int, chars: int) -> DocumentRow:
     )
 
 
+def test_build_writer_workflow_uses_large_writer_output_budget(monkeypatch, tmp_path: Path) -> None:
+    captured_settings = []
+
+    class FakeJsonModelClient:
+        def __init__(self, settings) -> None:  # type: ignore[no-untyped-def]
+            self.settings = settings
+            captured_settings.append(settings)
+
+    monkeypatch.setattr(run_interactive, "JsonModelClient", FakeJsonModelClient)
+
+    build_writer_workflow(
+        repo_root=tmp_path,
+        db_path=tmp_path / "writer.db",
+        runs_dir=tmp_path / "runs",
+        dry_run=False,
+        api_key="test-key",
+    )
+
+    assert captured_settings
+    assert captured_settings[0].max_output_tokens == 16384
+
+
 def test_creative_kb_facade_enables_thinking_fallback_for_kb_agents(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     captured_settings = []
 

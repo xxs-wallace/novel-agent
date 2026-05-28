@@ -22,6 +22,7 @@ from novel_agent.app.services.chapter_event_list_service import ChapterEventList
 from novel_agent.app.services.chapter_event_summary_service import ChapterEventSummaryService
 from novel_agent.app.services.outline_event_summary_service import OutlineEventSummaryService
 from novel_agent.app.services.outline_research_service import OutlineSeedPacketBuilder
+from novel_agent.app.services.outline_segment_index_service import OutlineSegmentIndexService
 from novel_agent.app.services.outline_service import OutlineService
 from novel_agent.app.services.source_arc_mapping_service import SourceArcMappingService
 from novel_agent.app.services.summary_outline_commit_service import SummaryOutlineCommitService
@@ -112,7 +113,7 @@ def test_old_chapter_rows_gain_provisional_status_defaults(tmp_path: Path) -> No
     assert row["outline_status"] == "provisional"
 
 
-def test_close_read_outline_events_record_source_doc_range() -> None:
+def test_close_read_outline_segment_records_source_doc_range() -> None:
     runner = object.__new__(CloseReadRunner)
     runner.character_mention_service = CharacterMentionService()
     batch = SimpleNamespace(
@@ -124,37 +125,28 @@ def test_close_read_outline_events_record_source_doc_range() -> None:
         ],
     )
 
-    outline_update = runner._enrich_outline_update_with_sources(
+    outline_update = runner._enrich_outline_segment_update(
         batch=batch,
         outline_update={
             "chapter_line": "[12] 第12章: 芬格尔兜售考题。",
-            "timeline_events": [
-                {
-                    "label": "芬格尔兜售考题",
-                    "participants": ["路明非", "芬格尔"],
-                    "summary": "芬格尔利用时间压力促成交易。",
-                }
-            ],
+            "outline_segment": "芬格尔利用时间压力促成交易。",
         },
         summary_short="芬格尔向路明非兜售考题。",
     )
-    fallback_outline_update = runner._enrich_outline_update_with_sources(
+    fallback_outline_update = runner._enrich_outline_segment_update(
         batch=batch,
-        outline_update={"timeline_events": [{"label": "交易发生", "summary": "考题交易被推进。"}]},
+        outline_update={},
         summary_short="芬格尔向路明非兜售考题。",
-        fallback_participants=["路明非", "楚子航"],
     )
 
-    event = outline_update["timeline_events"][0]
-    assert event["event_id"].startswith("chapter-12:event-01")
-    assert event["source_doc_ids"] == [48, 49]
-    assert event["source_doc_range"] == "48-49"
-    assert event["event_id"].endswith("docs-48-49")
-    assert outline_update["event_summary"] == "芬格尔利用时间压力促成交易。"
-    assert fallback_outline_update["timeline_events"][0]["participants"] == ["路明非", "楚子航"]
+    assert outline_update["outline_segment_id"] == "outline-segment:chapter-12:docs-48-49"
+    assert outline_update["source_doc_ids"] == [48, 49]
+    assert outline_update["source_doc_range"] == "48-49"
+    assert outline_update["outline_segment"] == "芬格尔利用时间压力促成交易。"
+    assert fallback_outline_update["outline_segment"] == "芬格尔向路明非兜售考题。"
 
 
-def test_close_read_outline_event_summary_uses_full_plot_chain_without_excerpt() -> None:
+def test_close_read_outline_segment_can_keep_full_plot_chain_without_excerpt() -> None:
     runner = object.__new__(CloseReadRunner)
     runner.character_mention_service = CharacterMentionService()
     batch = SimpleNamespace(
@@ -182,19 +174,18 @@ def test_close_read_outline_event_summary_uses_full_plot_chain_without_excerpt()
         ]
     )
 
-    event_summary = runner._flatten_summary_event_chain(summary_md)  # noqa: SLF001
-    outline_update = runner._enrich_outline_update_with_sources(  # noqa: SLF001
+    outline_segment = runner._flatten_summary_event_chain(summary_md)  # noqa: SLF001
+    outline_update = runner._enrich_outline_segment_update(  # noqa: SLF001
         batch=batch,
-        outline_update={},
+        outline_update={"outline_segment": outline_segment},
         summary_short="调查员接到新线索...",
-        event_summary=event_summary,
     )
 
-    assert len(event_summary) > 120
-    assert event_summary.endswith("核心冲突。")
-    assert "- " not in event_summary
-    assert outline_update["event_summary"] == event_summary
-    assert outline_update["timeline_events"][0]["summary"] == event_summary
+    assert len(outline_segment) > 120
+    assert outline_segment.endswith("核心冲突。")
+    assert "- " not in outline_segment
+    assert outline_update["outline_segment"] == outline_segment
+    assert "timeline_events" not in outline_update
 
 
 def test_chapter_event_summary_service_uses_summary_md_compression_prompt() -> None:
@@ -304,43 +295,23 @@ def test_chapter_event_list_requires_model_client() -> None:
         )
 
 
-def test_close_read_generates_event_list_then_event_summary_from_summary_md() -> None:
+def test_close_read_generates_outline_segment_from_summary_md() -> None:
     calls: list[str] = []
 
-    class _EventModel:
+    class _SegmentModel:
         settings = SimpleNamespace(dry_run=False)
 
         def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
             _ = fallback_factory, use_fallback_on_error
-            if "Chapter Event List Agent" in system_prompt:
-                calls.append("event_list")
+            if "Chapter Outline Segment Agent" in system_prompt:
+                calls.append("outline_segment")
                 assert "summary_md" in user_prompt
+                assert "timeline_events" not in user_prompt
                 return (
                     {
                         "chapter_line": "[3] 第三章: 调查线索被重新串联。",
-                        "timeline_events": [
-                            {
-                                "label": "线索重启",
-                                "participants": ["调查员"],
-                                "summary": "调查员接到新线索后重新梳理前夜行动顺序。",
-                            },
-                            {
-                                "label": "证词确认",
-                                "participants": ["同伴"],
-                                "summary": "同伴补充关键证词，使队伍确认事件并非偶然。",
-                            },
-                        ],
-                    },
-                    "",
-                )
-            if "Chapter Event Summary Agent" in system_prompt:
-                calls.append("event_summary")
-                assert "chapter_event_list" in user_prompt
-                assert "线索重启" in user_prompt
-                return (
-                    {
-                        "event_summary": "调查员接到新线索后重启前夜行动梳理，同伴证词进一步确认事件并非偶然。",
-                        "compression_notes": "由事件列表压缩。",
+                        "outline_segment": "调查员接到新线索后重启前夜行动梳理，同伴证词进一步确认事件并非偶然。",
+                        "compression_notes": "由章节摘要压缩。",
                     },
                     "",
                 )
@@ -361,24 +332,18 @@ def test_close_read_generates_event_list_then_event_summary_from_summary_md() ->
     )
     summary_md = "## 剧情事件链\n- 起点：调查员接到新线索。\n- 触发：同伴补充关键证词。"
 
-    outline_update = runner._generate_chapter_event_list(  # noqa: SLF001
-        model_client=_EventModel(),
+    outline_update = runner._generate_chapter_outline_segment(  # noqa: SLF001
+        model_client=_SegmentModel(),
         batch=batch,
         summary_md=summary_md,
         summary_short="调查线索被重新串联。",
         outline_update={},
     )
-    event_summary = runner._generate_chapter_event_summary(  # noqa: SLF001
-        model_client=_EventModel(),
-        batch=batch,
-        summary_md=summary_md,
-        summary_short="调查线索被重新串联。",
-        outline_update=outline_update,
-    )
 
-    assert calls == ["event_list", "event_summary"]
-    assert [event["label"] for event in outline_update["timeline_events"]] == ["线索重启", "证词确认"]
-    assert event_summary.startswith("调查员接到新线索后")
+    assert calls == ["outline_segment"]
+    assert outline_update["chapter_line"].startswith("[3]")
+    assert outline_update["outline_segment"].startswith("调查员接到新线索后")
+    assert "timeline_events" not in outline_update
 
 
 def test_chapter_event_summary_requires_model_client() -> None:
@@ -445,83 +410,48 @@ def test_outline_service_keeps_split_batch_events_with_same_label(tmp_path: Path
 def test_close_read_merges_split_outline_updates_by_doc_range() -> None:
     runner = object.__new__(CloseReadRunner)
 
-    merged = runner._merge_outline_updates(  # noqa: SLF001
+    merged = runner._merge_outline_segment_updates(  # noqa: SLF001
         existing={
             "chapter_line": "[8] 旧章节线",
+            "outline_segment": "前一批剧情推进。",
             "source_doc_ids": [67, 68, 69, 70],
             "source_title_indexes": [8],
-            "timeline_events": [
-                {
-                    "label": "（八）剧情进展",
-                    "participants": ["强哥"],
-                    "summary": "前一批剧情推进。",
-                    "event_id": "chapter-8:event-01",
-                    "source_doc_ids": [67, 68, 69, 70],
-                    "source_doc_range": "67-70",
-                }
-            ],
         },
         current={
             "chapter_line": "[8] 新章节线",
+            "outline_segment": "后一批剧情推进。",
             "source_doc_ids": [98, 99, 100, 101, 102],
             "source_title_indexes": [8],
-            "timeline_events": [
-                {
-                    "label": "（八）剧情进展",
-                    "participants": ["强哥"],
-                    "summary": "后一批剧情推进。",
-                    "event_id": "chapter-8:event-01",
-                    "source_doc_ids": [98, 99, 100, 101, 102],
-                    "source_doc_range": "98-102",
-                }
-            ],
         },
     )
 
     assert merged["chapter_line"] == "[8] 新章节线"
-    assert len(merged["timeline_events"]) == 2
-    assert [event["source_doc_range"] for event in merged["timeline_events"]] == ["67-70", "98-102"]
+    assert merged["outline_segment"] == "前一批剧情推进。 后一批剧情推进。"
     assert merged["source_doc_range"] == "67-102"
 
 
-def test_complete_outline_merge_prefers_current_full_event_summary() -> None:
+def test_complete_outline_merge_prefers_current_full_outline_segment() -> None:
     runner = object.__new__(CloseReadRunner)
-    full_event_summary = (
+    full_outline_segment = (
         "完整章节事件链从初始线索、调查推进、人物协作到冲突确认连续展开。"
-        + "后续证据持续补足，使这一章的事件摘要不再依赖 timeline event 的短句。" * 4
+        + "后续证据持续补足，使这一章的剧情段不再依赖 timeline event 的短句。" * 4
     )
 
-    merged = runner._merge_outline_updates(  # noqa: SLF001
+    merged = runner._merge_outline_segment_updates(  # noqa: SLF001
         existing={
-            "event_summary": "前一批拆分摘要。",
+            "outline_segment": "前一批拆分摘要。",
             "source_doc_ids": [1, 2],
             "source_title_indexes": [3],
-            "timeline_events": [
-                {
-                    "label": "前批事件",
-                    "summary": "前批短句。",
-                    "source_doc_ids": [1, 2],
-                    "source_doc_range": "1-2",
-                }
-            ],
         },
         current={
-            "event_summary": full_event_summary,
+            "outline_segment": full_outline_segment,
             "source_doc_ids": [3, 4],
             "source_title_indexes": [3],
-            "timeline_events": [
-                {
-                    "label": "后批事件",
-                    "summary": "后批短句。",
-                    "source_doc_ids": [3, 4],
-                    "source_doc_range": "3-4",
-                }
-            ],
         },
-        prefer_current_event_summary=True,
+        prefer_current_segment=True,
     )
 
-    assert merged["event_summary"] == full_event_summary
+    assert merged["outline_segment"] == full_outline_segment
 
 
 def test_merged_chapter_summary_preserves_late_split_batches() -> None:
@@ -701,6 +631,9 @@ def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: 
                 "芬格尔": [
                     {
                         "event_id": "chapter-12:event-01-fingel-sells-exam",
+                        "outline_segment_id": "outline-segment:chapter-12:docs-48-49",
+                        "role_in_segment": "main_driver",
+                        "compression_level": "full",
                         "label": "芬格尔兜售考题",
                         "summary": "芬格尔利用信息差向路明非兜售3E考试答案。",
                         "source_chapter_indexes": [12],
@@ -716,9 +649,12 @@ def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: 
     assert row is not None
     story_events = json.loads(row["story_events_json"])
     assert story_events[0]["event_id"] == "chapter-12:event-01-fingel-sells-exam"
+    assert story_events[0]["outline_segment_id"] == "outline-segment:chapter-12:docs-48-49"
+    assert story_events[0]["role_in_segment"] == "main_driver"
     assert story_events[0]["source_doc_ids"] == [48, 49]
     assert "## 基本属性/能力" in row["profile_summary_md"]
     assert "## 剧情时间线" in row["profile_summary_md"]
+    assert "outline_segment：outline-segment:chapter-12:docs-48-49" in row["profile_summary_md"]
     assert "documents：48-49" in row["profile_summary_md"]
 
 
@@ -760,6 +696,20 @@ def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_pa
                 "",
             )
 
+    class _RootSummaryModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            _ = user_prompt, fallback_factory, use_fallback_on_error
+            assert "Outline Root Summary Agent" in system_prompt
+            return (
+                {
+                    "root_summary": "事件1至事件9连续推动同一条调查线，并保留近期上下文。",
+                    "compression_notes": "测试压缩 root summary。",
+                },
+                "",
+            )
+
     db = NovelAgentDB(tmp_path / "event-summary.db")
     with db.connect() as conn:
         db.init_schema(conn)
@@ -768,6 +718,12 @@ def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_pa
             payload = _chapter_payload(book_id="book", index=index, summary=f"事件{index}推进")
             payload["outline_update"] = {
                 "chapter_line": f"[{index}] 第{index}章: 事件{index}推进",
+                "outline_segment_id": f"outline-segment:chapter-{index}:docs-{index}",
+                "outline_segment": f"事件{index}推动同一条调查线。",
+                "source_doc_ids": [index],
+                "source_doc_range": str(index),
+                "source_title_indexes": [index],
+                "status": "committed",
                 "timeline_events": [
                     {
                         "event_id": f"chapter-{index}:event-01",
@@ -789,6 +745,7 @@ def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_pa
             min_uncompressed_events=4,
             fallback_tail_events=2,
         ).refresh(conn, book_id="book")
+        OutlineSegmentIndexService(repo_root=tmp_path, model_client=_RootSummaryModel()).refresh(conn, book_id="book")
         packet = OutlineSeedPacketBuilder(repo_root=tmp_path).build(
             conn,
             book_id="book",
@@ -800,8 +757,8 @@ def test_outline_event_summary_compresses_prefix_and_keeps_unrelated_tail(tmp_pa
     assert state["segments"][0]["event_ids"] == [f"chapter-{index}:event-01" for index in range(1, 8)]
     assert state["pending_event_ids"] == ["chapter-8:event-01", "chapter-9:event-01"]
     assert state["segments"][0]["source_doc_range"] == "1-7"
-    assert any(item.get("summary_level") == "event_group" for item in packet.historical_story_overview)
-    assert packet.sources[-1].type == "event_summaries"
+    assert any(item.get("summary_level") == "outline_root" for item in packet.historical_story_overview)
+    assert packet.sources[-1].type == "outline_segments"
 
 
 def test_summary_outline_commit_window_marks_target_range_committed(tmp_path: Path) -> None:

@@ -2,12 +2,33 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.schemas.narrative_memory_schema import MemoryQueryBudget
 from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
 from novel_agent.app.services.outline_segment_index_service import OutlineSegmentIndexService
+
+
+class _RootSummaryModel:
+    settings = SimpleNamespace(dry_run=False)
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+        _ = fallback_factory, use_fallback_on_error
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+        assert "Outline Root Summary Agent" in system_prompt
+        assert "segments" in user_prompt
+        return (
+            {
+                "root_summary": "调查员接到新线索并与同伴证词汇合，调查方向从前夜行动转向核心冲突。",
+                "compression_notes": "保留线索、协作和方向变化。",
+            },
+            "",
+        )
 
 
 def _insert_documents(conn, *, book_id: str = "book") -> None:
@@ -72,11 +93,13 @@ def test_outline_segment_index_artifact_has_segments_and_roots_without_event_lis
         _upsert_chapter(conn, book_id="book", index=2, summary="同伴补充关键证词，调查方向转为核心冲突。", doc_id=2)
         conn.commit()
 
-        path = OutlineSegmentIndexService(repo_root=tmp_path).refresh(conn, book_id="book")
+        model = _RootSummaryModel()
+        path = OutlineSegmentIndexService(repo_root=tmp_path, model_client=model).refresh(conn, book_id="book")
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     serialized = json.dumps(payload, ensure_ascii=False)
     assert len(payload["segments"]) == 2
+    assert payload["roots"][0]["summary"] == "调查员接到新线索并与同伴证词汇合，调查方向从前夜行动转向核心冲突。"
     assert payload["roots"][0]["outline_segment_ids"] == [
         "outline-segment:chapter-1:docs-1",
         "outline-segment:chapter-2:docs-2",
@@ -93,7 +116,7 @@ def test_memory_query_drills_from_outline_root_to_documents(tmp_path: Path) -> N
         _upsert_chapter(conn, book_id="book", index=1, summary="调查员接到新线索，重新梳理前夜行动。", doc_id=1)
         _upsert_chapter(conn, book_id="book", index=2, summary="同伴补充关键证词，调查方向转为核心冲突。", doc_id=2)
         conn.commit()
-        OutlineSegmentIndexService(repo_root=tmp_path).refresh(conn, book_id="book")
+        OutlineSegmentIndexService(repo_root=tmp_path, model_client=_RootSummaryModel()).refresh(conn, book_id="book")
 
         service = NarrativeMemoryQueryService(repo_root=tmp_path)
         root = service.root_scan(

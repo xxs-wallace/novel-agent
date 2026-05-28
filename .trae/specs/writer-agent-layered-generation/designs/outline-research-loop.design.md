@@ -13,7 +13,7 @@
 - LLM 负责判断“我需要了解什么”；本地 Agent 负责把语义请求翻译成 SQLite / Markdown / Memory 查询。
 - 每轮检索结果必须带来源，区分 confirmed fact、inference、candidate 和 user-authorized assumption。
 - 模型必须能判断信息是否足够；不足时继续查，查不到时向用户提问。
-- 正文 Writer 不参与该循环；它只消费冻结后的大纲、梗概和写作输入。
+- Outline Research Loop 不直接生成正文。正文层使用独立的 Draft Research Loop 和 Draft Prose Executor；Draft Research Loop 可复用相同的 Memory Query / Context Broker 能力，但查询目标收束为当前章节草稿所需事实。
 
 ## 3. Outline Seed Packet
 
@@ -172,7 +172,7 @@
 ```json
 {
   "type": "story_detail",
-  "query": "主角上一次因为信任问题和顾迟发生冲突的经过，以及冲突结束后两人的关系状态",
+  "query": "主角上一次因为信任问题和关键同伴发生冲突的经过，以及冲突结束后两人的关系状态",
   "purpose": "判断新大纲中是否可以安排二人短期合作",
   "priority": "high"
 }
@@ -180,7 +180,7 @@
 
 ### 4.1 story_detail
 
-用于查询历史剧情事件、前因后果、时间位置和状态变化。
+用于查询历史剧情片段、前因后果、时间位置和状态变化。
 
 ```json
 {
@@ -198,8 +198,8 @@
 ```json
 {
   "type": "character_profile",
-  "name": "顾迟",
-  "query": "重点了解当前身份、能力边界、与沈青的关系状态、最近一次登场后的状态",
+  "name": "角色A",
+  "query": "重点了解当前身份、能力边界、与主角的关系状态、最近一次登场后的状态",
   "purpose": "判断是否适合承担本批次行动支援角色",
   "priority": "high"
 }
@@ -282,8 +282,8 @@
 职责：
 
 - 接收模型的语义请求。
-- 解析人名、概念、事件意图、时间范围和需要的事实侧面。
-- 查询人物 alias、世界观概念索引、历史大纲、章节摘要、事件卡、源文档引用和 Creative KB。
+- 解析人名、概念、剧情细节意图、时间范围和需要的事实侧面。
+- 查询人物 alias、世界观概念索引、历史大纲、outline segment、segment group / outline root、章节摘要、场景卡、源文档引用和 Creative KB。
 - 对候选结果去重、rerank、裁剪并标注来源。
 - 返回 evidence，不直接修改大纲或 Memory。
 - 对 `story_detail`，优先调用 Memory 层的 BTree descent / model-guided pruning 查询接口，避免 Writer 层直接扫描所有章节摘要或原始 document。
@@ -305,11 +305,11 @@
 
 ```text
 story_detail request
-  -> Memory root_scan(event_summary pages)
-  -> Writer model selects event_summary ids and query_suffix
-  -> Memory expands selected event_summary -> event candidates
-  -> Writer model selects event ids and query_suffix
-  -> Memory expands selected events -> chapter summary candidates
+  -> Memory root_scan(segment_group / outline_root pages)
+  -> Writer model selects segment_group / outline_root ids and query_suffix
+  -> Memory expands selected roots -> outline_segment candidates
+  -> Writer model selects outline_segment ids and query_suffix
+  -> Memory expands selected outline_segments -> chapter summary candidates
   -> Writer model selects chapter ids and query_suffix
   -> Memory expands selected chapters -> document candidates / excerpts
   -> Writer model decides stop or selects documents
@@ -324,7 +324,7 @@ story_detail request
   "query_suffix_chain": ["string"],
   "path_context": [
     {
-      "level": "event_summary | event | chapter | document",
+      "level": "segment_group | outline_segment | chapter | document",
       "selected_id": "string",
       "summary": "string",
       "source_range": "string",
@@ -332,7 +332,7 @@ story_detail request
       "confidence": 0.0
     }
   ],
-  "current_level": "event_summary | event | chapter | document",
+  "current_level": "segment_group | outline_segment | chapter | document",
   "current_candidates": [],
   "selection_task": "判断是否需要继续展开当前层候选以回答 original_query。",
   "output_schema": {
@@ -359,8 +359,8 @@ story_detail request
 ```text
 story_detail request
   -> Query Understanding prompt
-  -> 查询 Historical Outline Event Index / Chapter Summary Index
-  -> Candidate Event Rerank prompt
+  -> 查询 Outline Segment Index / Chapter Summary Index
+  -> Candidate Segment Rerank prompt
   -> 读取 source_refs 对应摘要或原文片段
   -> 返回 StoryDetailResult
 ```
@@ -379,36 +379,37 @@ story_detail request
 
 ```json
 {
-  "characters": ["沈青", "顾迟"],
+  "characters": ["主角", "角色A"],
   "concepts": [],
-  "event_intent": "relationship_conflict",
-  "facets_needed": ["事件经过", "冲突原因", "结果", "关系状态变化"],
+  "plot_intent": "relationship_conflict",
+  "facets_needed": ["剧情经过", "冲突原因", "结果", "关系状态变化"],
   "temporal_hint": "最近一次",
   "candidate_keywords": ["信任", "冲突", "合作", "隐瞒"]
 }
 ```
 
-### 8.2 Historical Outline Event Index
+### 8.2 Outline Segment Index
 
-为了让 `story_detail` 稳定工作，历史大纲应能索引回 document / chapter / segment。
+为了让 `story_detail` 稳定工作，历史大纲应能通过 Narrative Memory 索引回 outline segment / chapter / document。
 
-推荐事件卡：
+推荐候选段落卡：
 
 ```json
 {
-  "event_id": "event-0231",
+  "outline_segment_id": "outline-seg-0231",
+  "segment_group_id": "outline-root-004",
   "work_id": "book-02",
   "chapter_range": ["ch-118", "ch-121"],
   "timeline_position": "第二部中段",
-  "characters": ["沈青", "顾迟"],
+  "characters": ["主角", "角色A"],
   "locations": ["北境驿站"],
   "concepts": ["密令", "旧案"],
-  "event_summary": "顾迟隐瞒线索导致沈青误判局势，二人短暂决裂。",
-  "actions": ["顾迟隐瞒情报", "沈青独自追查", "线索被反派利用"],
-  "result": "顾迟暴露部分真实立场，但仍未完全获得信任。",
+  "segment_summary": "关键同伴隐瞒线索导致主角误判局势，二人短暂决裂。",
+  "major_beats": ["同伴隐瞒情报", "主角独自追查", "线索被敌对方利用"],
+  "result": "同伴暴露部分真实立场，但仍未完全获得信任。",
   "state_changes": [
-    "沈青对顾迟从有限信任退回警惕",
-    "顾迟欠下解释"
+    "主角对关键同伴从有限信任退回警惕",
+    "关键同伴欠下解释"
   ],
   "source_refs": [
     {
@@ -420,15 +421,15 @@ story_detail request
 }
 ```
 
-最低可用版本可以先用章节摘要索引过渡，但每条章节摘要仍应保存人物、概念、事件概要、结果和 source document 位置。
+最低可用版本可以先用章节摘要索引过渡，但每条章节摘要仍应保存人物、概念、剧情概要、结果和 source document 位置。完整路径应优先复用 Narrative Memory 的 `outline_root / segment_group -> outline_segment -> chapter -> document` 查询能力；不要在 Writer 层重新创建并行剧情索引。
 
-### 8.3 Candidate Event Rerank
+### 8.3 Candidate Segment Rerank
 
 输入：
 
 - 原始 `story_detail` request
 - 结构化检索计划
-- 10 到 20 个候选事件卡或章节摘要卡
+- 10 到 20 个候选 outline segment、segment group 或章节摘要卡
 
 输出：
 
@@ -436,10 +437,10 @@ story_detail request
 {
   "matches": [
     {
-      "event_id": "event-0231",
+      "outline_segment_id": "outline-seg-0231",
       "confidence": 0.91,
-      "reason": "直接涉及沈青与顾迟因隐瞒线索产生的信任冲突",
-      "covered_facets": ["事件经过", "冲突原因", "结果", "关系状态变化"]
+      "reason": "直接涉及主角与关键同伴因隐瞒线索产生的信任冲突",
+      "covered_facets": ["剧情经过", "冲突原因", "结果", "关系状态变化"]
     }
   ],
   "missing_facets": []
@@ -457,13 +458,13 @@ story_detail request
   "request_id": "req-003",
   "type": "story_detail",
   "status": "answered",
-  "summary": "顾迟曾因隐瞒旧案线索导致沈青误判，两人关系退回警惕，但事件结尾保留了合作可能。",
+  "summary": "关键同伴曾因隐瞒旧案线索导致主角误判，两人关系退回警惕，但该剧情段落结尾保留了合作可能。",
   "evidence": [
     {
-      "source_type": "historical_event",
-      "source_id": "event-0231",
+      "source_type": "outline_segment",
+      "source_id": "outline-seg-0231",
       "fact_status": "confirmed",
-      "text": "事件卡裁剪摘要",
+      "text": "outline segment 裁剪摘要",
       "source_refs": [
         {
           "document_id": "doc-118",
@@ -475,7 +476,7 @@ story_detail request
   ],
   "missing_facets": [],
   "followup_suggestions": [
-    "如需安排二人合作，建议继续查询顾迟最近一次公开站队事件。"
+    "如需安排二人合作，建议继续查询关键同伴最近一次公开站队相关剧情段落。"
   ]
 }
 ```

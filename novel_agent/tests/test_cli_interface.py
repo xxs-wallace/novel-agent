@@ -69,11 +69,11 @@ def test_writer_status_presenter_covers_confirmation_points_events_and_gui_actio
     assert "请审阅本批剧情大纲" in rendered
     assert "请确认本章写作材料" in rendered
     assert "请决定当前章节草稿" in rendered
-    assert "请确认写回续写记忆" in rendered
+    assert "提交本章正文" in rendered
     assert "请调整章节规划后重写" in rendered
     assert "已确认，继续下一步" in rendered
     assert "等待你确认" in rendered
-    assert "接受本章" in rendered
+    assert "提交本章正文" in rendered
     assert "调整字数后重写" in rendered
     assert "修改章节梗概后重写" in rendered
     assert "作废本次草稿" in rendered
@@ -898,7 +898,7 @@ def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> N
     panel = DecisionPanel.chapter_acceptance(draft_path="/tmp/draft.md", draft_chars=4820, target_chars=5000)
     rendered = panel.render()
 
-    assert "接受本章 -> 请确认写回续写记忆" in rendered
+    assert "提交本章正文 -> 提交正文并更新续写记忆" in rendered
     assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
     assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
     assert "作废本次草稿 -> 流程已暂停" in rendered

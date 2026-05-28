@@ -122,24 +122,35 @@
 - `recent_activity`
 - `relationships`
   - 每条关系可携带 `address_terms`，记录关系内称呼及方向，例如“妻子称他为老公”“同事称他为 Don”
+- `profile_brief`
 - `story_events`
 - `chapter_indexes`
 - `mentioned_doc_ids`
 - `speaking_doc_ids`
 - `first_seen / last_seen`
 
-目标结构分两层：
+目标结构分三层：
 
 - 基础属性层
   - 保存姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、稳定关系、能力和特长
   - 姓名部分应区分叙事主称呼、检索别名和关系内称呼；关系内称呼跟随关系条目，不覆盖人物档案标题
   - 该层用于 Writer 快速获得人物稳定状态，不应塞入过长流水账
-- 人物剧情时间线层
-  - 保存以人物为维度过滤出的 `key_experiences`
-  - 每条经历包含 `experience_id`、`label`、`summary`、`source_chapter_indexes`、`source_doc_ids`、`source_doc_range`、`participants`
-  - 该层用于模型先筛选人物相关关键经历，再按事件索引展开原始 document
+- 常驻简档层
+  - `profile_brief` 是持久化的高度浓缩人物状态，不是每次 close-read 临时生成的 prompt 输入参数
+  - 保存身份锚点、当前状态、稳定特征、能力/限制、关键关系摘要、未解问题、最近重大变化、compact 进度和关键 source refs
+  - close-read / Character Reduce 默认只读取 `profile_brief`、当前人物 evidence、当前 outline segment / chapter summary 和必要身份索引
+  - 如果旧人物档案没有 `profile_brief`，系统应执行一次模型 bootstrap compact，生成初始 brief；该成本只发生在兼容初始化或显式修复任务中，不得退回每批临时压缩完整档案
+- 人物经历层
+  - `recent_activity` 保留为热层增量队列，保存尚未被 brief compact 吸收的近期经历、状态变化和关系变化；它不默认进入每次 Character Reduce
+  - `story_events` 保存长期经历索引摘要，重点保留 `experience_id`、`outline_segment_id`、source range、角色作用和高度概括剧情
+  - 低频、背景出场或弱相关人物走 `defer_index_only` / `index_only`：只追加极简人物经历索引，不读取或压缩完整旧档案
+  - 每条经历包含 `experience_id`、`outline_segment_id`、`role_in_segment`、`compression_level`、`label`、`summary`、`source_chapter_indexes`、`source_doc_ids`、`source_doc_range`、`participants`
+  - 该层用于模型先筛选人物相关经历，再按 `outline_segment_id` 展开剧情段，必要时继续展开原始 document
+  - 同一个 outline segment 对不同角色的意义不同；背景出场角色只保留大致事件和人物相关点，主要推动者、主要关联者或主要发言者保留更完整的剧情因果、行动结果和关系变化
+  - 当角色连续多个 document 不再出现、recent_activity 积累超阈值，或当前剧情触发重大变化时，系统应调用模型 compact loop，将必要经历吸收进 `profile_brief`，并把已吸收热层经历转入长期索引或标记为已 compact
+  - 所有经历压缩都必须由模型完成语义概括；生产路径禁止用字符数、token 数、句子数或列表长度硬截断伪装压缩
 
-`mentioned_doc_ids` / `speaking_doc_ids` 继续作为底层倒排索引存在，但不再是模型理解人物过往的主要入口。模型应优先读取人物剧情时间线；只有需要确认细节时，才根据事件携带的 doc ids 请求原文证据。
+`mentioned_doc_ids` / `speaking_doc_ids` 继续作为底层倒排索引存在，但不再是模型理解人物过往的主要入口。模型应优先读取 `profile_brief` 与人物经历索引；只有需要确认细节时，才根据经历携带的 `outline_segment_id`、doc ids 或 source range 请求剧情段、章节摘要或原文证据。
 
 ### 3.2 World Memory
 
@@ -204,7 +215,7 @@ document -> chapter summary -> outline segment -> outline root
   - 必须能回到 `source_doc_ids` / `source_doc_range`
   - 不输出 `timeline_events`、`event list` 或等价事件数组
 - `outline root`
-  - 多个 outline segment 的上层索引，只保存 segment id、范围、极短摘要和状态
+  - 多个 outline segment 的上层索引，保存 segment id、范围、状态和模型压缩后的 root summary
   - 服务于 Writer 快速理解历史剧情顺序和因果衔接
 
 推荐的 outline segment 结构：
@@ -224,7 +235,7 @@ document -> chapter summary -> outline segment -> outline root
 
 `outline_segment_id` 是 BTree-like Memory Query 的范围定位关键。后续 Writer Outline Research Loop / Analyzer 不应一次性读取全部章节摘要，而应先选择相关 outline segment，再由 Context Broker 确定性展开到 chapter summary 或 document range。
 
-多维事件检索不再由 Story Outline Memory 的 `timeline_events` 承担。需要事件级索引时，应使用 Narrative Indexer 派生的 `FactualEventCard`、`CharacterStateCard`、`MysteryForeshadowCard` 等 card family。
+多维事件检索不再由 Story Outline Memory 的 `timeline_events` 承担。需要事件级索引时，应使用 Narrative Indexer 派生的 `NarrativeSceneCard` 或等价事件 / 场景级 IndexCard；Memory 层只提供 documents、chapter summaries、outline segments、character experiences 和回源索引。
 
 ### 3.5 Progress Memory
 
@@ -587,26 +598,74 @@ source text + toc/bookmarks
 
 目标扩展：
 
-- `character_profiles.key_experiences_json` 保存人物维度关键经历索引
-- close-read 写回时从 Character Evidence、chapter summary 和 Narrative Indexer character cards 中归并人物关键经历，不依赖 outline `timeline_events`
+- `character_profiles.profile_brief_json` 保存人物常驻简档，默认作为 close-read / Writer / Research Loop 的主要人物上下文
+- `character_profiles.recent_activity_json` 保留为热层增量队列，保存尚未被 brief compact 吸收的近期人物经历；普通 Character Reduce 不默认展开全量 recent activity
+- `character_profiles.story_events_json` 保存长期经历索引摘要，条目保留 `outline_segment_id`、source range、角色作用和高度概括剧情
+- Character Reduce prompt 消费当前 `outline_segment` 索引、人物 evidence、章节短摘要和持久化 `profile_brief`，只输出本批次人物经历增量、短关系状态变化和 compact 触发信号
+- Brief Compact Gate 先按当前窗口 document 覆盖率、发言/行动/关系证据、角色作用和重大变化类型分为 `append_delta` / `needs_brief_compact` / `needs_full_profile_compact` / `index_only`：
+  - `append_delta`：普通人物经历增量，追加到 `recent_activity_json` 或 `story_events_json`，不改写 brief
+  - `needs_brief_compact`：当前剧情改变了人物当前状态、关键关系、身份锚点、能力/限制、性格/形象概括或未解问题，需要模型更新 `profile_brief`
+  - `needs_full_profile_compact`：身份合并、误归因修复、重大设定矛盾或历史经历大规模重整，进入专门 Agent Loop，可按需读取 story events、outline segment 和原文
+  - `index_only`：低频、背景或弱相关人物；只记录当前 `outline_segment_id`、source range 和极短人物相关说明
+- 每条经历应保留 `outline_segment_id`、`role_in_segment`、`compression_level`、source doc/title range；背景出场角色应高度压缩为 index-only，主要推动者 / 主要发言者保留更完整剧情
+- 当角色连续多个 document 不再出现、recent_activity 积累超阈值，或当前剧情触发重大变化时，系统应调用模型 compact loop，将必要经历吸收进 `profile_brief` 并标记 compact 进度；该过程不能用本地硬截断代替
+- Narrative Indexer character / scene cards 可作为后续复核或增强输入，但 close-read 不依赖 outline `timeline_events`
 - `profile_summary_md` 按两层渲染：
   - `## 基本属性/能力`
-  - `## 剧情时间线`
-- 剧情时间线的每条关键经历必须显示 `experience_id` 与 `documents` 范围，方便模型二次请求原文
+  - `## 人物经历`
+- 人物经历的每条条目必须显示 `experience_id`、`outline_segment_id` 与 `documents` 范围，方便模型先定位 outline segment，再二次请求章节摘要或原文
 
-关系信息只保存在结构化 `relationships_json`，并由 UI 的“关系网络”或 Writer 的结构化人物上下文单独消费。`profile_summary_md` 不再展开关系明细，最多保留一句“关系见 relationships_json / 关系网络”的提示或完全省略关系段。这样避免“已确认事实 / 基本信息”与“关系网络”展示同一批关系事实，也避免 Writer prompt 同时从摘要文本和结构化关系列表读到重复甚至互相覆盖的关系描述。
+关系信息只保存在结构化 `relationships_json`，并由 UI 的“关系网络”或 Writer 的结构化人物上下文单独消费。`relationships_json.status_summary` 只描述当前关系状态、关系类型、情感状态、称呼和回源索引，不承载完整剧情因果、小型章节摘要或人物经历；关系变化的过程、冲突细节和结果应写入 `recent_activity_json` / `story_events_json`。`profile_summary_md` 不再展开关系明细，最多保留一句“关系见 relationships_json / 关系网络”的提示或完全省略关系段。这样避免“已确认事实 / 基本信息”与“关系网络”展示同一批关系事实，也避免 Writer prompt 同时从摘要文本和结构化关系列表读到重复甚至互相覆盖的关系描述。
+
+Character Reduce 不应再读取完整 `profile_summary_md`、全量 `relationships_json`、全量经历和全量 recent activity。系统也不应再生成每批临时完整档案压缩上下文。持久化 `profile_brief` 是唯一默认人物上下文入口；缺失 brief 的旧人物通过一次性 bootstrap compact 补齐。
 
 人物性证据、基础属性和关系更新都不能长期采用纯 append。新的 close-read 写回应采用“逐人物档案更新 Agent Loop”：
 
 1. Character Evidence Agent 先按连续 `documents` 组装 evidence batch，输出本批次涉及人物，并尽量对齐 `character_id`。
-2. 本地 Agent 按 `character_id` 优先、`canonical_name / aliases` 兜底，读取涉及人物的现有人物档案。
-3. Character Reduce / Profile Update Agent 使用 bounded profile batch：每条 prompt 只包含当前 batch 的 ordered evidence、章节摘要、必要来源索引，以及少量相关人物档案。
-4. 初始建议的 profile update 预算是：document 原文或 evidence 摘要不超过约 16KB；同一 prompt 最多 4 个候选人物档案；既有人物档案合计不超过约 8KB。这些数字必须可配置，并通过 benchmark 调参。
-5. 如果人物之间关系高度耦合，系统可以把相关人物放入同一 reduce batch；如果档案过长、关系冲突复杂、模型低置信或输出混淆身份，则退回单人物 reduce。
-6. 模型输出每个人物的增量更新或重写后的局部字段，覆盖范围包括人物性证据、基础属性、发言状态、近期活动、关系、关键经历索引；输出必须按 `character_id` 或 canonical identity 分离。
-7. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，关键经历按 `experience_id` 合并。
+2. 本地 Agent 按 `character_id` 优先、`canonical_name / aliases` 兜底，读取涉及人物的 `profile_brief` 和身份索引；不读取全量旧档案。
+3. 若人物缺失 `profile_brief`，调度 `CharacterProfileBriefBootstrap` 对该旧档案执行一次模型 compact，生成初始 brief；该步骤可在后台或当前人物首次进入 reduce 前完成。
+4. `CharacterImportanceTracker` / Brief Compact Gate 负责三层判断：
+   - 当前 segment 重要性：按当前窗口 document 覆盖率、发言、行动、关系变化、候选置信度和弱候选类型计算 `current_segment_score`。
+   - 滚动历史重要性：按既有人物档案中的 mentioned/speaking doc、story events、主要事件角色和最近出现间隔计算 `rolling_score` / `rolling_tier`。
+   - 状态转换：输出 `append_delta` / `needs_brief_compact` / `needs_full_profile_compact` / `defer_index_only` / `drop_for_profile`。
+5. 普通 Character Reduce 每条 prompt 只包含当前 batch 的 ordered evidence、章节短摘要、当前 outline segment、持久化 `profile_brief` 和必要来源索引。
+6. `defer_index_only` 的人物跳过 Character Reduce 模型调用，只保存极简 `outline_segment_id` / source range / role / one-line summary，累计到阈值或再次变热时再交给模型归并；`drop_for_profile` 的人物只保留底层 mention / scene index。
+7. 初始建议的 character reduce 预算是：document evidence 摘要不超过约 16KB；同一 prompt 默认一个目标人物；`profile_brief` 约 1-2KB。这些数字必须可配置，并通过 benchmark 调参。
+8. 如果人物之间关系高度耦合，系统可以把相关人物 brief 作为关系参照；如果关系冲突复杂、模型低置信或输出混淆身份，则退回单人物 reduce 或人工确认。
+9. 模型输出每个人物的增量更新或重写后的局部字段，覆盖范围包括人物性证据、基础属性、发言状态、关系、人物经历增量和 compact 触发信号；输出必须按 `character_id` 或 canonical identity 分离。
+10. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，人物经历按 `experience_id` / `outline_segment_id` 合并。
 
 该 loop 的目的不是让模型自由重写整个档案，而是在有限 evidence 和少量相关现有档案之间做语义归并，减少重复、别名分裂、关系冲突和调用次数。
+
+身份揭示是独立于普通 alias 归一的增量流程：
+
+- Character Evidence Agent 可以在当前 document 明确揭示两个既有人物、代号、伪装身份或过去身份为同一人物时输出 `identity_revelations`。
+- `identity_revelations` 必须带 `relation = same_person` 或等价状态、左右人物的 `character_id` / name、证据摘要、source doc/title 或 `outline_segment_id`、置信度。
+- `CharacterIdentityMergeService` 不直接消费 `identity_revelations` 写库合并；它先调用专门 review prompt，输出 `same_person_score`、`recommended_action`、证据强度与证据缺口。
+- 评分门控：
+  - `< 75`：视为低分相似/误报，只写消息流提示，不创建待确认合并。
+  - `75-89`：写入 `character_identity_merge_candidates`，状态为 `needs_more_evidence`，close-read 继续运行。
+  - `>= 90` 且 `recommended_action` 为 `merge_profiles` 或 `memory_correction`：写入 `character_identity_merge_candidates`，状态为 `pending_user_confirmation`，close-read 挂起在 `blocked_identity_merge_review`，等待人工确认。
+- 人工确认后，`CharacterIdentityMergeService` 才执行高置信 profile-to-profile merge：保留 survivor 的稳定 `canonical_name` 与 `character_id`，把 duplicate canonical / aliases 迁移到 aliases，合并基础属性、关系、经历、出场和发言 doc refs，追加一条 `role_in_segment = identity_reveal` 的经历索引，并删除 duplicate profile。
+- 合并后，其他人物 `relationships_json.target_name` 中指向 duplicate canonical / aliases 的关系应改写为 survivor canonical；事件 participants 也应尽量改写到 survivor canonical。
+- 服务不得基于本地名字相似、共现、关系亲密或能力相似自动判断同人；证据不足时必须返回 skipped / request_more_evidence，不得静默合并。
+- 存量污染修复是单独任务：当错误身份已经被写进无关人物 aliases 或经历时，应先做目标化 profile surgery / model-backed regeneration，再用 `CharacterIdentityMergeService` 处理确实存在的双档案合并。
+
+叙事误导后的历史记忆修正由 `CharacterMemoryCorrectionService` 承担：
+
+- Correction 是比 identity merge 更通用的 belief revision：后文可能推翻早期人物归属、事件时间、地点理解、因果解释或叙述者可信度。
+- 修正发现阶段应先运行 seed loop：从用户给出的疑似污染目标、人物档案索引、`outline_root.summary`、`outline_segment` 摘要和已有经历索引出发，选择少量 root / segment / doc 展开；不得为了定位证据重读整本小说。
+- 服务不自行发现语义错误，只执行模型确认或用户明确确认的 correction plan。生产路径不得用本地名字匹配、共现、相似能力等 heuristic 伪装“已理解叙事误导”。
+- Correction plan 至少包含 `status`、`correction_type`、`reason`、`confidence`、source refs 和 `operations`。
+- 初始支持的 operations：
+  - `remove_aliases`：从污染人物档案移除错误 alias。
+  - `move_story_events`：按明确 selector 将误归因经历从 source profile 迁移到 target profile，可在目标不存在时创建目标档案。
+  - `remove_story_events`：移除已被后文推翻且不应迁移的经历。
+  - `rewrite_relationship_target`：把其他人物关系中指向旧错误身份的 `target_name` 改写到正确人物。
+  - `ensure_profile`：为被误导阶段没有独立建档的真实人物创建最小档案。
+  - `append_correction_event`：追加一条可回源的修正经历，保留“后文揭示推翻早期理解”的审计痕迹。
+- `move_story_events` 必须使用明确 selector，例如 `event_ids`、`outline_segment_ids`、`source_doc_ids`、`participant_names` 或 `label_contains`；`misattributed_names` 只用于迁移后重写 participants，不能作为事件筛选条件，避免把正常出场事件误迁移。
+- 身份合并可以在概念上视为 CharacterMemoryCorrectionService 的特例；当前实现仍保留 `CharacterIdentityMergeService` 作为专门 profile-to-profile merge 内核，因为它需要更强的 survivor / duplicate / alias / relationship rewrite 约束。
 
 ### 4.5 世界观维护
 
@@ -630,46 +689,53 @@ source text + toc/bookmarks
 
 当前已实现：
 
-- `novel_agent/app/services/outline_service.py`
+- `novel_agent/app/services/outline_segment_index_service.py`
+- `novel_agent/app/prompts/outline_root_summary_prompt.py`
+- `novel_agent/app/services/narrative_memory_query_service.py`
 
 能力：
 
-- 自动创建故事大纲 Markdown
-- 追加本轮章节一行摘要
-- 追加时间节点
-- 对整体内容做长度裁剪
+- 从 chapters 的 `outline_update_json` 读取 `chapter_line`、`outline_segment`、`outline_segment_id` 和 source ranges
+- 刷新 `.memory/outlines/<book>.outline_segments.json`
+- 在同一 artifact 中保存 `segments` 与 `roots`
+- 使用模型把一组连续 `outline_segment` 压缩为 `root.summary`
+- 由 `segments` / `roots` 投影生成 `.memory/outlines/<book>.outline.md`
+- 为 BTree descent query 提供 `outline_root -> outline_segment -> chapter -> document` 的检索入口
 
 当前实现特点：
 
-- 目前是“追加式大纲”
-- 追加内容等价于 `provisional` 大纲增量，尚未区分暂定与定稿状态
-- 还没有真正的结构化主线压缩与弱相关淘汰逻辑
+- close-read / writer 写回的 `outline_update_json` 只应包含 `chapter_line`、`outline_segment`、`outline_segment_id`、source ranges、status 等字段
+- close-read / writer 不再生成或依赖 `timeline_events`
+- `.outline.md` 是人类可读投影，不是 Analyzer / Writer 的检索 source of truth
+- `outline_root.summary` 是模型压缩结果，用于快速判断相关性；不是多个 segment summary 的简单拼接
 - 还没有基于后续窗口重算某个 `target_range` 并升级为 `committed` 的机制
 
-目标扩展：
+标准 artifact：
 
 - `outline_update_json` 不再输出 `timeline_events` 或等价事件数组，避免模型沿旧 schema 生成弱事件列表
-- `memory/outlines/<book>.outline_segments.json` 保存滚动压缩后的 outline segments：
+- `.memory/outlines/<book>.outline_segments.json` 保存滚动压缩后的 outline segments 与 root indexes：
   - `segments[].outline_segment_id` 是分段摘要主键
   - `segments[].summary` 是模型对连续 chapter summaries 的自然语言压缩梗概
   - `segments[].source_doc_ids` / `segments[].source_doc_range` 用于回源到粗读 document
   - `segments[].source_title_indexes` 用于回源到 chapter summaries
-- `memory/outlines/<book>.outline_root.json` 保存 segment root index：
-  - `segment_refs`
-  - `source_doc_range`
-  - 极短 summary hints
+  - `roots[].outline_root_id` 是根索引主键
+  - `roots[].summary` 是模型对多个 segment 的连续剧情压缩概览
+  - `roots[].outline_segment_ids` 用于展开到下层 segment
+  - `roots[].source_doc_ids` / `roots[].source_doc_range`
+  - `roots[].source_title_indexes`
   - status
-- `memory/outlines/<book>.outline.md` 仍可作为人类可读投影，但不应是唯一大纲索引来源
-- 事件级多维索引的 source of truth SHOULD 是 Narrative Indexer 的 `FactualEventCard`，而不是 Story Outline Memory
+- `.memory/outlines/<book>.outline.md` 只由 segments / roots 投影生成，汇总为连续、易读的自然语言文本
+- 事件级多维索引的 source of truth SHOULD 是 Narrative Indexer cards，而不是 Story Outline Memory
 - Context Broker 应能按 `outline_segment_id`、`document_title_index` 或 `source_doc_range` 确定性返回摘要和原文证据
 
 滚动压缩策略：
 
 1. Agent 从 chapter summaries 收集尚未被任何 `outline_segment` 覆盖的连续章节。
-2. 当 pending chapter/document 数量达到阈值时，Agent 将连续摘要窗口发给模型。
+2. 当 pending chapter/document 数量达到阈值时，Agent 将连续摘要窗口发给模型，生成或刷新 `outline_segment`。
 3. 模型直接输出一个连续 `outline_segment.summary`，不得输出 `timeline_events`、`event_ids` 或 pending event 字段。
 4. Agent 保存该 segment 的 `source_doc_ids`、`source_doc_range`、`source_title_indexes` 与状态。
-5. 新 segment 进入 `outline_root`，供 BTree descent 查询先做范围选择。
+5. Agent 将每组连续 segments 发给模型压缩为 `outline_root.summary`；root summary 用于快速检索，root 保留 `outline_segment_ids` 用于确定性展开。
+6. 新 segment / root 进入 BTree descent 查询，供 Analyzer / Writer 先做范围选择。
 
 ### 4.7 章节结果持久化
 
@@ -888,7 +954,6 @@ source text + toc/bookmarks
 当前限制：
 
 - 还没有真正的“主线/弱支线淘汰”机制
-- 时间线事件还没有去重与关联分析
 - 顺序精读阶段立即写入的 `outline_update` 容易把暂时性的剧情方向误判为稳定主线
 - 章节摘要中的“结构功能/节奏”同样缺少后文参照，容易把铺垫、缓冲、过渡或关系试探误判为收束、转折或主线切换
 - 还没有用 `provisional / committed` 状态显式区分即时判断和复核后的定稿判断
@@ -1066,19 +1131,19 @@ Detector 的输出进入两个地方：
 人物更新候选的实际落地应拆为逐人物 loop，而不是一次性 Memory Candidate prompt 输出所有人的最终更新。推荐边界：
 
 - `Memory Candidate Agent` 负责把 Character Evidence 过滤为“本批次值得更新的人物集合”，保留 `character_id`、`canonical_name`、source ids 和 confidence。
-- `Character Reduce / Profile Update Agent` 负责逐人物更新，每次只处理一个人物。
+- `Character Reduce Agent` 负责逐人物增量更新，每次只处理一个人物；`Character Profile Brief Compact Agent` 只在 brief 缺失、重大变化或 compact 阈值触发时运行。
 - 本地 merge 层负责把模型 patch 写回长期档案，并维护结构化去重。
 
 逐人物 prompt 至少包含：
 
 - `target_character_id`
 - `target_canonical_name`
-- `existing_profile`
+- `profile_brief`
 - `ordered_character_evidence`
 - `chapter_summary`
-- `profile_update_policy`
+- `brief_compact_policy`
 
-`profile_update_policy` 必须声明：不要重复已有同义事实；人物性证据、基础属性和关系都要归并；关系明细写入 `relationships`，不要再复制进 `profile_summary_md`。
+`brief_compact_policy` 必须声明：普通 reduce 只写当前增量与 compact 触发信号，不要重复已有同义事实；人物性证据、基础属性和关系都要归并；关系明细写入 `relationships`，不要再复制进 `profile_summary_md`。
 
 ### 10.3.1 Summary / Outline Commit 状态
 
@@ -1277,8 +1342,8 @@ Detector 的输出进入两个地方：
 - Character Evidence Agent 可把多个 document 拼接为同一个 batch
 - Character Evidence Agent 输出不依赖逐 `doc_id`、原文连续子串或 offset
 - Character Evidence Agent 能输出发言判断、人物性证据、行动状态证据与关系证据
-- Character Reduce / Profile Update Agent 可按预算把少量相关人物档案组成 bounded profile batch，并在超预算或低置信时退回单人物 reduce
-- Profile Update Batch 输出按 `character_id` / canonical identity 分离，不串写人物经历
+- Character Reduce Agent 默认按单人物 `profile_brief` + 当前 evidence 运行；相关人物 brief 只能作为短关系参照
+- Character Reduce 输出按 `character_id` / canonical identity 分离，不串写人物经历
 - Memory Candidate Agent 能基于 Character Evidence 结果过滤低置信人物候选
 - `documents.character_keywords_json` 会被精读结果回写
 - `character_profiles` 会合并章节更新

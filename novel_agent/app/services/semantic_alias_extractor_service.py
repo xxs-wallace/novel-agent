@@ -74,10 +74,6 @@ class SemanticAliasExtractorService:
                 selected[document.doc_id] = document
         return sorted(selected.values(), key=lambda document: document.doc_id)
 
-    def seed_default_aliases(self, *, book_id: str, source: str = "seeded_default") -> list[SemanticAlias]:
-        _ = book_id, source
-        return []
-
     def _build_prompt(self, *, book_id: str, documents: Sequence[DocumentRow]) -> tuple[str, str]:
         doc_payload = [
             {

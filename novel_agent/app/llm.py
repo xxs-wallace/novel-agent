@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from typing import Any, Callable, cast
 import time
@@ -92,7 +93,14 @@ class JsonModelClient:
             provider=settings.provider,
         )
 
-    def generate_text(self, *, system_prompt: str, user_prompt: str, fallback_text: str | None = None) -> str:
+    def generate_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_text: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> str:
         if self.settings.dry_run:
             if fallback_text is None:
                 raise RuntimeError("Dry-run mode requires fallback_text")
@@ -108,6 +116,7 @@ class JsonModelClient:
         attempts = max(1, int(self.settings.request_retry_attempts))
         backoff = max(0.0, float(self.settings.request_retry_backoff_seconds))
         prompt_chars = len(system_prompt) + len(user_prompt)
+        request_timeout_seconds = max(1, int(timeout_seconds or self.settings.timeout_seconds or 1))
 
         try:
             text = self._generate_text_with_retries(
@@ -117,6 +126,7 @@ class JsonModelClient:
                 backoff=backoff,
                 prompt_chars=prompt_chars,
                 retry_label="primary",
+                timeout_seconds=request_timeout_seconds,
             )
         except Exception as primary_error:
             if not self._should_retry_without_thinking():
@@ -135,6 +145,7 @@ class JsonModelClient:
                 backoff=backoff,
                 prompt_chars=prompt_chars,
                 retry_label="thinking_disabled",
+                timeout_seconds=request_timeout_seconds,
             )
         if text or not self._should_retry_without_thinking():
             return text
@@ -151,6 +162,7 @@ class JsonModelClient:
             backoff=backoff,
             prompt_chars=prompt_chars,
             retry_label="thinking_disabled",
+            timeout_seconds=request_timeout_seconds,
         )
 
     def _generate_text_with_retries(
@@ -162,13 +174,14 @@ class JsonModelClient:
         backoff: float,
         prompt_chars: int,
         retry_label: str,
+        timeout_seconds: int,
     ) -> str:
         last_text = ""
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             started_at = time.monotonic()
             try:
-                response = cast(Any, model).generate(messages, temperature=self.settings.temperature)
+                response = self._generate_with_timeout(model=model, messages=messages, timeout_seconds=timeout_seconds)
                 text = str(response.content or "").strip()
                 if not text:
                     text = self._extract_text_from_raw_response(response).strip()
@@ -218,6 +231,26 @@ class JsonModelClient:
         raise RuntimeError(
             f"Model returned empty text after {attempts} attempts for model={self.settings.model_name}"
         )
+
+    def _generate_with_timeout(
+        self,
+        *,
+        model: Any,
+        messages: list[Any | dict[str, Any]],
+        timeout_seconds: int | None = None,
+    ) -> Any:
+        timeout_seconds = max(1, int(timeout_seconds or self.settings.timeout_seconds or 1))
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="novel-agent-llm")
+        future = executor.submit(cast(Any, model).generate, messages, temperature=self.settings.temperature)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"LLM request timed out after {timeout_seconds}s for model={self.settings.model_name}"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _should_retry_without_thinking(self) -> bool:
         if not self.settings.retry_without_thinking_on_failure:

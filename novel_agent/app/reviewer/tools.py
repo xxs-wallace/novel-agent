@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..schemas.creative_kb_schema import SceneBrief
-from ..schemas.narrative_inquiry_schema import AnalyzerBudget, EvidenceBundle, NarrativeInquiryRequest
+from ..schemas.narrative_inquiry_schema import AnalyzerBudget, EvidenceBundle, NarrativeInquiryRequest, REQUEST_TYPES
 from ..schemas.orchestration_schema import RetrievalContext
 from ..schemas.reviewer_schema import (
     ReviewBudget,
@@ -73,6 +73,40 @@ class ReviewerMemoryTool:
     def _inquiry_requests(self, tool_call: ReviewerToolCall) -> list[NarrativeInquiryRequest]:
         query = tool_call.query or tool_call.intent
         purpose = tool_call.reason_zh or tool_call.intent
+        request_type = str(
+            tool_call.budget.get("request_type")
+            or tool_call.budget.get("type")
+            or tool_call.budget.get("expected_evidence")
+            or ""
+        ).strip()
+        if request_type in REQUEST_TYPES:
+            priority = str(tool_call.budget.get("priority") or "high").strip().lower()
+            if priority not in {"high", "medium", "low"}:
+                priority = "high"
+            return [
+                NarrativeInquiryRequest(
+                    request_id=f"{tool_call.tool_call_id}:{request_type}",
+                    request_type=request_type,  # type: ignore[arg-type]
+                    query=query,
+                    purpose=purpose or "定位与评审问题相关的 Memory 证据。",
+                    priority=priority,  # type: ignore[arg-type]
+                    expected_depth=str(tool_call.budget.get("expected_depth") or ""),
+                    name=str(tool_call.budget.get("name") or ""),
+                    concept=str(tool_call.budget.get("concept") or ""),
+                    chapter_refs=[str(item) for item in tool_call.budget.get("chapter_refs", [])]
+                    if isinstance(tool_call.budget.get("chapter_refs"), list)
+                    else [],
+                    document_ids=self._int_list(tool_call.budget.get("document_ids")),
+                    source_doc_ids=self._int_list(tool_call.budget.get("source_doc_ids")),
+                    read_reason=str(tool_call.budget.get("read_reason") or ""),
+                    expected_confirmation=str(tool_call.budget.get("expected_confirmation") or ""),
+                    affects_analysis=str(tool_call.budget.get("affects_analysis") or ""),
+                    excerpt_focus=[str(item) for item in tool_call.budget.get("excerpt_focus", [])]
+                    if isinstance(tool_call.budget.get("excerpt_focus"), list)
+                    else [],
+                    metadata={"consumer": "reviewer", "tool_call_id": tool_call.tool_call_id},
+                )
+            ]
         return [
             NarrativeInquiryRequest(
                 request_id=f"{tool_call.tool_call_id}:scene-cards",
@@ -96,11 +130,13 @@ class ReviewerMemoryTool:
 
     def _inquiry_budget(self, data: Mapping[str, Any], review_budget: ReviewBudget) -> AnalyzerBudget:
         evidence_chars = int(data.get("max_evidence_chars_per_request") or min(2500, max(600, review_budget.max_context_chars // 4)))
+        explicit_type = str(data.get("request_type") or data.get("type") or data.get("expected_evidence") or "")
         return AnalyzerBudget(
             max_rounds=1,
             max_requests_per_round=2,
             max_total_requests=2,
-            max_raw_excerpt_requests=0,
+            max_raw_excerpt_requests=int(data.get("max_raw_excerpt_requests") or (1 if explicit_type == "raw_excerpt" else 0)),
+            max_raw_excerpt_chars_per_request=int(data.get("max_raw_excerpt_chars_per_request") or min(8000, max(1000, evidence_chars))),
             max_evidence_chars_per_request=evidence_chars,
             max_prompt_bytes=max(4096, review_budget.max_context_chars * 4),
         )
@@ -210,6 +246,21 @@ class ReviewerMemoryTool:
             if isinstance(value, str) and len(value) > limit:
                 payload[key] = f"{value[:limit].rstrip()}..."
         return payload
+
+    def _int_list(self, value: object) -> list[int]:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+            return []
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for item in value:
+            try:
+                number = int(item)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in seen:
+                seen.add(number)
+                cleaned.append(number)
+        return cleaned
 
     def _blocked(self, tool_call: ReviewerToolCall, error: str) -> ReviewerToolResult:
         return ReviewerToolResult(

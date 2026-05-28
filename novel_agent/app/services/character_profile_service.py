@@ -154,6 +154,10 @@ class CharacterProfileService:
                 story_events_by_name or {},
                 [incoming_name, *update_aliases],
             )
+            story_events_for_update.extend(self._as_list(update.get("key_experiences")))
+            story_events_for_update.extend(self._as_list(update.get("recent_key_experiences")))
+            story_events_for_update.extend(self._as_list(update.get("older_experience")))
+            story_events_for_update.extend(self._as_list(update.get("story_events")))
             mentioned_doc_ids = self._merge_chapter_indexes(
                 base_profile["mentioned_doc_ids"],
                 mentioned_doc_ids_for_update if mentioned_doc_ids_by_name is not None else doc_ids,
@@ -553,7 +557,7 @@ class CharacterProfileService:
                 continue
             label = str(raw_event.get("label") or "").strip()
             summary = str(raw_event.get("summary") or "").strip()
-            event_id = str(raw_event.get("event_id") or "").strip()
+            event_id = str(raw_event.get("event_id") or raw_event.get("experience_id") or "").strip()
             if not event_id:
                 event_id = self._story_event_id(
                     chapter_indexes=self._merge_chapter_indexes([], raw_event.get("source_chapter_indexes") or [chapter_index]),
@@ -563,10 +567,19 @@ class CharacterProfileService:
             if not (event_id and (label or summary)):
                 continue
             existing = merged.get(event_id, {})
+            outline_segment_id = str(
+                raw_event.get("outline_segment_id")
+                or raw_event.get("source_outline_segment_id")
+                or existing.get("outline_segment_id")
+                or ""
+            ).strip()
             item = {
                 "event_id": event_id,
                 "label": label or existing.get("label") or summary[:24],
                 "summary": summary if len(summary) >= len(str(existing.get("summary") or "")) else str(existing.get("summary") or ""),
+                "outline_segment_id": outline_segment_id,
+                "role_in_segment": str(raw_event.get("role_in_segment") or existing.get("role_in_segment") or "").strip(),
+                "compression_level": str(raw_event.get("compression_level") or existing.get("compression_level") or "").strip(),
                 "source_chapter_indexes": self._merge_chapter_indexes(
                     self._as_list(existing.get("source_chapter_indexes")),
                     self._as_list(raw_event.get("source_chapter_indexes") or [chapter_index]),
@@ -584,6 +597,8 @@ class CharacterProfileService:
             }
             if not item["source_doc_range"] and item["source_doc_ids"]:
                 item["source_doc_range"] = self._doc_range_text(item["source_doc_ids"])
+            if not item["outline_segment_id"] and str(event_id).startswith("outline-segment:"):
+                item["outline_segment_id"] = event_id
             merged[event_id] = item
         return sorted(
             merged.values(),
@@ -1205,7 +1220,12 @@ class CharacterProfileService:
             docs = item.source_doc_range or self._doc_range_text(item.source_doc_ids) or "?"
             label = item.label or item.event_id
             summary = item.summary or label
-            lines.append(f"- [{item.event_id}] {label}：{summary}（章节：{chapters}；documents：{docs}）")
+            source_bits = [f"章节：{chapters}", f"documents：{docs}"]
+            if item.outline_segment_id:
+                source_bits.append(f"outline_segment：{item.outline_segment_id}")
+            if item.role_in_segment:
+                source_bits.append(f"角色作用：{item.role_in_segment}")
+            lines.append(f"- [{item.event_id}] {label}：{summary}（{'；'.join(source_bits)}）")
         return lines
 
     def _merge_sources(self, target: dict[str, Any], source: dict[str, Any]) -> None:

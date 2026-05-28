@@ -24,11 +24,12 @@ export function WriterQuestionCard({
   onDefer
 }: WriterQuestionCardProps) {
   const canSubmit = Boolean(latestAnswerText.trim());
+  const researchLabel = questionSet.stage === "draft_research_user_input" ? "正文研究" : "大纲研究";
 
   return (
     <article className="writer-question-card">
       <div className="writer-question-card-header">
-        <span>大纲研究</span>
+        <span>{researchLabel}</span>
         <h3>需要你补充几个关键问题</h3>
       </div>
       <ol className="writer-question-list">

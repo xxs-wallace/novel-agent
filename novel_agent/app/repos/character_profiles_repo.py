@@ -48,6 +48,9 @@ class CharacterProfilesRepo:
 
     def upsert(self, conn: sqlite3.Connection, payload: dict[str, Any]) -> int:
         existing = self.get(conn, book_id=payload['book_id'], canonical_name=payload['canonical_name'])
+        existing_brief = self._json_dict(existing["profile_brief_json"]) if existing and "profile_brief" not in payload else {}
+        existing_brief_status = str(existing["profile_brief_status"] or "missing") if existing else "missing"
+        existing_brief_version = int(existing["profile_brief_version"] or 0) if existing else 0
         json_fields = {
             'aliases_json': json.dumps(payload.get('aliases', []), ensure_ascii=False),
             'personality_json': json.dumps(payload.get('personality', []), ensure_ascii=False),
@@ -60,6 +63,7 @@ class CharacterProfilesRepo:
             'chapter_indexes_json': json.dumps(payload.get('chapter_indexes', []), ensure_ascii=False),
             'mentioned_doc_ids_json': json.dumps(payload.get('mentioned_doc_ids', []), ensure_ascii=False),
             'speaking_doc_ids_json': json.dumps(payload.get('speaking_doc_ids', []), ensure_ascii=False),
+            'profile_brief_json': json.dumps(payload.get('profile_brief', existing_brief), ensure_ascii=False),
         }
         if existing:
             conn.execute(
@@ -70,6 +74,8 @@ class CharacterProfilesRepo:
                     personality_json = ?, occupations_json = ?,
                     age_timeline_json = ?, abilities_json = ?, recent_activity_json = ?, relationships_json = ?,
                     story_events_json = ?, chapter_indexes_json = ?, mentioned_doc_ids_json = ?, speaking_doc_ids_json = ?,
+                    profile_brief_json = ?, profile_brief_status = ?, profile_brief_version = ?,
+                    brief_compacted_until_doc_id = ?, brief_compacted_until_segment_id = ?, profile_brief_updated_at = ?,
                     first_seen_doc_id = ?, last_seen_doc_id = ?,
                     first_seen_title_index = ?, last_seen_title_index = ?, importance_score = ?,
                     profile_version = ?, updated_at = ?
@@ -91,6 +97,12 @@ class CharacterProfilesRepo:
                     json_fields['chapter_indexes_json'],
                     json_fields['mentioned_doc_ids_json'],
                     json_fields['speaking_doc_ids_json'],
+                    json_fields['profile_brief_json'],
+                    payload.get('profile_brief_status', existing_brief_status),
+                    int(payload.get('profile_brief_version', existing_brief_version)),
+                    payload.get('brief_compacted_until_doc_id', existing["brief_compacted_until_doc_id"]),
+                    payload.get('brief_compacted_until_segment_id', existing["brief_compacted_until_segment_id"]),
+                    payload.get('profile_brief_updated_at', existing["profile_brief_updated_at"]),
                     payload.get('first_seen_doc_id'),
                     payload.get('last_seen_doc_id'),
                     payload.get('first_seen_title_index'),
@@ -111,13 +123,15 @@ class CharacterProfilesRepo:
                 speaking_character_status, personhood_evidence_summary, evidence_level, personality_json,
                 occupations_json, age_timeline_json, abilities_json, recent_activity_json,
                 relationships_json, story_events_json, chapter_indexes_json, mentioned_doc_ids_json, speaking_doc_ids_json,
+                profile_brief_json, profile_brief_status, profile_brief_version,
+                brief_compacted_until_doc_id, brief_compacted_until_segment_id, profile_brief_updated_at,
                 first_seen_doc_id, last_seen_doc_id,
                 first_seen_title_index, last_seen_title_index, importance_score, profile_version,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (
-                payload['book_id'],
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    payload['book_id'],
                 payload['canonical_name'],
                 json_fields['aliases_json'],
                 payload.get('profile_summary_md', ''),
@@ -131,11 +145,17 @@ class CharacterProfilesRepo:
                 json_fields['recent_activity_json'],
                 json_fields['relationships_json'],
                 json_fields['story_events_json'],
-                json_fields['chapter_indexes_json'],
-                json_fields['mentioned_doc_ids_json'],
-                json_fields['speaking_doc_ids_json'],
-                payload.get('first_seen_doc_id'),
-                payload.get('last_seen_doc_id'),
+                    json_fields['chapter_indexes_json'],
+                    json_fields['mentioned_doc_ids_json'],
+                    json_fields['speaking_doc_ids_json'],
+                    json_fields['profile_brief_json'],
+                    payload.get('profile_brief_status', 'missing'),
+                    int(payload.get('profile_brief_version', 0)),
+                    payload.get('brief_compacted_until_doc_id'),
+                    payload.get('brief_compacted_until_segment_id', ''),
+                    payload.get('profile_brief_updated_at', ''),
+                    payload.get('first_seen_doc_id'),
+                    payload.get('last_seen_doc_id'),
                 payload.get('first_seen_title_index'),
                 payload.get('last_seen_title_index'),
                 int(payload.get('importance_score', 0)),
@@ -146,8 +166,68 @@ class CharacterProfilesRepo:
         )
         return int(cur.lastrowid)
 
+    @staticmethod
+    def _json_dict(raw_value: object) -> dict[str, Any]:
+        if not raw_value:
+            return {}
+        try:
+            value = json.loads(str(raw_value))
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
     def list_by_book(self, conn: sqlite3.Connection, *, book_id: str) -> list[sqlite3.Row]:
         return conn.execute('SELECT * FROM character_profiles WHERE book_id = ? ORDER BY canonical_name', (book_id,)).fetchall()
+
+    def update_profile_brief(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        character_id: int | None = None,
+        canonical_name: str | None = None,
+        profile_brief: dict[str, Any],
+        profile_brief_status: str,
+        compacted_until_doc_id: int | None = None,
+        compacted_until_segment_id: str = "",
+        updated_at: str,
+    ) -> None:
+        if character_id is not None:
+            row = self.get_by_id(conn, book_id=book_id, character_id=character_id)
+            where_clause = "book_id = ? AND character_id = ?"
+            where_args: list[Any] = [book_id, character_id]
+        elif canonical_name:
+            row = self.get(conn, book_id=book_id, canonical_name=canonical_name)
+            where_clause = "book_id = ? AND canonical_name = ?"
+            where_args = [book_id, canonical_name]
+        else:
+            return
+        if row is None:
+            return
+        version = int(row["profile_brief_version"] or 0) + 1
+        conn.execute(
+            f"""
+            UPDATE character_profiles
+            SET profile_brief_json = ?,
+                profile_brief_status = ?,
+                profile_brief_version = ?,
+                brief_compacted_until_doc_id = ?,
+                brief_compacted_until_segment_id = ?,
+                profile_brief_updated_at = ?,
+                updated_at = ?
+            WHERE {where_clause}
+            """,
+            [
+                json.dumps(profile_brief, ensure_ascii=False),
+                profile_brief_status,
+                version,
+                compacted_until_doc_id,
+                compacted_until_segment_id,
+                updated_at,
+                updated_at,
+                *where_args,
+            ],
+        )
 
     def delete_many(
         self,

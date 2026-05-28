@@ -41,6 +41,8 @@ def build_planning_prompt(
         "工具请求规则：\n"
         "- tool_requests 只是请求，runtime 会按 ReviewContextPolicy 和预算校验。\n"
         "- 如需 Memory 证据，只能请求 memory_query，由 ReviewerMemoryTool 执行；该工具会优先使用 narrative_scene_card_search 定位关键场景，并补充 outline segment / story memory 查询。\n"
+        "- memory_query 可以在 tool_request 或 budget 中声明 request_type / expected_evidence，例如 character_profile、character_state_card_search、story_detail、chapter_summary、theme_signal_card_search、source_arc 或 raw_excerpt。\n"
+        "- raw_excerpt 必须提供 read_reason、expected_confirmation、affects_analysis，并尽量提供 document_ids、source_doc_ids 或 chapter_refs；不要请求读取全部原文。\n"
         "- 如需 KB 证据，只能请求 kb_retrieval，由 ReviewerKBTool 执行。\n"
         "- 如需授权 artifact，只能请求 artifact_read，由 ReviewerArtifactTool 执行。\n"
         "- 不要请求 allowed_tools 之外的工具；若证据不足，请在 notes_zh 中说明。\n\n"
@@ -165,6 +167,7 @@ def _plan_example(spec: ReviewerPromptSpec, target_id: str) -> dict[str, Any]:
         "query": "面向工具的中文查询意图。",
         "priority": "high|medium|low",
         "expected_evidence": "期望证据类型",
+        "request_type": "可选：Memory request type，例如 character_profile、chapter_summary 或 raw_excerpt。",
         "reason_zh": "说明为什么该证据和当前 reviewer 维度相关。",
     }
     return {
