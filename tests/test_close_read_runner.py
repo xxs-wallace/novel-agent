@@ -284,6 +284,78 @@ def test_character_reduce_skips_model_for_index_only_characters(tmp_path: Path, 
     assert payload["character_updates"][0]["recent_key_experiences"][0]["compression_level"] == "index_only"
 
 
+def test_character_reduce_merge_fields_are_maintained_locally(tmp_path: Path) -> None:
+    config = CloseReadAgentConfig(book_id="book-local-reduce-fields", sqlite_path=str(tmp_path / "local_reduce.db"))
+    runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "local_reduce.db", config=config)
+    group = {
+        "source_doc_ids": [7, 8, 9],
+        "outline_segment_ids": [
+            "outline-segment:chapter-4:docs-7-8",
+            "outline-segment:chapter-5:docs-9-9",
+        ],
+        "evidence_items": [
+            {
+                "evidence_id": "char-evidence:old",
+                "outline_segment_id": "outline-segment:chapter-4:docs-7-8",
+                "source_doc_ids": [7, 8],
+                "source_doc_range": "7-8",
+            },
+            {
+                "evidence_id": "char-evidence:new",
+                "outline_segment_id": "outline-segment:chapter-5:docs-9-9",
+                "source_doc_ids": [9],
+                "source_doc_range": "9",
+            },
+        ],
+    }
+    existing_brief = {
+        "source_refs": [{"outline_segment_id": "outline-segment:chapter-1:docs-1-1", "source_doc_ids": [1]}]
+    }
+    updates = [
+        {
+            "canonical_name": "角色甲",
+            "recent_key_experiences": [
+                {
+                    "experience_id": "char-exp:角色甲:outline-segment:chapter-5:docs-9-9",
+                    "summary": "角色甲确认新线索。",
+                    "outline_segment_id": "outline-segment:chapter-5:docs-9-9",
+                }
+            ],
+            "profile_brief": {
+                "identity": {"canonical_name": "角色甲"},
+                "current_state": "确认新线索。",
+                "source_refs": [{"outline_segment_id": "model-full-ref", "source_doc_ids": [99]}],
+                "compacted_until": {
+                    "doc_id": 9,
+                    "outline_segment_id": "outline-segment:chapter-4:docs-7-8,outline-segment:chapter-5:docs-9-9",
+                },
+            },
+            "consumed_pending_experience_ids": ["model-controlled-id"],
+            "source_ref_delta": [{"outline_segment_id": "outline-segment:chapter-5:docs-9-9", "source_doc_ids": [9]}],
+        }
+    ]
+
+    prepared = runner._prepare_character_reduce_updates_for_merge(  # noqa: SLF001
+        updates,
+        group=group,
+        existing_profile_brief=existing_brief,
+    )
+
+    update = prepared[0]
+    brief = update["profile_brief"]
+    assert update["recent_key_experiences"] == []
+    assert update["key_experiences"][0]["experience_id"] == "char-exp:角色甲:outline-segment:chapter-5:docs-9-9"
+    assert update["consumed_pending_experience_ids"] == ["char-exp:角色甲:outline-segment:chapter-5:docs-9-9"]
+    assert brief["compacted_until"] == {
+        "doc_id": 9,
+        "outline_segment_id": "outline-segment:chapter-5:docs-9-9",
+    }
+    source_segment_ids = {ref.get("outline_segment_id") for ref in brief["source_refs"]}
+    assert "outline-segment:chapter-1:docs-1-1" in source_segment_ids
+    assert "outline-segment:chapter-5:docs-9-9" in source_segment_ids
+    assert "model-full-ref" not in source_segment_ids
+
+
 def test_prompt_input_metrics_measure_character_reduce_context(tmp_path: Path) -> None:
     config = CloseReadAgentConfig(book_id="book-prompt-metrics", sqlite_path=str(tmp_path / "prompt_metrics.db"))
     runner = CloseReadRunner(repo_root=tmp_path, db_path=tmp_path / "prompt_metrics.db", config=config)

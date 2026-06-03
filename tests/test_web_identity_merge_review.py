@@ -142,15 +142,40 @@ def test_web_session_exposes_identity_merge_confirmation_card(tmp_path) -> None:
     messages = session.messages("book-1")
     cards = [card for message in messages for card in message.decision_cards]
 
+    assert any("甲 / 乙" in message.content and "合并为「甲」" in message.content for message in messages)
     assert any(card.card_id.endswith(candidate_id) for card in cards)
+    assert any(card.title == "待确认人物身份合并：甲 / 乙" for card in cards)
+    assert any("候选：甲 / 乙" in card.body and "建议保留档案：甲" in card.body for card in cards)
     assert {action["action"] for card in cards for action in card.actions} >= {
         "confirm_identity_merge",
         "reject_identity_merge",
         "request_identity_merge_more_evidence",
         "route_identity_merge_to_correction",
     }
+    assert any(action["label"] == "确认合并为甲" for card in cards for action in card.actions)
     progress = session.task_progress("book-1")
     assert progress.step == "确认人物身份合并候选"
+
+
+def test_web_session_refreshes_stale_identity_merge_message_with_candidate_names(tmp_path) -> None:
+    session, _action_service, candidate_id = _prepare_identity_candidate(tmp_path)
+    session.append_message(
+        "book-1",
+        role="assistant",
+        content="阅读已暂停：发现高置信人物身份候选，需要你确认后再继续。",
+        payload={"channel": "identity_merge_review", "candidate_id": candidate_id},
+    )
+
+    messages = session.messages("book-1")
+    identity_messages = [
+        message
+        for message in messages
+        if message.payload.get("channel") == "identity_merge_review" and message.payload.get("candidate_id") == candidate_id
+    ]
+
+    assert len(identity_messages) == 1
+    assert "甲 / 乙" in identity_messages[0].content
+    assert identity_messages[0].decision_cards[0].title == "待确认人物身份合并：甲 / 乙"
 
 
 def test_web_confirm_identity_merge_action_merges_profiles_and_resolves_block(tmp_path) -> None:
@@ -164,6 +189,8 @@ def test_web_confirm_identity_merge_action_merges_profiles_and_resolves_block(tm
     )
 
     assert result.status == "ok"
+    assert "甲 / 乙" in result.message
+    assert "保留为「甲」" in result.message
     db = NovelAgentDB(session.facade.db_path_for_book("book-1"))
     with db.connect() as conn:
         db.init_schema(conn)

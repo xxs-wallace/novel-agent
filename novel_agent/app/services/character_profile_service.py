@@ -73,6 +73,8 @@ STYLE_META_PATTERNS = (
     "写法上",
 )
 WHITESPACE_RE = re.compile(r"\s+")
+MAX_IDENTITY_ALIASES_PER_UPDATE = 8
+MAX_STORY_EVENTS_PER_PROFILE = 80
 
 
 def _utc_now() -> str:
@@ -114,19 +116,20 @@ class CharacterProfileService:
             if not incoming_name:
                 continue
             update_aliases = self._normalize_aliases(update.get("aliases"))
+            identity_aliases = self._identity_safe_aliases(update_aliases)
             matched_rows, known_name_map = self._find_matching_rows(
                 conn,
                 book_id=book_id,
-                names=[incoming_name, *update_aliases],
+                names=[incoming_name, *identity_aliases],
             )
             id_row = self._row_for_character_id(conn, book_id=book_id, character_id=update.get("character_id"))
             if id_row is not None and all(self._row_identity(row) != self._row_identity(id_row) for row in matched_rows):
                 matched_rows.insert(0, id_row)
                 known_name_map.update(self._known_name_map_for_rows([id_row]))
-            all_known_names = [incoming_name, *update_aliases]
+            all_known_names = [incoming_name, *identity_aliases]
             for row in matched_rows:
                 all_known_names.append(self._normalize_name(row["canonical_name"]))
-                all_known_names.extend(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
+                all_known_names.extend(self._identity_safe_aliases(self._normalize_aliases(self._load_json_field(row, "aliases_json"))))
             existing_canonical_names = [
                 self._normalize_name(row["canonical_name"])
                 for row in matched_rows
@@ -144,15 +147,15 @@ class CharacterProfileService:
             base_profile = self._merge_existing_rows(matched_rows)
             mentioned_doc_ids_for_update = self._doc_ids_for_names(
                 mentioned_doc_ids_by_name or {},
-                [incoming_name, *update_aliases],
+                [incoming_name, *identity_aliases],
             )
             speaking_doc_ids_for_update = self._doc_ids_for_names(
                 speaking_doc_ids_by_name or {},
-                [incoming_name, *update_aliases],
+                [incoming_name, *identity_aliases],
             )
             story_events_for_update = self._events_for_names(
                 story_events_by_name or {},
-                [incoming_name, *update_aliases],
+                [incoming_name, *identity_aliases],
             )
             story_events_for_update.extend(self._as_list(update.get("key_experiences")))
             story_events_for_update.extend(self._as_list(update.get("recent_key_experiences")))
@@ -168,7 +171,7 @@ class CharacterProfileService:
             )
             aliases = self._merge_aliases(
                 base_profile["aliases"],
-                [incoming_name, *update_aliases],
+                [incoming_name, *identity_aliases],
                 canonical_name=canonical_name,
             )
             personality = self._merge_attribute_items(
@@ -280,30 +283,42 @@ class CharacterProfileService:
                 mentioned_doc_ids=mentioned_doc_ids,
                 speaking_doc_ids=speaking_doc_ids,
             )
-            self.profiles_repo.upsert(
-                conn,
-                {
-                    "book_id": book_id,
-                    **snapshot.to_dict(),
-                    "story_events": story_events,
-                    "mentioned_doc_ids": mentioned_doc_ids,
-                    "speaking_doc_ids": speaking_doc_ids,
-                    "first_seen_doc_id": self._min_int(base_profile["first_seen_doc_id"], first_doc_id),
-                    "last_seen_doc_id": self._max_int(base_profile["last_seen_doc_id"], last_doc_id),
-                    "first_seen_title_index": self._min_int(
-                        base_profile["first_seen_title_index"],
-                        chapter_index,
-                    ),
-                    "last_seen_title_index": self._max_int(
-                        base_profile["last_seen_title_index"],
-                        chapter_index,
-                    ),
-                    "importance_score": int(base_profile["importance_score"]),
-                    "profile_version": int(base_profile["profile_version"]) + 1,
-                    "created_at": base_profile["created_at"] or _utc_now(),
-                    "updated_at": _utc_now(),
-                },
-            )
+            profile_payload = {
+                "book_id": book_id,
+                **snapshot.to_dict(),
+                "story_events": story_events,
+                "mentioned_doc_ids": mentioned_doc_ids,
+                "speaking_doc_ids": speaking_doc_ids,
+                "first_seen_doc_id": self._min_int(base_profile["first_seen_doc_id"], first_doc_id),
+                "last_seen_doc_id": self._max_int(base_profile["last_seen_doc_id"], last_doc_id),
+                "first_seen_title_index": self._min_int(
+                    base_profile["first_seen_title_index"],
+                    chapter_index,
+                ),
+                "last_seen_title_index": self._max_int(
+                    base_profile["last_seen_title_index"],
+                    chapter_index,
+                ),
+                "importance_score": int(base_profile["importance_score"]),
+                "profile_version": int(base_profile["profile_version"]) + 1,
+                "created_at": base_profile["created_at"] or _utc_now(),
+                "updated_at": _utc_now(),
+            }
+            profile_brief = update.get("profile_brief")
+            if isinstance(profile_brief, dict) and profile_brief:
+                compacted_until = profile_brief.get("compacted_until")
+                compacted = dict(compacted_until) if isinstance(compacted_until, dict) else {}
+                profile_payload.update(
+                    {
+                        "profile_brief": profile_brief,
+                        "profile_brief_status": str(update.get("profile_brief_status") or "ready").strip() or "ready",
+                        "profile_brief_version": int(base_profile.get("profile_brief_version") or 0) + 1,
+                        "brief_compacted_until_doc_id": self._safe_int(compacted.get("doc_id")),
+                        "brief_compacted_until_segment_id": str(compacted.get("outline_segment_id") or "").strip(),
+                        "profile_brief_updated_at": _utc_now(),
+                    }
+                )
+            self.profiles_repo.upsert(conn, profile_payload)
             duplicate_names = [
                 self._normalize_name(row["canonical_name"])
                 for row in matched_rows
@@ -329,7 +344,7 @@ class CharacterProfileService:
         for row in rows:
             canonical_name = self._normalize_name(row["canonical_name"])
             row_names = {canonical_name}
-            row_names.update(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
+            row_names.update(self._identity_safe_aliases(self._normalize_aliases(self._load_json_field(row, "aliases_json"))))
             if normalized_names and row_names.intersection(normalized_names):
                 matched_rows.append(row)
             for item in row_names:
@@ -356,11 +371,16 @@ class CharacterProfileService:
         for row in rows:
             canonical_name = self._normalize_name(row["canonical_name"])
             row_names = {canonical_name}
-            row_names.update(self._normalize_aliases(self._load_json_field(row, "aliases_json")))
+            row_names.update(self._identity_safe_aliases(self._normalize_aliases(self._load_json_field(row, "aliases_json"))))
             for item in row_names:
                 if item:
                     known_name_map[item] = canonical_name
         return known_name_map
+
+    def _identity_safe_aliases(self, aliases: list[str]) -> list[str]:
+        if len(aliases) > MAX_IDENTITY_ALIASES_PER_UPDATE:
+            return []
+        return aliases
 
     def _doc_ids_for_names(self, mapping: dict[str, list[int]], names: list[str]) -> list[int]:
         doc_ids: list[int] = []
@@ -402,6 +422,7 @@ class CharacterProfileService:
             "last_seen_title_index": None,
             "importance_score": 0,
             "profile_version": 0,
+            "profile_brief_version": 0,
             "created_at": "",
         }
         for row in rows:
@@ -512,6 +533,11 @@ class CharacterProfileService:
                 int(merged["profile_version"]),
                 int(row["profile_version"] or 0),
             )
+            if "profile_brief_version" in row.keys():
+                merged["profile_brief_version"] = max(
+                    int(merged["profile_brief_version"]),
+                    int(row["profile_brief_version"] or 0),
+                )
             created_at = str(row["created_at"] or "").strip()
             if created_at and (not merged["created_at"] or created_at < merged["created_at"]):
                 merged["created_at"] = created_at
@@ -607,7 +633,7 @@ class CharacterProfileService:
                 max(item.get("source_doc_ids") or [0]),
                 str(item.get("event_id") or ""),
             ),
-        )[-24:]
+        )[-MAX_STORY_EVENTS_PER_PROFILE:]
 
     def _story_event_id(self, *, chapter_indexes: list[int], label: str, summary: str) -> str:
         chapter = chapter_indexes[-1] if chapter_indexes else 0

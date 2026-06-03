@@ -67,8 +67,9 @@ Web 主界面 SHOULD 在会话顶部提供“小说专家意见”按钮。
 
 - 同一个聊天输入框进入 Analyzer mode。
 - 用户消息 SHALL 以结构化 payload 标记，例如 `channel = outline_analyzer`。
-- 后端 SHALL 调用 Outline Analyzer，而不是普通自然语言回执或 Writer action。
-- Analyzer 回复作为普通 assistant message 出现在同一消息流中。
+- 后端 SHALL 创建 Outline Analyzer 后台任务，而不是在消息接口中同步阻塞调用 Analyzer，也不是走普通自然语言回执或 Writer action。
+- 用户消息 SHALL 立即进入消息流；系统 SHOULD 追加或返回可见的“小说专家正在分析”状态，并带可追踪的 `job_id` / `turn_id` 技术详情。
+- Analyzer 回复作为普通 assistant message 出现在同一消息流中；任务失败时 SHALL 追加 error message；需要用户补充时 SHALL 追加 assistant message 并保持 Analyzer turn 为未完成状态。
 - 用户可退出 Analyzer mode，回到普通 Agent / Writer 输入。
 
 Analyzer mode MAY 与 Writer review gate 并存，但不得绕过 Writer gate：
@@ -76,6 +77,41 @@ Analyzer mode MAY 与 Writer review gate 并存，但不得绕过 Writer gate：
 - 若当前 Writer 正等待用户确认，Analyzer 可以讨论问题和提供建议。
 - Analyzer 的回答不得自动成为 Writer 的 `supplement_text`、`revision_feedback` 或 `answer_text`。
 - 用户若想采纳 Analyzer 建议，仍必须在 Writer 对应输入框或决策卡中明确提交。
+
+## Analyzer Background Job And Recoverable Turn State
+
+Outline Analyzer SHALL 作为可观测、可恢复的后台任务执行。
+
+- Web Analyzer message endpoint MUST NOT 长时间同步等待模型返回。
+- 每条 Analyzer 用户问题 SHOULD 创建一个 `outline_analyzer` job，并绑定一个 `turn_id`。
+- `outline_analyzer` job MUST 覆盖当前 task 的用户可见状态，例如“小说专家正在分析剧情”。
+- 当 Analyzer job 正在运行时，任务列表和任务详情 SHOULD 显示该 job，而不是只回落到 close-read checkpoint / paused 状态。
+- Analyzer job MAY 与 Writer gate 并存，但不得自动确认、提交、恢复或取消 Writer gate。
+
+Analyzer turn 至少支持以下状态：
+
+- `queued`：已收到用户问题，等待后台任务运行。
+- `running`：Analyzer loop 正在调用模型、查询证据或整理结论。
+- `need_user_input`：Analyzer 已判断必须补充用户偏好、授权边界或上下文；已向用户提问，但最终分析尚未完成。
+- `succeeded`：本轮 Analyzer 已输出最终分析结论。
+- `failed`：模型、JSON、检索、超时或系统错误导致本轮无法完成。
+- `cancelled`：用户或系统取消本轮分析。
+- `interrupted_can_resume`：进程重启或中断后发现 turn 尚未完成，且存在足够 trace 可恢复或继续。
+
+Analyzer turn state SHOULD 持久化在当前 book 的 Analyzer 专用目录下，例如 `.memory/analyzer/{book_id}/`。持久化内容 SHOULD 同时支持人工审计和程序恢复：
+
+- `conversation memory`：已完成 Analyzer 对话的压缩历史，供后续 turn 理解上文；它不是正式小说 Memory，不得被 Writer / Analyzer 作为 confirmed canon 直接读取，除非明确标注为 Analyzer 对话上下文。
+- `turn metadata`：`book_id`、`turn_id`、`job_id`、`user_message_id`、`assistant_message_id`、状态、时间、错误摘要和 source refs。
+- `active notebook`：本轮尚未完成时的 AnalyzerNotebook、已确认 evidence、待确认缺口和用户偏好问题。
+- `prompt trace`：本轮尚未完成时，每次模型调用的 prompt 输入、模型结构化输出、research request、broker evidence bundle、triage / commit 结果和 final / need_user_input 依据。
+
+Prompt trace 保留规则：
+
+- 若 turn 已 `succeeded`，系统 SHOULD 将最终回答、sources、结论摘要和必要 conversation memory 写入历史；中间 prompt trace MAY 被删除、压缩或仅作为调试 artifact 保留。
+- 若 turn 为 `running`、`need_user_input`、`failed`、`cancelled` 或 `interrupted_can_resume`，系统 MUST 保留本轮已发生的 prompt trace，直到该 turn 产生最终结论或被用户明确废弃。
+- `need_user_input` 虽然已经给出 assistant message，但不代表 turn 完成；用户补充信息后，Analyzer SHALL 结合补充文本、active notebook、已提交 evidence 和保留的 prompt trace 继续分析。
+- 重启后系统 SHOULD 扫描 Analyzer state；对未完成 turn 恢复为 `need_user_input`、`interrupted_can_resume` 或 `failed`，并在消息流中同步可见状态。
+- 系统不得用对话记录重新猜测未完成 turn 的内部状态；若 prompt trace 不足以恢复，必须显式标记 `failed` / `interrupted_can_resume` 并说明需要重新运行。
 
 ## Initial Analysis Problem
 
@@ -88,6 +124,8 @@ Analyzer mode MAY 与 Writer review gate 并存，但不得绕过 Writer gate：
 5. 模型根据返回 evidence 更新 `AnalyzerNotebook`。
 6. 信息仍不足时继续请求补充；若需要回读原文，模型必须说明章节或片段的选择理由。
 7. 达到预算、信息足够或需要用户偏好确认后，模型给出会话回答。
+
+如果第 7 步返回需要用户补充偏好或授权，Analyzer SHALL 进入 `need_user_input`，并保留本轮 prompt trace 与 notebook；用户补充后继续同一 turn，而不是开启一个仅凭聊天历史的新分析。
 
 ## Analyzer Seed Packet
 

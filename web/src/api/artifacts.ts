@@ -1,8 +1,11 @@
 import { apiFetch, jsonBody } from "./client";
 import type { ArtifactSurface, ArtifactTreeNode, ArtifactView } from "./types";
 
-export function getArtifactTree(taskId: string, surface: ArtifactSurface): Promise<ArtifactTreeNode[]> {
+export function getArtifactTree(taskId: string, surface: ArtifactSurface, query = ""): Promise<ArtifactTreeNode[]> {
   const params = new URLSearchParams({ surface });
+  if (query.trim()) {
+    params.set("q", query.trim());
+  }
   return apiFetch<ArtifactTreeNode[]>(`/api/tasks/${encodeURIComponent(taskId)}/artifact-tree?${params.toString()}`);
 }
 

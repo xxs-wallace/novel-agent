@@ -70,7 +70,7 @@ def test_web_task_message_action_and_command_contract(tmp_path: Path) -> None:
     assert command.json()["progress"]["task_id"] == "book-one"
 
 
-def test_web_outline_analyzer_message_calls_service_and_does_not_submit_writer_action(tmp_path: Path) -> None:
+def test_web_outline_analyzer_message_creates_job_and_does_not_submit_writer_action(tmp_path: Path) -> None:
     class _FakeFacade:
         def __init__(self) -> None:
             self.analyzer_calls: list[dict[str, Any]] = []
@@ -91,6 +91,7 @@ def test_web_outline_analyzer_message_calls_service_and_does_not_submit_writer_a
     app = create_app(repo_root=tmp_path)
     fake_facade = _FakeFacade()
     session = WebSessionService(repo_root=tmp_path, facade=fake_facade)  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
     session.append_writer_question_message(
         "book-one",
         {
@@ -114,13 +115,20 @@ def test_web_outline_analyzer_message_calls_service_and_does_not_submit_writer_a
     )
 
     assert response.status_code == 200
-    assert response.json()["role"] == "user"
+    response_payload = response.json()
+    assert response_payload["role"] == "user"
+    assert response_payload["payload"]["job_id"]
+    assert response_payload["payload"]["turn_id"]
+    assert fake_facade.writer_action_calls == []
+    summary = asyncio.run(app.state.job_manager.wait(response_payload["payload"]["job_id"], timeout=2.0))
+    assert summary.status == "succeeded"
     assert fake_facade.analyzer_calls[0]["book_id"] == "book-one"
     assert "未解之谜" in fake_facade.analyzer_calls[0]["question"]
-    assert fake_facade.writer_action_calls == []
-    messages = session.messages("book-one")
+    messages = session._messages["book-one"]  # noqa: SLF001 - inspect raw stream without unrelated sync hooks.
     assert messages[-1].role == "assistant"
     assert messages[-1].payload["channel"] == "outline_analyzer"
+    assert messages[-1].payload["job_id"] == response_payload["payload"]["job_id"]
+    assert messages[-1].payload["turn_id"] == response_payload["payload"]["turn_id"]
     assert messages[-1].payload["sources"] == [{"label": "故事大纲"}, {"label": "章节摘要"}]
     rendered = json.dumps(
         [message.model_dump() if hasattr(message, "model_dump") else message.dict() for message in messages],
@@ -130,6 +138,88 @@ def test_web_outline_analyzer_message_calls_service_and_does_not_submit_writer_a
     assert "supplement_text" not in rendered
     assert "revision_feedback" not in rendered
     assert "answer_text" not in rendered
+
+
+def test_web_outline_analyzer_job_failure_appends_error_message(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("model request timed out")
+
+    app = create_app(repo_root=tmp_path)
+    session = WebSessionService(repo_root=tmp_path, facade=_FakeFacade())  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
+    app.state.web_session_service = session
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/tasks/book-one/messages",
+        json={"content": "帮我分析下一阶段风险", "payload": {"channel": "outline_analyzer"}},
+    )
+
+    assert response.status_code == 200
+    job_id = response.json()["payload"]["job_id"]
+    summary = asyncio.run(app.state.job_manager.wait(job_id, timeout=2.0))
+    assert summary.status == "failed"
+    messages = session._messages["book-one"]  # noqa: SLF001 - inspect raw stream without unrelated sync hooks.
+    assert messages[-1].role == "error"
+    assert messages[-1].payload["channel"] == "outline_analyzer"
+    assert messages[-1].payload["status"] == "failed"
+    assert messages[-1].payload["job_id"] == job_id
+
+
+def test_web_outline_analyzer_need_user_input_keeps_turn_open(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return {
+                    "status": "needs_user_preference",
+                    "answer": "需要你确认：是否允许把关键秘密提前揭开？",
+                    "sources": [{"label": "故事大纲"}],
+                }
+            return {
+                "status": "ok",
+                "answer": "结论：可以延后揭开秘密，先回收外层线索。",
+                "sources": [{"label": "故事大纲"}],
+            }
+
+    app = create_app(repo_root=tmp_path)
+    fake_facade = _FakeFacade()
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
+    app.state.web_session_service = session
+    client = TestClient(app)
+
+    first = client.post(
+        "/api/tasks/book-one/messages",
+        json={"content": "下一阶段是否适合揭开秘密？", "payload": {"channel": "outline_analyzer"}},
+    )
+    assert first.status_code == 200
+    first_payload = first.json()["payload"]
+    asyncio.run(app.state.job_manager.wait(first_payload["job_id"], timeout=2.0))
+    messages = session._messages["book-one"]  # noqa: SLF001 - inspect raw stream without unrelated sync hooks.
+    assert messages[-1].role == "assistant"
+    assert messages[-1].payload["status"] == "need_user_input"
+
+    second = client.post(
+        "/api/tasks/book-one/messages",
+        json={
+            "content": "先不要揭开，只回收外层线索。",
+            "payload": {"channel": "outline_analyzer", "turn_id": first_payload["turn_id"]},
+        },
+    )
+
+    assert second.status_code == 200
+    second_payload = second.json()["payload"]
+    assert second_payload["turn_id"] == first_payload["turn_id"]
+    asyncio.run(app.state.job_manager.wait(second_payload["job_id"], timeout=2.0))
+    assert len(fake_facade.calls) == 2
+    assert "用户补充" in fake_facade.calls[1]["question"]
+    assert "先不要揭开" in fake_facade.calls[1]["question"]
+    assert session._messages["book-one"][-1].payload["status"] == "ok"  # noqa: SLF001
 
 
 def test_openapi_exposes_writer_question_contract(tmp_path: Path) -> None:
@@ -219,6 +309,84 @@ def test_task_status_shows_active_close_read_job_instead_of_paused_checkpoint(tm
 
     assert tasks.status_code == 200
     assert tasks.json()[0]["active_job"]["job_id"] == "job-close-read"
+
+
+def test_task_status_shows_active_outline_analyzer_job_before_close_read(tmp_path: Path) -> None:
+    class _FakeJobManager:
+        def active_jobs(self, *, task_id: str | None = None, job_type: str | None = None) -> list[JobSummary]:
+            now = datetime.now(timezone.utc)
+            return [
+                JobSummary(
+                    job_id="job-close-read",
+                    task_id=task_id or "book-one",
+                    type="close_read",
+                    status="running",
+                    message="后台任务正在运行",
+                    created_at=now,
+                    updated_at=now,
+                    events_url="/api/jobs/job-close-read/events",
+                ),
+                JobSummary(
+                    job_id="job-outline",
+                    task_id=task_id or "book-one",
+                    type="outline_analyzer",
+                    status="running",
+                    message="后台任务正在运行",
+                    created_at=now,
+                    updated_at=now,
+                    events_url="/api/jobs/job-outline/events",
+                ),
+            ]
+
+    client = TestClient(create_app(repo_root=tmp_path, job_manager=_FakeJobManager()))  # type: ignore[arg-type]
+    client.post("/api/tasks", json={"task_id": "book-one", "source_path": str(tmp_path / "source.txt")})
+
+    status = client.get("/api/tasks/book-one/status")
+
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["flow"] == "小说专家意见"
+    assert payload["step"] == "小说专家正在分析剧情"
+    assert payload["message"] == "小说专家正在分析剧情。"
+
+
+def test_task_status_shows_recent_failed_close_read_job_instead_of_paused_checkpoint(tmp_path: Path) -> None:
+    class _FakeJobManager:
+        def active_jobs(self, *, task_id: str | None = None, job_type: str | None = None) -> list[JobSummary]:
+            return []
+
+        def jobs(
+            self,
+            *,
+            task_id: str | None = None,
+            job_type: str | None = None,
+            statuses: set[str] | None = None,
+        ) -> list[JobSummary]:
+            assert statuses == {"failed"}
+            return [
+                JobSummary(
+                    job_id="job-close-read-failed",
+                    task_id=task_id or "book-one",
+                    type="close_read",
+                    status="failed",
+                    message="后台任务遇到问题：missing chapter_summary_md plot synopsis",
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                    events_url="/api/jobs/job-close-read-failed/events",
+                )
+            ]
+
+    client = TestClient(create_app(repo_root=tmp_path, job_manager=_FakeJobManager()))  # type: ignore[arg-type]
+    client.post("/api/tasks", json={"task_id": "book-one", "source_path": str(tmp_path / "source.txt")})
+
+    status = client.get("/api/tasks/book-one/status")
+
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["flow"] == "阅读"
+    assert payload["step"] == "阅读遇到问题"
+    assert payload["next_action"] == "查看错误并从最近 checkpoint 重试"
+    assert "missing chapter_summary_md plot synopsis" in payload["message"]
 
 
 def test_task_status_counts_narrative_scene_index_cards(tmp_path: Path) -> None:

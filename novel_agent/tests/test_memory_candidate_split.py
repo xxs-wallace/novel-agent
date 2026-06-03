@@ -13,6 +13,124 @@ from novel_agent.app.services.chapter_assembler_service import ChapterAssemblerS
 from novel_agent.app.services.memory_candidate_service import MemoryCandidateService
 
 
+def _close_read_runner(tmp_path: Path) -> CloseReadRunner:
+    return CloseReadRunner(
+        repo_root=tmp_path,
+        db_path=tmp_path / "novel.db",
+        config=CloseReadAgentConfig(
+            book_id="book",
+            runtime=CloseReadRuntimeConfig(dry_run=True),
+        ),
+    )
+
+
+def _plot_synopsis_md() -> str:
+    return "\n".join(
+        [
+            "## 剧情事件链",
+            "林澈进入旧仓库寻找线索，发现铁柜背后藏着失踪录音带，调查线因此获得新证据。",
+            "## 人物状态/关系变化",
+            "林澈从被动追查转为掌握关键证据，并准备把录音带交给同伴核验。",
+            "## 关键信息/设定",
+            "录音带被藏在旧仓库铁柜背后，是旧案调查的重要物证。",
+            "## 结构功能/节奏",
+            "本章完成线索发现，并为后续对峙和证据核验铺垫。",
+        ]
+    )
+
+
+def _chapter_batch(*, title_index: int = 1, doc_id: int = 1, content: str = "林澈继续调查旧案。") -> ChapterBatch:
+    return ChapterBatch(
+        document_title_index=title_index,
+        chapter_title=f"第{title_index}章",
+        documents=[
+            DocumentRow(
+                doc_id=doc_id,
+                book_id="book",
+                path="source.txt",
+                scope="chapter",
+                title=f"第{title_index}章",
+                document_title=f"第{title_index}章",
+                document_title_index=title_index,
+                inferred_chapter_no=title_index,
+                content=content,
+                content_chars=len(content),
+                character_keywords=[],
+                content_tags=[],
+                source_path="source.txt",
+                source_file_name="source.txt",
+                source_start_offset=0,
+                source_end_offset=len(content),
+            )
+        ],
+        chapter_doc_count=1,
+        chapter_total_chars=len(content),
+    )
+
+
+def test_chapter_summary_accepts_valid_chapter_summary_alias(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    batch = _chapter_batch(content="林澈继续调查旧案。" * 20)
+    payload = {
+        "summary_quality": "plot_synopsis",
+        "chapter_summary": _plot_synopsis_md(),
+        "chapter_summary_short": "林澈在旧仓库发现失踪录音带。",
+        "importance_score": 70,
+        "importance_reason": "关键证据出现。",
+        "related_chapters": [],
+    }
+
+    normalized = runner._normalize_chapter_summary_schema_aliases(payload)  # noqa: SLF001
+    runner._validate_summary_payload(batch=batch, payload=payload)  # noqa: SLF001
+
+    assert normalized["chapter_summary_md"] == payload["chapter_summary"]
+
+
+def test_multi_chapter_summary_accepts_nested_chapter_summary_alias(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    batch = ChapterBatch(
+        document_title_index=1,
+        chapter_title="多章",
+        documents=[
+            _chapter_batch(title_index=1, doc_id=1, content="林澈调查旧案。" * 20).documents[0],
+            _chapter_batch(title_index=2, doc_id=2, content="顾迟追踪证据。" * 20).documents[0],
+        ],
+    )
+    payload = {
+        "summary_quality": "plot_synopsis",
+        "chapter_summaries": [
+            {
+                "document_title_index": 1,
+                "chapter_title": "第1章",
+                "summary_quality": "plot_synopsis",
+                "chapter_summary": _plot_synopsis_md(),
+                "chapter_summary_short": "林澈在旧仓库发现失踪录音带。",
+                "importance_score": 70,
+                "importance_reason": "关键证据出现。",
+                "related_chapters": [],
+            },
+            {
+                "document_title_index": 2,
+                "chapter_title": "第2章",
+                "summary_quality": "plot_synopsis",
+                "chapter_summary": _plot_synopsis_md(),
+                "chapter_summary_short": "顾迟追踪证据。",
+                "importance_score": 60,
+                "importance_reason": "调查线推进。",
+                "related_chapters": [],
+            },
+        ],
+    }
+
+    normalized_items = runner._normalize_model_chapter_summaries(  # noqa: SLF001
+        batch=batch,
+        raw_summaries=payload["chapter_summaries"],
+    )
+    runner._validate_summary_payload(batch=batch, payload=payload)  # noqa: SLF001
+
+    assert all(item["chapter_summary_md"] for item in normalized_items)
+
+
 def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
     service = MemoryCandidateService()
     reduce_inputs = service.build_character_reduce_inputs(

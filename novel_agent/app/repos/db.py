@@ -201,6 +201,26 @@ class NovelAgentDB:
             )
             '''
         )
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS character_evidence_log (
+                evidence_id TEXT PRIMARY KEY,
+                book_id TEXT NOT NULL,
+                character_id TEXT NOT NULL DEFAULT '',
+                canonical_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                outline_segment_id TEXT NOT NULL DEFAULT '',
+                source_doc_ids_json TEXT NOT NULL DEFAULT '[]',
+                source_title_indexes_json TEXT NOT NULL DEFAULT '[]',
+                source_doc_range TEXT NOT NULL DEFAULT '',
+                evidence_chars INTEGER NOT NULL DEFAULT 0,
+                has_major_change INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            '''
+        )
         self._ensure_book_assets_columns(conn)
         self._ensure_character_profiles_columns(conn)
         conn.execute('CREATE INDEX IF NOT EXISTS idx_documents_book_title_index ON documents(book_id, document_title_index, doc_id)')
@@ -210,6 +230,8 @@ class NovelAgentDB:
         conn.execute('CREATE INDEX IF NOT EXISTS idx_reading_progress_stage ON reading_progress(book_id, agent_stage)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_narrative_memory_pages_book_type ON narrative_memory_pages(book_id, page_type)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_identity_merge_candidates_book_status ON character_identity_merge_candidates(book_id, status)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_character_evidence_log_book_name_status ON character_evidence_log(book_id, canonical_name, status)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_character_evidence_log_book_id_status ON character_evidence_log(book_id, character_id, status)')
 
     def _ensure_documents_columns(self, conn: sqlite3.Connection) -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}

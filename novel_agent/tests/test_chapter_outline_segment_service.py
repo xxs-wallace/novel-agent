@@ -41,6 +41,28 @@ def test_chapter_outline_segment_prompt_does_not_request_event_arrays() -> None:
     assert "event_ids" not in combined
 
 
+def test_chapter_outline_segment_prompt_uses_generic_salience_and_density_budget() -> None:
+    system_prompt, _user_prompt = build_chapter_outline_segment_prompt(
+        {
+            "book_id": "book",
+            "document_title_index": 3,
+            "chapter_title": "第三章",
+            "source_doc_range": "10-11",
+            "chapter_summary_short": "调查线索被重新串联。",
+            "summary_md": "## 剧情事件链\n- 调查员接到新线索。\n- 同伴补充关键证词。",
+        }
+    )
+
+    assert "高显著事件优先保留" in system_prompt
+    assert "人物性格、立场、能力或身体状况" in system_prompt
+    assert "人物关系发生重大变化" in system_prompt
+    assert "社会或世界规则造成显著影响" in system_prompt
+    assert "揭示重大悬念" in system_prompt
+    assert "颠覆或改写读者对过往剧情理解" in system_prompt
+    assert "320-520" in system_prompt
+    assert "不要为了满足长度而删除高显著事件" in system_prompt
+
+
 def test_chapter_outline_segment_service_builds_continuous_outline_segment() -> None:
     class _Model:
         settings = SimpleNamespace(dry_run=False)

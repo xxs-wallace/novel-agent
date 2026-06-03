@@ -53,18 +53,18 @@ class ArtifactTreeService:
         self.repo_root = repo_root.expanduser().resolve()
         self.facade = facade or WorkflowFacade(repo_root=self.repo_root)
 
-    def tree(self, *, task_id: str, surface: str) -> list[ArtifactTreeNode]:
+    def tree(self, *, task_id: str, surface: str, query: str = "") -> list[ArtifactTreeNode]:
         if surface == "close-read":
-            return self.close_read_tree(task_id=task_id)
+            return self.close_read_tree(task_id=task_id, query=query)
         if surface == "writer":
             return self.writer_tree(task_id=task_id)
         raise ValueError("surface must be close-read or writer")
 
-    def close_read_tree(self, *, task_id: str) -> list[ArtifactTreeNode]:
+    def close_read_tree(self, *, task_id: str, query: str = "") -> list[ArtifactTreeNode]:
         return [
             self._node(task_id=task_id, surface="close-read", label="总览", kind="overview", view_kind="overview"),
             self._chapters_node(task_id),
-            self._people_node(task_id),
+            self._people_node(task_id, query=query),
             self._node(task_id=task_id, surface="close-read", label="世界观", kind="world_item", view_kind="world"),
             self._node(task_id=task_id, surface="close-read", label="故事大纲", kind="outline", view_kind="outline"),
             self._node(task_id=task_id, surface="close-read", label="源作品篇章地图", kind="source_arc", view_kind="source_arc"),
@@ -153,11 +153,10 @@ class ArtifactTreeService:
             children=children,
         )
 
-    def _people_node(self, task_id: str) -> ArtifactTreeNode:
-        grouped: dict[str, list[ArtifactTreeNode]] = {"主角": [], "配角": [], "反派": [], "未归类": []}
-        for row in self._person_rows(task_id):
+    def _people_node(self, task_id: str, query: str = "") -> ArtifactTreeNode:
+        children: list[ArtifactTreeNode] = []
+        for row in self._person_rows(task_id, query=query):
             name = str(row.get("canonical_name") or "未命名人物")
-            group = self._person_group(row)
             person_node = self._node(
                 task_id=task_id,
                 surface="close-read",
@@ -177,20 +176,7 @@ class ArtifactTreeService:
                     for label, section in self._PERSON_SECTIONS
                 ],
             )
-            grouped[group].append(person_node)
-        children = [
-            self._node(
-                task_id=task_id,
-                surface="close-read",
-                label=group,
-                kind="person",
-                view_kind="person_group",
-                extra={"group": group},
-                children=items,
-            )
-            for group, items in grouped.items()
-            if items or group == "未归类"
-        ]
+            children.append(person_node)
         return self._node(
             task_id=task_id,
             surface="close-read",
@@ -289,7 +275,7 @@ class ArtifactTreeService:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def _person_rows(self, task_id: str) -> list[dict[str, Any]]:
+    def _person_rows(self, task_id: str, query: str = "") -> list[dict[str, Any]]:
         rows_by_name = {
             str(row.get("canonical_name") or ""): row
             for row in self._person_rows_from_db(self.facade.db_path_for_book(task_id), task_id)
@@ -299,10 +285,12 @@ class ArtifactTreeService:
             name = str(row.get("canonical_name") or "")
             if name:
                 rows_by_name[name] = row
-        return sorted(
-            rows_by_name.values(),
-            key=lambda row: (-int(row.get("importance_score") or 0), str(row.get("canonical_name") or "")),
-        )
+        rows = list(rows_by_name.values())
+        normalized_query = query.strip().casefold()
+        if normalized_query:
+            name_matches = [row for row in rows if self._person_name_matches_query(row, normalized_query)]
+            rows = name_matches or [row for row in rows if self._person_matches_query(row, normalized_query)]
+        return sorted(rows, key=self._person_sort_key)
 
     def _person_rows_from_db(self, db_path: Path, task_id: str) -> list[dict[str, Any]]:
         if not db_path.exists():
@@ -325,6 +313,93 @@ class ArtifactTreeService:
 
     def _writer_memory_db_path(self, task_id: str) -> Path:
         return self.repo_root / ".indexes" / "writer" / f"{task_id}.db"
+
+    @classmethod
+    def _person_sort_key(cls, row: dict[str, Any]) -> tuple[int, int, int, str]:
+        importance = int(row.get("importance_score") or 0)
+        return (-cls._person_doc_coverage(row), -cls._person_profile_length(row), -importance, str(row.get("canonical_name") or ""))
+
+    @staticmethod
+    def _person_profile_length(row: dict[str, Any]) -> int:
+        fields = (
+            "profile_summary_md",
+            "personhood_evidence_summary",
+            "personality_json",
+            "occupations_json",
+            "abilities_json",
+            "recent_activity_json",
+            "relationships_json",
+            "aliases_json",
+        )
+        return sum(len(str(row.get(field) or "")) for field in fields)
+
+    @classmethod
+    def _person_doc_coverage(cls, row: dict[str, Any]) -> int:
+        fields = (
+            "personality_json",
+            "occupations_json",
+            "abilities_json",
+            "recent_activity_json",
+            "relationships_json",
+        )
+        doc_ids: set[int] = set()
+        for field in fields:
+            doc_ids.update(cls._extract_doc_ids(row.get(field)))
+        return len(doc_ids)
+
+    @classmethod
+    def _extract_doc_ids(cls, value: Any) -> set[int]:
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            try:
+                return cls._extract_doc_ids(json.loads(value))
+            except json.JSONDecodeError:
+                return set()
+        if isinstance(value, Mapping):
+            doc_ids: set[int] = set()
+            for key, item in value.items():
+                if key in {"source_doc_ids", "source_document_ids", "doc_ids", "document_ids"}:
+                    doc_ids.update(cls._int_set(item))
+                else:
+                    doc_ids.update(cls._extract_doc_ids(item))
+            return doc_ids
+        if isinstance(value, list):
+            doc_ids: set[int] = set()
+            for item in value:
+                doc_ids.update(cls._extract_doc_ids(item))
+            return doc_ids
+        return set()
+
+    @staticmethod
+    def _int_set(value: Any) -> set[int]:
+        if isinstance(value, (list, tuple, set)):
+            return {int(item) for item in value if str(item).isdigit()}
+        if str(value).isdigit():
+            return {int(value)}
+        return set()
+
+    @staticmethod
+    def _person_matches_query(row: dict[str, Any], query: str) -> bool:
+        fields = (
+            "canonical_name",
+            "aliases_json",
+            "profile_summary_md",
+            "speaking_character_status",
+            "personhood_evidence_summary",
+            "personality_json",
+            "occupations_json",
+            "abilities_json",
+            "recent_activity_json",
+            "relationships_json",
+        )
+        haystack = "\n".join(str(row.get(field) or "") for field in fields).casefold()
+        return query in haystack
+
+    @staticmethod
+    def _person_name_matches_query(row: dict[str, Any], query: str) -> bool:
+        haystack = "\n".join(str(row.get(field) or "") for field in ("canonical_name", "aliases_json")).casefold()
+        return query in haystack
 
     @staticmethod
     def _person_group(row: dict[str, Any]) -> str:

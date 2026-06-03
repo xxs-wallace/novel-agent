@@ -102,6 +102,9 @@ function collectExpandableIds(nodes: ArtifactTreeNode[]): Set<string> {
   const visit = (items: ArtifactTreeNode[]) => {
     for (const item of items) {
       if (item.children.length) {
+        if (isPersonEntryNode(item)) {
+          continue;
+        }
         ids.add(item.id);
         visit(item.children);
       }
@@ -109,4 +112,8 @@ function collectExpandableIds(nodes: ArtifactTreeNode[]): Set<string> {
   };
   visit(nodes);
   return ids;
+}
+
+function isPersonEntryNode(node: ArtifactTreeNode): boolean {
+  return node.kind === "person" && node.children.some((child) => child.kind === "person_section");
 }

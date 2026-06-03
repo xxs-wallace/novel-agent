@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import Request
 
+from .services.analyzer_turn_service import AnalyzerTurnService
 from .services.artifact_tree_service import ArtifactTreeService
 from .services.artifact_view_service import ArtifactViewService
 from .services.job_manager import JobManager
@@ -26,6 +27,10 @@ def get_action_service(request: Request) -> WebActionService:
 
 def get_job_manager(request: Request) -> JobManager:
     return request.app.state.job_manager
+
+
+def get_analyzer_turn_service(request: Request) -> AnalyzerTurnService:
+    return request.app.state.analyzer_turn_service
 
 
 def get_artifact_tree_service(request: Request) -> ArtifactTreeService:

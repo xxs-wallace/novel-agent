@@ -11,6 +11,8 @@ from typing import Any, Mapping
 from ...cli.facade import TuiTaskSnapshot, WorkflowFacade
 from ...cli.router import CommandRouter
 from ...cli.status import StatusPresenter, WriterStatusPresenter
+from ...constants import DEFAULT_CLOSE_READING_STAGE
+from ...repos.db import NovelAgentDB
 from ..schemas import (
     ConversationMessage,
     DecisionCard,
@@ -23,8 +25,6 @@ from ..schemas import (
     WriterReviewAction,
     WriterStartPreflight,
 )
-from ...constants import DEFAULT_CLOSE_READING_STAGE
-from ...repos.db import NovelAgentDB
 from .artifact_ids import encode_artifact_id
 from .reviewer_action_specs import reviewer_specs_for_stage, writer_reviewer_actions
 
@@ -56,6 +56,7 @@ class WebSessionService:
         self.facade = facade or WorkflowFacade(repo_root=self.repo_root)
         self.selected_task_id = ""
         self._messages: dict[str, list[ConversationMessage]] = {}
+        self.analyzer_turn_service: Any | None = None
 
     def list_tasks(self) -> list[TaskSummary]:
         return [self.task_summary(snapshot) for snapshot in self.facade.list_tasks()]
@@ -321,37 +322,17 @@ class WebSessionService:
         self.sync_writer_review_messages(task_id)
         self.sync_writer_recovery_message(task_id)
         self.sync_writer_completion_message(task_id)
+        if self.analyzer_turn_service is not None:
+            self.analyzer_turn_service.sync_messages(book_id=task_id, session_service=self)
         return list(self._messages.get(task_id, []))
 
     def append_user_message(self, task_id: str, content: str, *, payload: Mapping[str, Any] | None = None) -> ConversationMessage:
         payload = dict(payload or {})
         analyzer_question = self._outline_analyzer_question(content=content, payload=payload)
         if analyzer_question:
-            message = self.append_message(task_id, role="user", content=content, payload=payload)
-            try:
-                result = self.facade.analyze_outline(
-                    book_id=task_id,
-                    question=analyzer_question,
-                    conversation_history=self._conversation_history_for_analyzer(task_id),
-                )
-                self.append_message(
-                    task_id,
-                    role="assistant",
-                    content=str(result.get("answer") or ""),
-                    payload={
-                        "channel": "outline_analyzer",
-                        "status": str(result.get("status") or ""),
-                        "sources": result.get("sources") or [],
-                    },
-                )
-            except Exception as exc:
-                self.append_message(
-                    task_id,
-                    role="error",
-                    content=f"Analyzer 暂时无法完成分析：{exc}",
-                    payload={"channel": "outline_analyzer", "status": "error"},
-                )
-            return message
+            payload.setdefault("channel", "outline_analyzer")
+            payload.setdefault("question", analyzer_question)
+            return self.append_message(task_id, role="user", content=content, payload=payload)
         message = self.append_message(task_id, role="user", content=content, payload=payload)
         if str(payload.get("channel") or "") == "writer_question_answer":
             run_id = str(payload.get("run_id") or "")
@@ -1056,14 +1037,28 @@ class WebSessionService:
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id:
                 continue
-            if self._has_identity_merge_message(task_id, candidate_id):
+            card = self._identity_merge_decision_card(task_id, candidate)
+            content = self._identity_merge_message_content(candidate)
+            existing_message = self._identity_merge_message(task_id, candidate_id)
+            if existing_message is not None:
+                if (
+                    existing_message.content != content
+                    or not existing_message.decision_cards
+                    or existing_message.decision_cards[0].title != card.title
+                ):
+                    existing_message.content = content
+                    existing_message.decision_cards = [card]
+                    existing_message.payload = {
+                        **existing_message.payload,
+                        **self._identity_merge_message_payload(candidate),
+                    }
                 continue
             self.append_message(
                 task_id,
                 role="assistant",
-                content="阅读已暂停：发现高置信人物身份候选，需要你确认后再继续。",
-                payload={"channel": "identity_merge_review", "candidate_id": candidate_id},
-                decision_cards=[self._identity_merge_decision_card(task_id, candidate)],
+                content=content,
+                payload=self._identity_merge_message_payload(candidate),
+                decision_cards=[card],
             )
 
     def identity_merge_candidates(self, task_id: str, *, statuses: list[str] | None = None) -> list[dict[str, Any]]:
@@ -1098,39 +1093,112 @@ class WebSessionService:
             return [self._identity_candidate_from_row(row) for row in rows]
 
     def _has_identity_merge_message(self, task_id: str, candidate_id: str) -> bool:
+        return self._identity_merge_message(task_id, candidate_id) is not None
+
+    def _identity_merge_message(self, task_id: str, candidate_id: str) -> ConversationMessage | None:
         for message in self._messages.get(task_id, []):
             if message.payload.get("channel") == "identity_merge_review" and message.payload.get("candidate_id") == candidate_id:
-                return True
-        return False
+                return message
+        return None
+
+    def _identity_merge_message_payload(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "channel": "identity_merge_review",
+            "candidate_id": str(candidate.get("candidate_id") or ""),
+            "left_name": str(candidate.get("left_name") or ""),
+            "right_name": str(candidate.get("right_name") or ""),
+            "survivor_canonical_name": str(candidate.get("survivor_canonical_name") or ""),
+            "same_person_score": candidate.get("same_person_score"),
+            "source_doc_ids": candidate.get("source_doc_ids") or [],
+        }
+
+    def _identity_merge_candidate_label(self, candidate: Mapping[str, Any]) -> str:
+        left = str(candidate.get("left_name") or "").strip()
+        right = str(candidate.get("right_name") or "").strip()
+        if left and right:
+            return f"{left} / {right}"
+        return left or right or "待确认人物"
+
+    def _identity_merge_message_content(self, candidate: Mapping[str, Any]) -> str:
+        label = self._identity_merge_candidate_label(candidate)
+        survivor = str(candidate.get("survivor_canonical_name") or "").strip()
+        source_docs = ", ".join(str(item) for item in candidate.get("source_doc_ids") or [])
+        evidence_summary = str(candidate.get("evidence_summary") or "").strip()
+        reason = str(candidate.get("reason") or "").strip()
+        detail_parts = [
+            f"建议合并为「{survivor}」" if survivor else "",
+            f"证据：{evidence_summary}" if evidence_summary else "",
+            f"来源 documents：{source_docs}" if source_docs else "",
+            f"原因：{reason}" if reason and reason != evidence_summary else "",
+        ]
+        details = "；".join(part for part in detail_parts if part)
+        suffix = f"：{details}" if details else ""
+        return f"阅读已暂停：发现高置信人物身份候选「{label}」{suffix}。请确认后再继续阅读。"
 
     def _identity_merge_decision_card(self, task_id: str, candidate: Mapping[str, Any]) -> DecisionCard:
         candidate_id = str(candidate.get("candidate_id") or "")
         left = str(candidate.get("left_name") or "")
         right = str(candidate.get("right_name") or "")
+        label = self._identity_merge_candidate_label(candidate)
         score = candidate.get("same_person_score")
         action = str(candidate.get("recommended_action") or "")
+        survivor = str(candidate.get("survivor_canonical_name") or "")
         source_docs = ", ".join(str(item) for item in candidate.get("source_doc_ids") or [])
+        aliases = ", ".join(str(item) for item in candidate.get("aliases_to_keep") or [])
+        evidence_summary = str(candidate.get("evidence_summary") or "")
         reason = str(candidate.get("reason") or "")
         body = "\n".join(
             item
             for item in [
-                f"候选：{left} / {right}",
+                f"候选：{label}",
+                f"建议保留档案：{survivor}" if survivor else "",
                 f"评分：{score}，建议：{action}",
+                f"证据：{evidence_summary}" if evidence_summary else "",
                 f"来源 docs：{source_docs}" if source_docs else "",
+                f"保留别名：{aliases}" if aliases else "",
                 reason,
             ]
             if item
         )
-        payload = {"candidate_id": candidate_id}
+        payload = {
+            "candidate_id": candidate_id,
+            "left_name": left,
+            "right_name": right,
+            "survivor_canonical_name": survivor,
+        }
         return DecisionCard(
             card_id=f"{task_id}:identity-merge:{candidate_id}",
-            title="待确认人物身份合并",
+            title=f"待确认人物身份合并：{label}",
             body=body,
             actions=[
-                {"action": "confirm_identity_merge", "label": "确认合并", "variant": "primary", "payload": payload},
-                {"action": "reject_identity_merge", "label": "保持分离", "variant": "secondary", "payload": payload},
-                {"action": "request_identity_merge_more_evidence", "label": "需要更多证据", "variant": "secondary", "payload": payload},
-                {"action": "route_identity_merge_to_correction", "label": "转为记忆修正", "variant": "secondary", "payload": payload},
+                {
+                    "action": "confirm_identity_merge",
+                    "label": f"确认合并为{survivor}" if survivor else "确认合并",
+                    "variant": "primary",
+                    "payload": payload,
+                    "description": f"将「{label}」合并为同一人物档案。",
+                },
+                {
+                    "action": "reject_identity_merge",
+                    "label": "保持分离",
+                    "variant": "secondary",
+                    "payload": payload,
+                    "description": f"保留「{label}」为两个人物档案。",
+                },
+                {
+                    "action": "request_identity_merge_more_evidence",
+                    "label": "需要更多证据",
+                    "variant": "secondary",
+                    "payload": payload,
+                    "description": f"暂不处理「{label}」，等待后续原文证据。",
+                },
+                {
+                    "action": "route_identity_merge_to_correction",
+                    "label": "转为记忆修正",
+                    "variant": "secondary",
+                    "payload": payload,
+                    "description": f"将「{label}」转入历史记忆修正流程。",
+                },
             ],
         )
 

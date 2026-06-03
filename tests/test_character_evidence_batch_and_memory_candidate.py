@@ -6,6 +6,7 @@ from pathlib import Path
 
 from novel_agent.app.llm import JsonModelClient
 from novel_agent.app.prompts.character_evidence_prompt import build_character_evidence_prompt
+from novel_agent.app.repos.character_evidence_log_repo import CharacterEvidenceLogRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentRow
@@ -264,6 +265,8 @@ def test_character_reduce_inputs_use_profile_brief_when_available() -> None:
                     "profile_brief": {
                         "identity": {"character_id": "7", "canonical_name": "旧名", "aliases": ["阿衡"]},
                         "current_state": "持久化人物简档。",
+                        "source_refs": [{"outline_segment_id": "outline-segment:chapter-1:docs-1", "source_doc_ids": [1]}],
+                        "compacted_until": {"doc_id": 1, "outline_segment_id": "outline-segment:chapter-1:docs-1"},
                     },
                     "profile_brief_status": "ready",
                 }
@@ -298,6 +301,8 @@ def test_character_reduce_inputs_use_profile_brief_when_available() -> None:
     existing_profile = reduce_inputs[0]["existing_profile"]
     assert "profile_summary_md" not in existing_profile
     assert existing_profile["profile_brief"]["current_state"] == "持久化人物简档。"
+    assert "source_refs" not in existing_profile["profile_brief"]
+    assert "compacted_until" not in existing_profile["profile_brief"]
     assert "chapter_summary_md" not in reduce_inputs[0]["chapter_summary"]
     assert "完整章节摘要" not in json.dumps(reduce_inputs[0], ensure_ascii=False)
     assert "短摘要唯一文本" not in reduce_inputs[0]["chapter_context_text"]
@@ -471,6 +476,93 @@ def test_character_profile_service_consumes_lightweight_character_evidence(tmp_p
     assert json.loads(row["relationships_json"]) == []
     assert "发言状态：confirmed_speaking" in row["profile_summary_md"]
     assert "人物性证据：被称呼并发言，执行具体行动。" in row["profile_summary_md"]
+
+
+def test_character_evidence_log_buffers_pending_evidence_until_compacted(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "character_evidence_log.db")
+    repo = CharacterEvidenceLogRepo()
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        inserted = repo.append_many(
+            conn,
+            book_id="book-17",
+            evidence_items=[
+                {
+                    "character_id": "9",
+                    "canonical_name": "路明非",
+                    "candidate_type": "character",
+                    "confidence": 0.9,
+                    "activity_or_state_evidence": "路明非决定进入学院。",
+                    "source_doc_ids": [40],
+                    "source_title_indexes": [4],
+                }
+            ],
+            outline_segment={
+                "outline_segment_id": "outline-segment:chapter-4:docs-40-40",
+                "outline_segment": "路明非决定进入学院。",
+                "source_doc_ids": [40],
+                "source_title_indexes": [4],
+                "source_doc_range": "40-40",
+            },
+            updated_at="now",
+        )
+        groups = repo.pending_groups(conn, book_id="book-17")
+
+        assert inserted == 1
+        assert len(groups) == 1
+        assert groups[0]["character_id"] == "9"
+        assert groups[0]["canonical_name"] == "路明非"
+        assert groups[0]["outline_segment_ids"] == ["outline-segment:chapter-4:docs-40-40"]
+        assert groups[0]["evidence_items"][0]["evidence_id"].startswith("char-evidence:")
+        assert groups[0]["evidence_items"][0]["outline_segment"] == "路明非决定进入学院。"
+
+        repo.mark_compacted(conn, evidence_ids=groups[0]["evidence_ids"], updated_at="later")
+        assert repo.pending_groups(conn, book_id="book-17") == []
+
+
+def test_character_profile_service_persists_character_reduce_profile_brief(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile_brief_from_reduce.db")
+    service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+
+    profile_brief = {
+        "identity": {"character_id": "1", "canonical_name": "路明非", "aliases": []},
+        "current_state": "已决定进入学院。",
+        "stable_traits": [],
+        "abilities_or_limits": [],
+        "relationship_digest": [],
+        "open_questions": [],
+        "latest_major_change": {"summary": "决定进入学院。", "source_refs": []},
+        "source_refs": [{"outline_segment_id": "outline-segment:chapter-4:docs-40-40", "source_doc_ids": [40]}],
+        "compacted_until": {"doc_id": 40, "outline_segment_id": "outline-segment:chapter-4:docs-40-40"},
+    }
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        service.merge_updates(
+            conn,
+            book_id="book-17",
+            chapter_index=4,
+            doc_ids=[40],
+            updates=[
+                {
+                    "canonical_name": "路明非",
+                    "aliases": [],
+                    "recent_activity": "路明非决定进入学院。",
+                    "relationships": [],
+                    "profile_brief": profile_brief,
+                    "profile_brief_status": "ready",
+                }
+            ],
+        )
+        conn.commit()
+        row = CharacterProfilesRepo().get(conn, book_id="book-17", canonical_name="路明非")
+
+    assert row is not None
+    assert json.loads(row["profile_brief_json"]) == profile_brief
+    assert row["profile_brief_status"] == "ready"
+    assert row["brief_compacted_until_doc_id"] == 40
+    assert row["brief_compacted_until_segment_id"] == "outline-segment:chapter-4:docs-40-40"
 
 
 def test_context_assembly_exposes_profile_state_without_raw_character_evidence(tmp_path: Path) -> None:

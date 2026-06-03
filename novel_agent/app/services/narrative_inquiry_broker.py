@@ -73,6 +73,46 @@ def _tokens(text: str) -> list[str]:
     return [token for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", _text(text)) if token]
 
 
+def _expanded_query_tokens(text: str) -> list[str]:
+    tokens = _tokens(text)
+    seen = set(tokens)
+    expanded = list(tokens)
+    for token in tokens:
+        if not re.fullmatch(r"[\u4e00-\u9fff]{4,}", token):
+            continue
+        for size in range(2, min(6, len(token)) + 1):
+            for index in range(0, len(token) - size + 1):
+                fragment = token[index : index + size]
+                if fragment not in seen:
+                    seen.add(fragment)
+                    expanded.append(fragment)
+    return expanded
+
+
+def _json_text(value: object) -> str:
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value or "")
+
+
+def _profile_item_text(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return str(value or "")
+    priority_keys = (
+        "value",
+        "summary",
+        "label",
+        "status_summary",
+        "relationship_summary",
+        "target_name",
+    )
+    parts = [_text(value.get(key)) for key in priority_keys if _text(value.get(key))]
+    metadata = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if metadata:
+        parts.append(metadata)
+    return " | ".join(parts)
+
+
 class NarrativeInquiryBroker:
     """Shared semantic evidence broker for Analyzer, Writer Research, and future Reviewer.
 
@@ -704,22 +744,90 @@ class NarrativeInquiryBroker:
         if not refs:
             refs = [f"chapter-{match}" for match in re.findall(r"\d+", request.query)[:4]]
         if not refs:
-            state = self.memory_query_service.root_scan(conn, book_id=book_id, query=request.query, budget=MemoryQueryBudget(max_root_candidates=4))
+            state = self.memory_query_service.root_scan(
+                conn,
+                book_id=book_id,
+                query=request.query,
+                budget=MemoryQueryBudget(max_root_candidates=6, max_child_candidates=12),
+            )
             if state.current_candidates:
-                next_state = self.memory_query_service.drill_down(
-                    conn,
-                    book_id=book_id,
-                    state=state,
-                    selected_ids=[str(item.get("id") or item.get("page_id")) for item in state.current_candidates[:2]],
-                    query_suffix="定位相关章节摘要",
-                    selection_reason="broker summary-level expansion",
-                    confidence=0.5,
-                )
-                refs = [str(item.get("chapter_ref") or item.get("id") or "") for item in next_state.current_candidates if item.get("page_type") == "chapter"][:4]
+                refs = self._chapter_refs_from_memory_candidates(state.current_candidates)
+                if not refs and state.current_level in {"outline_root", "outline_segment"}:
+                    selected_ids = [
+                        str(item.get("id") or item.get("page_id") or "")
+                        for item in state.current_candidates[:4]
+                        if str(item.get("id") or item.get("page_id") or "")
+                    ]
+                    next_state = self.memory_query_service.drill_down(
+                        conn,
+                        book_id=book_id,
+                        state=state,
+                        selected_ids=selected_ids,
+                        query_suffix="定位相关章节摘要",
+                        selection_reason="broker summary-level expansion",
+                        confidence=0.5,
+                    )
+                    refs = self._chapter_refs_from_memory_candidates(next_state.current_candidates)
+        if not refs:
+            chapter_state = self.memory_query_service.chapter_scan(
+                conn,
+                book_id=book_id,
+                query=request.query,
+                budget=MemoryQueryBudget(max_root_candidates=4, max_candidate_chars=budget.max_evidence_chars_per_request),
+            )
+            refs = self._chapter_refs_from_memory_candidates(chapter_state.current_candidates)
+        elif request.query:
+            chapter_state = self.memory_query_service.chapter_scan(
+                conn,
+                book_id=book_id,
+                query=request.query,
+                budget=MemoryQueryBudget(max_root_candidates=4, max_candidate_chars=budget.max_evidence_chars_per_request),
+            )
+            direct_refs = self._chapter_refs_from_memory_candidates(chapter_state.current_candidates)
+            refs = self._merge_chapter_refs(direct_refs, refs)
         if not refs:
             return EvidenceBundle.missing(request, "chapter_refs")
         memory_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
         return self._bundle_from_memory(request, memory_bundle, status_if_empty="missing")
+
+    def _merge_chapter_refs(self, preferred_refs: Sequence[str], fallback_refs: Sequence[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for ref in [*preferred_refs, *fallback_refs]:
+            text = _text(ref)
+            if text and text not in seen:
+                seen.add(text)
+                merged.append(text)
+        return merged[:4]
+
+    def _chapter_refs_from_memory_candidates(self, candidates: Sequence[Mapping[str, Any]]) -> list[str]:
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        def add_ref(value: object) -> None:
+            text = _text(value)
+            if not text:
+                return
+            if text.isdigit():
+                text = f"chapter-{text}"
+            if not text.startswith("chapter-"):
+                return
+            if text not in seen:
+                seen.add(text)
+                refs.append(text)
+
+        for item in candidates:
+            add_ref(item.get("chapter_ref"))
+            for child_ref in item.get("child_refs") or []:
+                add_ref(child_ref)
+            for title_index in item.get("source_title_indexes") or []:
+                add_ref(title_index)
+            add_ref(item.get("document_title_index"))
+            for field_name in ("id", "page_id", "outline_segment_id"):
+                match = re.search(r"chapter-(\d+)", str(item.get(field_name) or ""))
+                if match:
+                    add_ref(match.group(1))
+        return refs[:4]
 
     def _resolve_raw_excerpt(
         self,
@@ -832,6 +940,17 @@ class NarrativeInquiryBroker:
         target = request.name or request.query
         target_text = _text(target)
         target_tokens = _tokens(target_text)
+        query_text = " ".join(
+            item
+            for item in [
+                target_text,
+                request.query,
+                request.purpose,
+                request.expected_depth,
+            ]
+            if item
+        )
+        query_tokens = _expanded_query_tokens(query_text)
         try:
             rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
         except sqlite3.OperationalError:
@@ -845,7 +964,7 @@ class NarrativeInquiryBroker:
             if target_text:
                 if target_text == canonical:
                     name_score += 100
-                if target_text in aliases:
+                if len(aliases) <= 16 and target_text in aliases:
                     name_score += 90
                 if any(target_text and target_text in name for name in names):
                     name_score += 45
@@ -862,6 +981,30 @@ class NarrativeInquiryBroker:
             score = name_score + token_name_score + token_profile_score
             if target_text and score <= 0:
                 continue
+            relationships = self._select_relevant_profile_items(
+                _json_list(row["relationships_json"]),
+                query_text=query_text,
+                query_tokens=query_tokens,
+                target_names=[target_text, canonical, *aliases],
+                limit=3,
+                item_char_limit=220,
+            )
+            recent_activity = self._select_relevant_profile_items(
+                _json_list(row["recent_activity_json"]),
+                query_text=query_text,
+                query_tokens=query_tokens,
+                target_names=[target_text, canonical, *aliases],
+                limit=3,
+                item_char_limit=220,
+            )
+            story_events = self._select_relevant_profile_items(
+                _json_list(row["story_events_json"]),
+                query_text=query_text,
+                query_tokens=query_tokens,
+                target_names=[target_text, canonical, *aliases],
+                limit=4,
+                item_char_limit=260,
+            )
             scored_matches.append(
                 (
                     score,
@@ -874,18 +1017,9 @@ class NarrativeInquiryBroker:
                             str(row["profile_summary_md"] or ""),
                             limit=min(480, budget.max_evidence_chars_per_request // 2),
                         ),
-                        "relationships": [
-                            _safe_excerpt(json.dumps(item, ensure_ascii=False) if isinstance(item, Mapping) else str(item), limit=180)
-                            for item in _json_list(row["relationships_json"])[:2]
-                        ],
-                        "recent_activity": [
-                            _safe_excerpt(json.dumps(item, ensure_ascii=False) if isinstance(item, Mapping) else str(item), limit=180)
-                            for item in _json_list(row["recent_activity_json"])[:2]
-                        ],
-                        "story_events": [
-                            _safe_excerpt(json.dumps(item, ensure_ascii=False) if isinstance(item, Mapping) else str(item), limit=180)
-                            for item in _json_list(row["story_events_json"])[:2]
-                        ],
+                        "relationships": relationships,
+                        "recent_activity": recent_activity,
+                        "story_events": story_events,
                         "evidence_level": str(row["evidence_level"] or "inferred"),
                         "match_score": score,
                     },
@@ -915,6 +1049,43 @@ class NarrativeInquiryBroker:
             missing_facets=[] if matches else ["character_profile"],
             trace=[{"operation": "character_profile_resolver", "source_scope": "character_memory"}],
         )
+
+    def _select_relevant_profile_items(
+        self,
+        items: Sequence[Any],
+        *,
+        query_text: str,
+        query_tokens: Sequence[str],
+        target_names: Sequence[str],
+        limit: int,
+        item_char_limit: int,
+    ) -> list[str]:
+        if not items:
+            return []
+        clean_targets = [name for name in (_text(item) for item in target_names) if name]
+        scored: list[tuple[int, int, Any]] = []
+        for index, item in enumerate(items):
+            haystack = _profile_item_text(item)
+            score = 0
+            score += 3 * sum(1 for token in query_tokens if token and token in haystack)
+            score += 2 * sum(1 for name in clean_targets if name and name in haystack)
+            if isinstance(item, Mapping):
+                participants = item.get("participants")
+                if isinstance(participants, Sequence) and not isinstance(participants, (str, bytes)):
+                    participant_text = " ".join(str(value) for value in participants)
+                    score += 4 * sum(1 for name in clean_targets if name and name in participant_text)
+                target_name = str(item.get("target_name") or "")
+                score += 5 * sum(1 for token in query_tokens if token and token in target_name)
+            if query_text and query_text in haystack:
+                score += 12
+            scored.append((score, index, item))
+        selected = sorted(scored, key=lambda value: (-value[0], value[1]))[:limit]
+        if not any(score > 0 for score, _index, _item in selected):
+            selected = scored[:limit]
+        return [
+            _safe_excerpt(_profile_item_text(item), limit=item_char_limit)
+            for _score, _index, item in selected
+        ]
 
     def _resolve_world_concept(
         self,

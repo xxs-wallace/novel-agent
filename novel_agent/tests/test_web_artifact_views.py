@@ -129,6 +129,58 @@ def _seed_close_read_db(repo_root: Path, task_id: str) -> None:
                 "2026-01-01T00:00:00Z",
             ),
         )
+        conn.execute(
+            """
+            INSERT INTO character_profiles (
+                book_id, canonical_name, aliases_json, profile_summary_md, speaking_character_status,
+                personhood_evidence_summary, personality_json, occupations_json, abilities_json,
+                recent_activity_json, relationships_json, importance_score, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                "顾迟",
+                "[]",
+                "与沈青有限合作的关键人物，掌握旧案旁支线索。",
+                "speaking",
+                "多次参与调查对话。",
+                json.dumps([{"value": "谨慎、保留", "field_type": "inference"}], ensure_ascii=False),
+                json.dumps([{"value": "线索提供者", "field_type": "fact"}], ensure_ascii=False),
+                "[]",
+                json.dumps([{"value": "正在判断是否向沈青透露更多信息"}], ensure_ascii=False),
+                json.dumps([{"target_name": "沈青", "relation_type": "有限合作", "status_summary": "信任未定"}], ensure_ascii=False),
+                99,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO character_profiles (
+                book_id, canonical_name, aliases_json, profile_summary_md, speaking_character_status,
+                personhood_evidence_summary, personality_json, occupations_json, abilities_json,
+                recent_activity_json, relationships_json, importance_score, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                "林白",
+                "[]",
+                "只在边缘线索中出现的人物。",
+                "mentioned",
+                "目前证据较少。",
+                "[]",
+                "[]",
+                "[]",
+                json.dumps([{"value": "被匿名信间接提到"}], ensure_ascii=False),
+                "[]",
+                10,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
         conn.commit()
 
 
@@ -184,6 +236,11 @@ def test_close_read_tree_and_person_encyclopedia_view(tmp_path: Path) -> None:
 
     person = _find_node(tree.json(), "沈青")
     assert person
+    people = _find_node(tree.json(), "人物百科")
+    assert [child["label"] for child in people["children"]] == ["沈青", "顾迟", "林白"]
+    assert not _find_node(tree.json(), "主角")
+    assert not _find_node(tree.json(), "配角")
+    assert not _find_node(tree.json(), "未归类")
     view = client.get(f"/api/artifacts/{person['id']}/view")
     assert view.status_code == 200
     payload = view.json()
@@ -198,6 +255,11 @@ def test_close_read_tree_and_person_encyclopedia_view(tmp_path: Path) -> None:
     assert "source_doc_ids" not in current_goal
     assert "raw_json" not in payload
     assert "{" not in "".join(section["body"] for section in payload["sections"])
+
+    searched = client.get(f"/api/tasks/{task_id}/artifact-tree?surface=close-read&q=顾迟")
+    assert searched.status_code == 200
+    assert _find_node(searched.json(), "顾迟")
+    assert not _find_node(searched.json(), "沈青")
 
 
 def test_close_read_people_include_writer_generated_characters(tmp_path: Path) -> None:

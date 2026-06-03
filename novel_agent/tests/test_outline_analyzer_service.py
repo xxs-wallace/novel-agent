@@ -652,6 +652,147 @@ def test_character_profile_resolver_prefers_exact_alias_over_profile_mentions(tm
     assert len(json.dumps(bundle.to_dict(), ensure_ascii=False)) < 2500
 
 
+def test_character_profile_resolver_selects_query_relevant_profile_items(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": "book-one",
+                "canonical_name": "核心角色",
+                "aliases": [],
+                "profile_summary_md": "核心角色长期卷入主线。",
+                "relationships": [
+                    {"target_name": "同伴", "status_summary": "早期保持距离"},
+                    {"target_name": "盟友", "status_summary": "后来因救援代价形成复杂牵连"},
+                ],
+                "recent_activity": [
+                    "整理旧线索",
+                    "为盟友承担救援代价并改变关系状态",
+                ],
+                "story_events": [
+                    {"label": "早期试探", "summary": "核心角色隐瞒计划。", "participants": ["核心角色"]},
+                    {"label": "中段调查", "summary": "核心角色确认证据来源。", "participants": ["核心角色", "同伴"]},
+                    {"label": "关键救援", "summary": "核心角色为盟友承担救援代价。", "participants": ["核心角色", "盟友"]},
+                ],
+                "evidence_level": "confirmed",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = NarrativeInquiryBroker(repo_root=tmp_path).resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="char-relevant",
+                request_type="character_profile",
+                name="核心角色",
+                query="核心角色与盟友的救援代价和关系变化",
+                purpose="确认关系走向是否有事实依据",
+                priority="high",
+            ),
+            budget=AnalyzerBudget(),
+        )
+
+    assert bundle.status == "found"
+    profile = bundle.evidence_items[0]
+    assert "关键救援" in profile["story_events"][0]
+    assert "救援代价" in profile["relationships"][0]
+    assert "救援代价" in profile["recent_activity"][0]
+
+
+def test_chapter_summary_resolver_maps_outline_segment_hits_to_chapter_summary(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    spy_memory = SpyMemoryQueryService(repo_root=tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path, memory_query_service=spy_memory)
+
+    with db.connect() as conn:
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="chapter-from-segment",
+                request_type="chapter_summary",
+                query="证据来源未明时调查者如何选择",
+                purpose="从大纲节点定位章节摘要",
+                priority="high",
+            ),
+            budget=AnalyzerBudget(),
+        )
+
+    assert bundle.status == "found"
+    assert bundle.chapter_refs == ["chapter-1"]
+    assert any("调查者发现证据线索" in item["summary"] for item in bundle.evidence_items)
+    assert "resolve_chapter_refs" in spy_memory.calls
+
+
+def test_chapter_summary_resolver_scans_chapter_summaries_when_outline_omits_keyword(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": "核心角色为盟友承担救援代价。",
+                "document_title": "第二章",
+                "document_title_index": 2,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        ChaptersRepo().upsert(
+            conn,
+            {
+                "book_id": "book-one",
+                "document_title_index": 2,
+                "chapter_title": "第二章",
+                "source_doc_start_id": 2,
+                "source_doc_end_id": 2,
+                "source_doc_count": 1,
+                "source_total_chars": 16,
+                "summary_md": "核心角色为盟友承担救援代价，关系因此发生重大变化。",
+                "summary_short": "关系发生变化。",
+                "mentioned_characters": ["核心角色", "盟友"],
+                "outline_update": {
+                    "chapter_line": "[2] 第二章: 关系出现变化。",
+                    "outline_segment_id": "outline-segment:chapter-2:docs-2",
+                    "outline_segment": "核心角色和盟友的关系出现变化，但具体原因暂未写入大纲段。",
+                    "source_doc_ids": [2],
+                    "source_doc_range": "2",
+                    "source_title_indexes": [2],
+                    "status": "committed",
+                },
+                "summary_status": "committed",
+                "outline_status": "committed",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = NarrativeInquiryBroker(repo_root=tmp_path).resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="chapter-direct",
+                request_type="chapter_summary",
+                query="救援代价",
+                purpose="outline segment 没写出关键词时仍应定位章节摘要",
+                priority="high",
+            ),
+            budget=AnalyzerBudget(),
+        )
+
+    assert bundle.status == "found"
+    assert bundle.chapter_refs[0] == "chapter-2"
+    assert "救援代价" in bundle.evidence_items[0]["summary"]
+
+
 def test_outline_analyzer_without_model_returns_needs_model(tmp_path: Path) -> None:
     db = _seed_memory(tmp_path)
     service = OutlineAnalyzerService(repo_root=tmp_path, model_client=None)

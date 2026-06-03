@@ -147,7 +147,7 @@
   - 每条经历包含 `experience_id`、`outline_segment_id`、`role_in_segment`、`compression_level`、`label`、`summary`、`source_chapter_indexes`、`source_doc_ids`、`source_doc_range`、`participants`
   - 该层用于模型先筛选人物相关经历，再按 `outline_segment_id` 展开剧情段，必要时继续展开原始 document
   - 同一个 outline segment 对不同角色的意义不同；背景出场角色只保留大致事件和人物相关点，主要推动者、主要关联者或主要发言者保留更完整的剧情因果、行动结果和关系变化
-  - 当角色连续多个 document 不再出现、recent_activity 积累超阈值，或当前剧情触发重大变化时，系统应调用模型 compact loop，将必要经历吸收进 `profile_brief`，并把已吸收热层经历转入长期索引或标记为已 compact
+  - 当角色连续多个 document 不再出现、pending evidence 积累超阈值，或当前剧情触发重大变化时，系统应调用 Character Reduce，由同一次模型调用将必要经历吸收进 `profile_brief`，并把已吸收 evidence 标记为 compacted
   - 所有经历压缩都必须由模型完成语义概括；生产路径禁止用字符数、token 数、句子数或列表长度硬截断伪装压缩
 
 `mentioned_doc_ids` / `speaking_doc_ids` 继续作为底层倒排索引存在，但不再是模型理解人物过往的主要入口。模型应优先读取 `profile_brief` 与人物经历索引；只有需要确认细节时，才根据经历携带的 `outline_segment_id`、doc ids 或 source range 请求剧情段、章节摘要或原文证据。
@@ -601,14 +601,15 @@ source text + toc/bookmarks
 - `character_profiles.profile_brief_json` 保存人物常驻简档，默认作为 close-read / Writer / Research Loop 的主要人物上下文
 - `character_profiles.recent_activity_json` 保留为热层增量队列，保存尚未被 brief compact 吸收的近期人物经历；普通 Character Reduce 不默认展开全量 recent activity
 - `character_profiles.story_events_json` 保存长期经历索引摘要，条目保留 `outline_segment_id`、source range、角色作用和高度概括剧情
-- Character Reduce prompt 消费当前 `outline_segment` 索引、人物 evidence、章节短摘要和持久化 `profile_brief`，只输出本批次人物经历增量、短关系状态变化和 compact 触发信号
+- Character Evidence Agent 的输出先追加到 `character_evidence_log` / pending experiences，并同步写入轻量 recent activity / mention 索引；pending evidence 是 Character Evidence 与 Character Reduce 之间的缓冲层
+- Character Reduce prompt 消费待归并 ordered evidence、相关 `outline_segment` 索引、章节短摘要和持久化 `profile_brief`（不携带全量 `source_refs`），输出本批次人物经历增量、短关系状态变化、本轮 `source_ref_delta`，并在触发归并时直接输出更新后的 `profile_brief`
 - Brief Compact Gate 先按当前窗口 document 覆盖率、发言/行动/关系证据、角色作用和重大变化类型分为 `append_delta` / `needs_brief_compact` / `needs_full_profile_compact` / `index_only`：
   - `append_delta`：普通人物经历增量，追加到 `recent_activity_json` 或 `story_events_json`，不改写 brief
   - `needs_brief_compact`：当前剧情改变了人物当前状态、关键关系、身份锚点、能力/限制、性格/形象概括或未解问题，需要模型更新 `profile_brief`
   - `needs_full_profile_compact`：身份合并、误归因修复、重大设定矛盾或历史经历大规模重整，进入专门 Agent Loop，可按需读取 story events、outline segment 和原文
   - `index_only`：低频、背景或弱相关人物；只记录当前 `outline_segment_id`、source range 和极短人物相关说明
 - 每条经历应保留 `outline_segment_id`、`role_in_segment`、`compression_level`、source doc/title range；背景出场角色应高度压缩为 index-only，主要推动者 / 主要发言者保留更完整剧情
-- 当角色连续多个 document 不再出现、recent_activity 积累超阈值，或当前剧情触发重大变化时，系统应调用模型 compact loop，将必要经历吸收进 `profile_brief` 并标记 compact 进度；该过程不能用本地硬截断代替
+- 当角色连续多个 document 不再出现、pending evidence 积累超阈值，或当前剧情触发重大变化时，系统应调用 Character Reduce，将必要经历吸收进 `profile_brief`；本地 merge 层负责维护 compact 进度、已消费 experience ids 和全量 source refs。语义压缩不能用本地硬截断代替
 - Narrative Indexer character / scene cards 可作为后续复核或增强输入，但 close-read 不依赖 outline `timeline_events`
 - `profile_summary_md` 按两层渲染：
   - `## 基本属性/能力`
@@ -622,18 +623,18 @@ Character Reduce 不应再读取完整 `profile_summary_md`、全量 `relationsh
 人物性证据、基础属性和关系更新都不能长期采用纯 append。新的 close-read 写回应采用“逐人物档案更新 Agent Loop”：
 
 1. Character Evidence Agent 先按连续 `documents` 组装 evidence batch，输出本批次涉及人物，并尽量对齐 `character_id`。
-2. 本地 Agent 按 `character_id` 优先、`canonical_name / aliases` 兜底，读取涉及人物的 `profile_brief` 和身份索引；不读取全量旧档案。
-3. 若人物缺失 `profile_brief`，调度 `CharacterProfileBriefBootstrap` 对该旧档案执行一次模型 compact，生成初始 brief；该步骤可在后台或当前人物首次进入 reduce 前完成。
+2. 本地 Agent 按 `character_id` 优先、`canonical_name / aliases` 兜底，把可用 evidence 追加到 `character_evidence_log` / pending experiences，并写入轻量 recent activity / mention 索引；此步不调用 Character Reduce。
+3. 若人物缺失 `profile_brief`，只在该人物即将进入 Character Reduce 前调度 `profile_brief_bootstrap` 生成初始 brief。
 4. `CharacterImportanceTracker` / Brief Compact Gate 负责三层判断：
    - 当前 segment 重要性：按当前窗口 document 覆盖率、发言、行动、关系变化、候选置信度和弱候选类型计算 `current_segment_score`。
    - 滚动历史重要性：按既有人物档案中的 mentioned/speaking doc、story events、主要事件角色和最近出现间隔计算 `rolling_score` / `rolling_tier`。
    - 状态转换：输出 `append_delta` / `needs_brief_compact` / `needs_full_profile_compact` / `defer_index_only` / `drop_for_profile`。
-5. 普通 Character Reduce 每条 prompt 只包含当前 batch 的 ordered evidence、章节短摘要、当前 outline segment、持久化 `profile_brief` 和必要来源索引。
-6. `defer_index_only` 的人物跳过 Character Reduce 模型调用，只保存极简 `outline_segment_id` / source range / role / one-line summary，累计到阈值或再次变热时再交给模型归并；`drop_for_profile` 的人物只保留底层 mention / scene index。
+5. 普通 Character Reduce 每条 prompt 只包含当前 batch 的 ordered evidence、章节短摘要、当前 outline segment、持久化 `profile_brief`（移除全量 `source_refs`）和必要来源索引。
+6. `defer_index_only` 的人物跳过 Character Reduce 模型调用，只保存极简 `outline_segment_id` / source range / role / one-line summary 和 pending evidence，累计到阈值或再次变热时再交给模型归并；`drop_for_profile` 的人物只保留底层 mention / scene index。
 7. 初始建议的 character reduce 预算是：document evidence 摘要不超过约 16KB；同一 prompt 默认一个目标人物；`profile_brief` 约 1-2KB。这些数字必须可配置，并通过 benchmark 调参。
 8. 如果人物之间关系高度耦合，系统可以把相关人物 brief 作为关系参照；如果关系冲突复杂、模型低置信或输出混淆身份，则退回单人物 reduce 或人工确认。
-9. 模型输出每个人物的增量更新或重写后的局部字段，覆盖范围包括人物性证据、基础属性、发言状态、关系、人物经历增量和 compact 触发信号；输出必须按 `character_id` 或 canonical identity 分离。
-10. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，人物经历按 `experience_id` / `outline_segment_id` 合并。
+9. 模型输出每个人物的增量更新、更新后的 `profile_brief` 和本轮 `source_ref_delta`，覆盖范围包括人物性证据、基础属性、发言状态、关系和人物经历增量；输出必须按 `character_id` 或 canonical identity 分离。
+10. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，人物经历按 `experience_id` / `outline_segment_id` 合并；`compacted_until.outline_segment_id` 更新为本次 compact 输入中最后一个被吸收的 segment，`consumed_pending_experience_ids` 由本轮 `recent_key_experiences` 的 id 组装，`source_ref_delta` append / 去重进持久化 `profile_brief.source_refs`。
 
 该 loop 的目的不是让模型自由重写整个档案，而是在有限 evidence 和少量相关现有档案之间做语义归并，减少重复、别名分裂、关系冲突和调用次数。
 
@@ -1131,8 +1132,9 @@ Detector 的输出进入两个地方：
 人物更新候选的实际落地应拆为逐人物 loop，而不是一次性 Memory Candidate prompt 输出所有人的最终更新。推荐边界：
 
 - `Memory Candidate Agent` 负责把 Character Evidence 过滤为“本批次值得更新的人物集合”，保留 `character_id`、`canonical_name`、source ids 和 confidence。
-- `Character Reduce Agent` 负责逐人物增量更新，每次只处理一个人物；`Character Profile Brief Compact Agent` 只在 brief 缺失、重大变化或 compact 阈值触发时运行。
-- 本地 merge 层负责把模型 patch 写回长期档案，并维护结构化去重。
+- `Character Reduce Agent` 负责逐人物增量更新和 pending evidence compact，每次只处理一个人物；close-read 主链不再额外运行 `profile_brief_compact` prompt。
+- `profile_brief_bootstrap` 只在目标人物缺失 `profile_brief` 且即将进入 Character Reduce 时运行一次。
+- 本地 merge 层负责把模型 patch 写回长期档案，并维护结构化去重、compact 进度、consumed ids 和全量 source refs。
 
 逐人物 prompt 至少包含：
 
@@ -1143,7 +1145,7 @@ Detector 的输出进入两个地方：
 - `chapter_summary`
 - `brief_compact_policy`
 
-`brief_compact_policy` 必须声明：普通 reduce 只写当前增量与 compact 触发信号，不要重复已有同义事实；人物性证据、基础属性和关系都要归并；关系明细写入 `relationships`，不要再复制进 `profile_summary_md`。
+`brief_compact_policy` 必须声明：普通 close-read 先 append evidence；当触发 Character Reduce 时，同一模型调用必须把 pending evidence 抽象概括进 `profile_brief`，不要重复已有同义事实；人物性证据、基础属性和关系都要归并；关系明细写入 `relationships`，不要再复制进 `profile_summary_md`。模型只输出本轮 `source_ref_delta`，不输出全量 `source_refs`、`compacted_until` 或 `consumed_pending_experience_ids`；这些账本字段由本地 merge 层维护。
 
 ### 10.3.1 Summary / Outline Commit 状态
 

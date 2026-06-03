@@ -1415,8 +1415,10 @@ class WebActionService:
             if row is None:
                 raise ValueError("找不到待确认的人物身份候选。")
             candidate = self.session_service._identity_candidate_from_row(row)  # noqa: SLF001
+            candidate_label = self.session_service._identity_merge_candidate_label(candidate)  # noqa: SLF001
+            survivor_name = str(candidate.get("survivor_canonical_name") or "").strip()
             if str(candidate.get("status") or "") not in {"pending_user_confirmation", "needs_more_evidence"}:
-                message = "这个人物身份候选已经处理过。"
+                message = f"人物身份候选「{candidate_label}」已经处理过。"
                 return WebActionResult(
                     action=action,
                     task_id=task_id,
@@ -1428,12 +1430,13 @@ class WebActionService:
                 merge_result = self._confirm_identity_merge(conn, task_id=task_id, candidate=candidate)
                 self._mark_identity_candidate(conn, candidate_id=candidate_id, status="merged", extra={"merge_result": merge_result})
                 self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="merged")
-                message = "已确认人物身份合并，相关人物档案已写回。可以重新开始阅读继续处理。"
+                survivor_text = f"，保留为「{survivor_name}」" if survivor_name else ""
+                message = f"已确认人物身份合并：「{candidate_label}」{survivor_text}。相关人物档案已写回，可以重新开始阅读继续处理。"
                 result_payload = {"candidate_id": candidate_id, "merge_result": merge_result}
             elif action == "reject_identity_merge":
                 self._mark_identity_candidate(conn, candidate_id=candidate_id, status="rejected", extra={"resolution_reason": "user rejected merge"})
                 self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="rejected")
-                message = "已保持两个人物档案分离。可以重新开始阅读继续处理。"
+                message = f"已保持「{candidate_label}」两个人物档案分离。可以重新开始阅读继续处理。"
                 result_payload = {"candidate_id": candidate_id, "status": "rejected"}
             elif action == "request_identity_merge_more_evidence":
                 self._mark_identity_candidate(
@@ -1444,7 +1447,7 @@ class WebActionService:
                     extra={"resolution_reason": "user requested more evidence"},
                 )
                 self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="needs_more_evidence")
-                message = "已标记为需要更多证据；后续阅读遇到新的揭示证据时会重新评分。"
+                message = f"已将「{candidate_label}」标记为需要更多证据；后续阅读遇到新的揭示证据时会重新评分。"
                 result_payload = {"candidate_id": candidate_id, "status": "needs_more_evidence"}
             else:
                 self._mark_identity_candidate(
@@ -1454,7 +1457,7 @@ class WebActionService:
                     extra={"resolution_reason": "user routed to memory correction"},
                 )
                 self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="routed_to_memory_correction")
-                message = "已转为记忆修正候选；不会执行人物档案合并。"
+                message = f"已将「{candidate_label}」转为记忆修正候选；不会执行人物档案合并。"
                 result_payload = {"candidate_id": candidate_id, "status": "routed_to_memory_correction"}
             conn.commit()
         self.session_service.append_message(

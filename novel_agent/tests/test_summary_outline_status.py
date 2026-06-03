@@ -13,13 +13,18 @@ from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.runner.close_read_runner import CloseReadRunner
-from novel_agent.app.schemas.orchestration_schema import ContinuationIntent, ExtractedCharacterMentions, MemoryAssemblyBudget, MemoryAssemblyInput
+from novel_agent.app.schemas.orchestration_schema import (
+    ContinuationIntent,
+    ExtractedCharacterMentions,
+    MemoryAssemblyBudget,
+    MemoryAssemblyInput,
+)
 from novel_agent.app.services.chapter_assembler_service import ChapterBatch
+from novel_agent.app.services.chapter_event_list_service import ChapterEventListService
+from novel_agent.app.services.chapter_event_summary_service import ChapterEventSummaryService
 from novel_agent.app.services.character_mention_service import CharacterMentionService
 from novel_agent.app.services.character_profile_service import CharacterProfileService
 from novel_agent.app.services.context_assembly_service import ContextAssemblyService
-from novel_agent.app.services.chapter_event_list_service import ChapterEventListService
-from novel_agent.app.services.chapter_event_summary_service import ChapterEventSummaryService
 from novel_agent.app.services.outline_event_summary_service import OutlineEventSummaryService
 from novel_agent.app.services.outline_research_service import OutlineSeedPacketBuilder
 from novel_agent.app.services.outline_segment_index_service import OutlineSegmentIndexService
@@ -656,6 +661,79 @@ def test_character_profile_story_events_are_person_scoped_and_indexed(tmp_path: 
     assert "## 剧情时间线" in row["profile_summary_md"]
     assert "outline_segment：outline-segment:chapter-12:docs-48-49" in row["profile_summary_md"]
     assert "documents：48-49" in row["profile_summary_md"]
+
+
+def test_character_profile_merge_ignores_alias_roster_dump_for_identity_matching(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile-aliases.db")
+    service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=1,
+            doc_ids=[1],
+            updates=[
+                {"canonical_name": "角色甲", "aliases": [], "relationships": []},
+                {"canonical_name": "角色乙", "aliases": [], "relationships": []},
+            ],
+        )
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=2,
+            doc_ids=[2],
+            updates=[
+                {
+                    "canonical_name": "角色甲",
+                    "aliases": ["角色乙", "角色丙", "角色丁", "角色戊", "角色己", "角色庚", "角色辛", "角色壬", "角色癸"],
+                    "relationships": [],
+                }
+            ],
+        )
+        profiles = conn.execute(
+            "SELECT canonical_name, aliases_json FROM character_profiles WHERE book_id = ? ORDER BY canonical_name",
+            ("book",),
+        ).fetchall()
+
+    assert [row["canonical_name"] for row in profiles] == ["角色乙", "角色甲"]
+    aliases_by_name = {row["canonical_name"]: json.loads(row["aliases_json"]) for row in profiles}
+    assert "角色乙" not in aliases_by_name["角色甲"]
+
+
+def test_character_profile_keeps_long_form_story_event_history(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile-long-history.db")
+    service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        for index in range(1, 31):
+            service.merge_updates(
+                conn,
+                book_id="book",
+                chapter_index=index,
+                doc_ids=[index],
+                updates=[
+                    {
+                        "canonical_name": "角色甲",
+                        "aliases": [],
+                        "recent_key_experiences": [
+                            {
+                                "event_id": f"event-{index}",
+                                "label": f"阶段事件{index}",
+                                "summary": f"角色甲经历第{index}个阶段事件。",
+                                "source_chapter_indexes": [index],
+                                "source_doc_ids": [index],
+                            }
+                        ],
+                    }
+                ],
+            )
+        row = CharacterProfilesRepo().get(conn, book_id="book", canonical_name="角色甲")
+
+    assert row is not None
+    events = json.loads(row["story_events_json"])
+    assert len(events) == 30
+    assert events[0]["event_id"] == "event-1"
 
 
 def test_outline_service_renders_timeline_event_source_indexes(tmp_path: Path) -> None:

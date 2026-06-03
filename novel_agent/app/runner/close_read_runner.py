@@ -21,6 +21,7 @@ from ..prompts.global_memory_prompt import build_global_memory_prompt
 from ..prompts.world_evidence_prompt import build_world_evidence_prompt
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
+from ..repos.character_evidence_log_repo import CharacterEvidenceLogRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
 from ..repos.db import NovelAgentDB
 from ..repos.documents_repo import DocumentsRepo
@@ -201,6 +202,7 @@ class CloseReadRunner:
             )
         )
         self.profile_brief_service = CharacterProfileBriefService()
+        self.character_evidence_log_repo = CharacterEvidenceLogRepo()
         self._summary_review_lock = threading.Lock()
 
     def _emit_progress(self, event: dict[str, Any]) -> None:
@@ -803,14 +805,7 @@ class CloseReadRunner:
                 outline_update=generated_outline_update,
                 summary_short=summary_short,
             )
-        character_reduce_payload = self._run_character_reduce_agents(
-            model_client=model_client,
-            batch=batch,
-            prompt_input=prompt_dict,
-            summary_payload=summary_payload,
-            evidence_payload=evidence_payload,
-            current_outline_segment=current_outline_segment,
-        )
+        character_reduce_payload = {"character_updates": []}
         global_memory_payload = self._generate_agent_payload(
             model_client=model_client,
             batch=batch,
@@ -998,47 +993,6 @@ class CloseReadRunner:
                 seen_ids.add(row_id)
             seen_names.add(row_name)
             full_profile = self._profile_context_from_row(row)
-            if not full_profile.get("profile_brief"):
-                self._emit_progress(
-                    {
-                        "stage": DEFAULT_CLOSE_READING_STAGE,
-                        "agent": "profile_brief_bootstrap",
-                        "event": "prompt_start",
-                        "character_id": full_profile["character_id"],
-                        "canonical_name": full_profile["canonical_name"],
-                        "reason": "missing_profile_brief",
-                    }
-                )
-                started_at = time.perf_counter()
-                brief_payload = self.profile_brief_service.bootstrap_from_row(
-                    model_client=model_client,
-                    row=row,
-                )
-                compacted_until = self._profile_brief_compacted_until(brief_payload.get("profile_brief"))
-                repo.update_profile_brief(
-                    conn,
-                    book_id=self.config.book_id,
-                    character_id=row_id,
-                    canonical_name=row_name,
-                    profile_brief=brief_payload["profile_brief"],
-                    profile_brief_status=brief_payload["profile_brief_status"],
-                    compacted_until_doc_id=compacted_until["doc_id"],
-                    compacted_until_segment_id=compacted_until["outline_segment_id"],
-                    updated_at=_utc_now(),
-                )
-                full_profile["profile_brief"] = brief_payload["profile_brief"]
-                full_profile["profile_brief_status"] = brief_payload["profile_brief_status"]
-                self._emit_progress(
-                    {
-                        "stage": DEFAULT_CLOSE_READING_STAGE,
-                        "agent": "profile_brief_bootstrap",
-                        "event": "prompt_end",
-                        "character_id": full_profile["character_id"],
-                        "canonical_name": full_profile["canonical_name"],
-                        "duration_seconds": round(time.perf_counter() - started_at, 3),
-                        "profile_brief_status": brief_payload["profile_brief_status"],
-                    }
-                )
             update_gate = self._profile_update_gate_for_profile(
                 full_profile,
                 profile_gates=profile_gates,
@@ -1213,6 +1167,398 @@ class CloseReadRunner:
         return {
             "doc_id": self._safe_int(compacted.get("doc_id")),
             "outline_segment_id": str(compacted.get("outline_segment_id") or "").strip(),
+        }
+
+    def _local_compacted_until_for_pending_group(self, group: dict[str, Any]) -> dict[str, Any]:
+        best_doc = 0
+        best_segment_id = ""
+        evidence_items = [item for item in group.get("evidence_items", []) if isinstance(item, dict)]
+        for item in evidence_items:
+            source_doc_ids = self._safe_int_list(item.get("source_doc_ids"))
+            if not source_doc_ids:
+                source_doc_ids = self._safe_int_list(group.get("source_doc_ids"))
+            latest_doc = max(source_doc_ids) if source_doc_ids else 0
+            segment_id = str(item.get("outline_segment_id") or "").strip()
+            if segment_id and (latest_doc > best_doc or (latest_doc == best_doc and segment_id > best_segment_id)):
+                best_doc = latest_doc
+                best_segment_id = segment_id
+        if not best_doc:
+            source_doc_ids = self._safe_int_list(group.get("source_doc_ids"))
+            best_doc = max(source_doc_ids) if source_doc_ids else 0
+        if not best_segment_id:
+            segment_ids = [str(item).strip() for item in group.get("outline_segment_ids", []) if str(item).strip()]
+            if segment_ids:
+                best_segment_id = max(segment_ids, key=self._outline_segment_sort_key)
+        return {"doc_id": best_doc or None, "outline_segment_id": best_segment_id}
+
+    def _prepare_character_reduce_updates_for_merge(
+        self,
+        updates: list[dict[str, Any]],
+        *,
+        group: dict[str, Any],
+        existing_profile_brief: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        compacted_until = self._local_compacted_until_for_pending_group(group)
+        fallback_source_refs = self._source_refs_for_pending_group(group)
+        prepared: list[dict[str, Any]] = []
+        for update in updates:
+            normalized = dict(update)
+            normalized.pop("consumed_pending_experience_ids", None)
+            recent_experiences = self._dict_list(normalized.get("recent_key_experiences"))
+            if recent_experiences:
+                key_experiences = self._dict_list(normalized.get("key_experiences"))
+                normalized["key_experiences"] = self._dedupe_experience_items([*key_experiences, *recent_experiences])
+                normalized["recent_key_experiences"] = []
+                normalized["consumed_pending_experience_ids"] = self._experience_ids_from_items(recent_experiences)
+            profile_brief = normalized.get("profile_brief")
+            if isinstance(profile_brief, dict) and profile_brief:
+                brief = dict(profile_brief)
+                brief.pop("source_refs", None)
+                source_ref_delta = self._dict_list(normalized.get("source_ref_delta"))
+                if not source_ref_delta:
+                    source_ref_delta = self._dict_list(brief.pop("source_ref_delta", []))
+                brief["source_refs"] = self._merge_source_refs(
+                    existing_profile_brief.get("source_refs"),
+                    source_ref_delta,
+                    fallback_source_refs,
+                )
+                brief["compacted_until"] = compacted_until
+                normalized["profile_brief"] = brief
+            prepared.append(normalized)
+        return prepared
+
+    def _source_refs_for_pending_group(self, group: dict[str, Any]) -> list[dict[str, Any]]:
+        refs_by_key: dict[str, dict[str, Any]] = {}
+        for item in group.get("evidence_items", []):
+            if not isinstance(item, dict):
+                continue
+            evidence_id = str(item.get("evidence_id") or "").strip()
+            segment_id = str(item.get("outline_segment_id") or "").strip()
+            source_doc_ids = self._safe_int_list(item.get("source_doc_ids"))
+            if not source_doc_ids:
+                source_doc_ids = self._safe_int_list(group.get("source_doc_ids"))
+            key = segment_id or evidence_id
+            if not key:
+                continue
+            ref = refs_by_key.setdefault(
+                key,
+                {
+                    "outline_segment_id": segment_id,
+                    "source_doc_ids": [],
+                    "source_doc_range": str(item.get("source_doc_range") or "").strip(),
+                    "evidence_ids": [],
+                },
+            )
+            ref["source_doc_ids"] = sorted({*self._safe_int_list(ref.get("source_doc_ids")), *source_doc_ids})
+            if evidence_id and evidence_id not in ref["evidence_ids"]:
+                ref["evidence_ids"].append(evidence_id)
+            if not ref.get("source_doc_range"):
+                ref["source_doc_range"] = self._doc_range_text(ref["source_doc_ids"])
+        return [ref for ref in refs_by_key.values() if ref.get("outline_segment_id") or ref.get("evidence_ids")]
+
+    def _merge_source_refs(self, *ref_groups: object) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for group in ref_groups:
+            for ref in self._dict_list(group):
+                key = self._stable_json_key(ref)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(ref)
+        return merged
+
+    def _dict_list(self, value: object) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    def _dedupe_experience_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            key = str(item.get("experience_id") or item.get("event_id") or item.get("id") or "").strip()
+            if not key:
+                key = self._stable_json_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(item)
+        return result
+
+    def _experience_ids_from_items(self, items: list[dict[str, Any]]) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            value = str(item.get("experience_id") or item.get("event_id") or item.get("id") or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+        return ids
+
+    def _outline_segment_sort_key(self, value: str) -> tuple[int, int, str]:
+        numbers = [int(item) for item in re.findall(r"\d+", value)]
+        latest = max(numbers) if numbers else 0
+        first = numbers[0] if numbers else 0
+        return latest, first, value
+
+    def _stable_json_key(self, value: object) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _append_character_evidence_log(
+        self,
+        conn,
+        *,
+        evidence_payload: dict[str, Any],
+        outline_update: dict[str, Any],
+    ) -> int:
+        grouped = self.memory_candidate_service._group_character_evidence(evidence_payload)  # noqa: SLF001
+        evidence_items = [item for items in grouped.values() for item in items]
+        if not evidence_items:
+            return 0
+        return self.character_evidence_log_repo.append_many(
+            conn,
+            book_id=self.config.book_id,
+            evidence_items=evidence_items,
+            outline_segment=outline_update,
+            updated_at=_utc_now(),
+        )
+
+    def _apply_pending_character_reduces(
+        self,
+        *,
+        conn,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        profile_service: CharacterProfileService,
+        evidence_payload: dict[str, Any],
+        summary_payload: dict[str, Any],
+        current_outline_segment: dict[str, Any],
+    ) -> None:
+        current_gates = self._profile_update_gates_for_evidence(
+            evidence_payload=evidence_payload,
+            current_total_chars=batch.total_chars,
+        )
+        pending_groups = self.character_evidence_log_repo.pending_groups(conn, book_id=self.config.book_id)
+        for group in pending_groups:
+            if not self._should_reduce_pending_character_group(group=group, current_gates=current_gates):
+                continue
+            row = self._profile_row_for_pending_group(
+                conn,
+                profile_service=profile_service,
+                group=group,
+            )
+            if row is None:
+                continue
+            row = self._ensure_profile_brief_for_reduce(
+                conn=conn,
+                model_client=model_client,
+                profile_service=profile_service,
+                row=row,
+            )
+            profile_context = self._profile_context_from_row(row)
+            profile_context["character_update_gate"] = self._pending_reduce_gate(group=group, current_gates=current_gates)
+            reduce_payload = self._run_character_reduce_agents(
+                model_client=model_client,
+                batch=batch,
+                prompt_input={
+                    "book_id": self.config.book_id,
+                    "character_profiles": [profile_context],
+                },
+                summary_payload=summary_payload,
+                evidence_payload=self._pending_group_evidence_payload(group),
+                current_outline_segment=self._outline_segment_for_pending_group(
+                    group=group,
+                    current_outline_segment=current_outline_segment,
+                ),
+            )
+            updates = [
+                item
+                for item in reduce_payload.get("character_updates", [])
+                if isinstance(item, dict) and isinstance(item.get("profile_brief"), dict) and item.get("profile_brief")
+            ]
+            if not updates:
+                continue
+            updates = self._prepare_character_reduce_updates_for_merge(
+                updates,
+                group=group,
+                existing_profile_brief=profile_context.get("profile_brief", {})
+                if isinstance(profile_context.get("profile_brief"), dict)
+                else {},
+            )
+            profile_service.merge_updates(
+                conn,
+                book_id=self.config.book_id,
+                chapter_index=batch.document_title_index,
+                doc_ids=group.get("source_doc_ids") or [doc.doc_id for doc in batch.documents],
+                updates=updates,
+                mentioned_doc_ids_by_name={str(row["canonical_name"] or ""): group.get("source_doc_ids", [])},
+                speaking_doc_ids_by_name={},
+                story_events_by_name={},
+            )
+            self.character_evidence_log_repo.mark_compacted(
+                conn,
+                evidence_ids=group.get("evidence_ids", []),
+                updated_at=_utc_now(),
+            )
+
+    def _should_reduce_pending_character_group(
+        self,
+        *,
+        group: dict[str, Any],
+        current_gates: dict[str, dict[str, Any]],
+    ) -> bool:
+        gate = self._pending_reduce_gate(group=group, current_gates=current_gates)
+        if str(gate.get("update_policy") or "").strip() == "reduce_now":
+            return True
+        if bool(group.get("has_major_change")):
+            return True
+        evidence_count = len(group.get("evidence_items", []))
+        evidence_chars = int(group.get("evidence_chars") or 0)
+        if evidence_count >= int(self.config.runtime.character_reduce_pending_min_evidence_count):
+            return True
+        return evidence_chars >= int(self.config.runtime.character_reduce_pending_min_evidence_chars)
+
+    def _pending_reduce_gate(
+        self,
+        *,
+        group: dict[str, Any],
+        current_gates: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        keys = [
+            f"id:{str(group.get('character_id') or '').strip()}",
+            f"name:{str(group.get('canonical_name') or '').strip()}",
+        ]
+        for key in keys:
+            gate = current_gates.get(key)
+            if isinstance(gate, dict) and str(gate.get("detail_level") or "").strip() == "detailed":
+                merged = dict(gate)
+                merged["update_policy"] = "reduce_now"
+                return merged
+        return {
+            "detail_level": "compact",
+            "update_policy": "append_pending",
+            "reason": "pending_evidence_threshold_or_major_change",
+            "pending_evidence_count": len(group.get("evidence_items", [])),
+            "pending_evidence_chars": int(group.get("evidence_chars") or 0),
+            "pending_outline_segment_ids": group.get("outline_segment_ids", []),
+        }
+
+    def _profile_row_for_pending_group(
+        self,
+        conn,
+        *,
+        profile_service: CharacterProfileService,
+        group: dict[str, Any],
+    ):
+        repo = profile_service.profiles_repo
+        character_id = self._safe_int(group.get("character_id"))
+        if character_id is not None and character_id > 0:
+            row = repo.get_by_id(conn, book_id=self.config.book_id, character_id=character_id)
+            if row is not None:
+                return row
+        canonical_name = str(group.get("canonical_name") or "").strip()
+        if not canonical_name:
+            return None
+        row = repo.get(conn, book_id=self.config.book_id, canonical_name=canonical_name)
+        if row is not None:
+            return row
+        for candidate in repo.list_by_book(conn, book_id=self.config.book_id):
+            aliases = self._load_json_list(candidate["aliases_json"])
+            if canonical_name in aliases:
+                return candidate
+        return None
+
+    def _ensure_profile_brief_for_reduce(
+        self,
+        *,
+        conn,
+        model_client: JsonModelClient,
+        profile_service: CharacterProfileService,
+        row,
+    ):
+        current_brief = self._load_json_dict(row["profile_brief_json"]) if self._row_has_column(row, "profile_brief_json") else {}
+        if current_brief:
+            return row
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "profile_brief_bootstrap",
+                "event": "prompt_start",
+                "character_id": str(row["character_id"]),
+                "canonical_name": str(row["canonical_name"] or ""),
+                "reason": "missing_profile_brief_before_character_reduce",
+            }
+        )
+        started_at = time.perf_counter()
+        brief_payload = self.profile_brief_service.bootstrap_from_row(model_client=model_client, row=row)
+        compacted_until = self._profile_brief_compacted_until(brief_payload.get("profile_brief"))
+        profile_service.profiles_repo.update_profile_brief(
+            conn,
+            book_id=self.config.book_id,
+            character_id=int(row["character_id"]),
+            profile_brief=brief_payload["profile_brief"],
+            profile_brief_status=brief_payload["profile_brief_status"],
+            compacted_until_doc_id=compacted_until["doc_id"],
+            compacted_until_segment_id=compacted_until["outline_segment_id"],
+            updated_at=_utc_now(),
+        )
+        self._emit_progress(
+            {
+                "stage": DEFAULT_CLOSE_READING_STAGE,
+                "agent": "profile_brief_bootstrap",
+                "event": "prompt_end",
+                "character_id": str(row["character_id"]),
+                "canonical_name": str(row["canonical_name"] or ""),
+                "duration_seconds": round(time.perf_counter() - started_at, 3),
+                "profile_brief_status": brief_payload["profile_brief_status"],
+            }
+        )
+        return profile_service.profiles_repo.get_by_id(
+            conn,
+            book_id=self.config.book_id,
+            character_id=int(row["character_id"]),
+        ) or row
+
+    def _pending_group_evidence_payload(self, group: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "character_evidence_batches": [
+                {
+                    "doc_ids": group.get("source_doc_ids", []),
+                    "document_title_indexes": group.get("source_title_indexes", []),
+                    "characters": [item for item in group.get("evidence_items", []) if isinstance(item, dict)],
+                }
+            ]
+        }
+
+    def _outline_segment_for_pending_group(
+        self,
+        *,
+        group: dict[str, Any],
+        current_outline_segment: dict[str, Any],
+    ) -> dict[str, Any]:
+        current_id = str(current_outline_segment.get("outline_segment_id") or "").strip()
+        pending_ids = [str(item).strip() for item in group.get("outline_segment_ids", []) if str(item).strip()]
+        if current_id and (not pending_ids or pending_ids == [current_id]):
+            return current_outline_segment
+        if len(pending_ids) == 1:
+            return {
+                "outline_segment_id": pending_ids[0],
+                "source_doc_ids": group.get("source_doc_ids", []),
+                "source_title_indexes": group.get("source_title_indexes", []),
+                "source_doc_range": self._doc_range_text(group.get("source_doc_ids", [])),
+                "status": "pending_evidence",
+            }
+        return {
+            "outline_segment_id": ",".join(pending_ids),
+            "source_doc_ids": group.get("source_doc_ids", []),
+            "source_title_indexes": group.get("source_title_indexes", []),
+            "source_doc_range": self._doc_range_text(group.get("source_doc_ids", [])),
+            "status": "pending_evidence",
         }
 
     def _generate_character_evidence_payload(
@@ -1623,6 +1969,7 @@ class CloseReadRunner:
                 payload={"raw_payload_type": type(payload).__name__},
             )
             raise InvalidChapterSynopsisError("chapter_summary returned non-dict JSON", review_path=review_path)
+        payload = self._normalize_chapter_summary_schema_aliases(payload)
         self._validate_summary_payload(batch=batch, payload=payload)
         return payload
 
@@ -1672,6 +2019,7 @@ class CloseReadRunner:
             batch=batch,
             evidence_payload=evidence_payload,
         )
+        payload["character_evidence_payload"] = evidence_payload
         payload["identity_revelations"] = self._flatten_identity_revelations(evidence_payload)
         fallback_memory = self._fallback_memory_candidate_output(batch, summary_payload, evidence_payload)
         payload["character_updates"] = character_reduce_payload.get("character_updates", fallback_memory["character_updates"])
@@ -1701,6 +2049,7 @@ class CloseReadRunner:
             for item in raw_summaries:
                 if not isinstance(item, dict):
                     continue
+                item = self._normalize_chapter_summary_schema_aliases(item)
                 title_index = self._safe_int(item.get("document_title_index"))
                 if title_index is None:
                     continue
@@ -1725,6 +2074,23 @@ class CloseReadRunner:
                 item["chapter_title"] = batch.as_single_title_batch(title_index).chapter_title
             merged.append(item)
         return merged
+
+    @staticmethod
+    def _normalize_chapter_summary_schema_aliases(payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        if not str(normalized.get("chapter_summary_md") or "").strip():
+            chapter_summary_alias = normalized.get("chapter_summary")
+            if isinstance(chapter_summary_alias, str) and chapter_summary_alias.strip():
+                normalized["chapter_summary_md"] = chapter_summary_alias.strip()
+        raw_summaries = normalized.get("chapter_summaries")
+        if isinstance(raw_summaries, list):
+            normalized["chapter_summaries"] = [
+                CloseReadRunner._normalize_chapter_summary_schema_aliases(item)
+                if isinstance(item, dict)
+                else item
+                for item in raw_summaries
+            ]
+        return normalized
 
     def _build_global_memory_input(
         self,
@@ -2288,6 +2654,7 @@ class CloseReadRunner:
         }
 
     def _validate_summary_payload(self, *, batch: ChapterBatch, payload: dict[str, Any]) -> None:
+        payload = self._normalize_chapter_summary_schema_aliases(payload)
         summary_quality = str(payload.get("summary_quality") or "").strip()
         if summary_quality in {"fallback_excerpt_disallowed", "fallback_excerpt"}:
             review_path = self._write_summary_review_markdown(
@@ -2306,7 +2673,7 @@ class CloseReadRunner:
                 )
                 raise InvalidChapterSynopsisError("multi-chapter batch missing chapter_summaries", review_path=review_path)
             by_index = {
-                int(item.get("document_title_index")): item
+                int(item.get("document_title_index")): self._normalize_chapter_summary_schema_aliases(item)
                 for item in raw_summaries
                 if isinstance(item, dict) and self._safe_int(item.get("document_title_index")) is not None
             }
@@ -2517,7 +2884,7 @@ class CloseReadRunner:
                 payload={"raw_payload_type": type(payload).__name__},
             )
             raise InvalidChapterSynopsisError("Close-read model returned a non-dict JSON payload", review_path=review_path)
-        normalized = dict(payload)
+        normalized = self._normalize_chapter_summary_schema_aliases(payload)
         if not str(normalized.get("chapter_summary_md", "")).strip():
             review_path = self._write_summary_review_markdown(
                 batch=batch,
@@ -2738,27 +3105,50 @@ class CloseReadRunner:
                 "updated_at": _utc_now(),
             },
         )
+        evidence_payload = payload.get("character_evidence_payload") if isinstance(payload.get("character_evidence_payload"), dict) else {}
+        self._append_character_evidence_log(
+            conn,
+            evidence_payload=evidence_payload,
+            outline_update=outline_update,
+        )
         raw_character_updates = [item for item in payload.get("character_updates", []) if isinstance(item, dict)]
         source_verified_names = sorted({name for values in document_mentions.values() for name in values})
         source_verified_speakers = sorted({name for values in speaking_mentions.values() for name in values})
         if not raw_character_updates:
-            raw_character_updates = [
-                {
-                    "canonical_name": name,
-                    "aliases": [],
-                    "personality": [],
-                    "occupations": [],
-                    "recent_activity": summary_short,
-                    "relationships": [],
-                }
-                for name in mentioned_characters
-            ]
+            raw_character_updates = self.memory_candidate_service.build_character_updates(
+                summary_short=summary_short,
+                evidence_payload=evidence_payload,
+            )
+            if not raw_character_updates:
+                raw_character_updates = [
+                    {
+                        "canonical_name": name,
+                        "aliases": [],
+                        "personality": [],
+                        "occupations": [],
+                        "recent_activity": summary_short,
+                        "relationships": [],
+                    }
+                    for name in mentioned_characters
+                ]
         else:
             raw_character_updates = self._augment_character_updates_from_source_verified_names(
                 raw_character_updates=raw_character_updates,
                 source_verified_names=source_verified_names,
                 summary_short=summary_short,
             )
+        self._emit_progress(
+            {
+                "stage": "close_reading",
+                "agent": "character_identity_resolution",
+                "event": "service_start",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "update_count": len(raw_character_updates),
+            }
+        )
+        started_at = time.perf_counter()
         raw_character_updates = identity_resolution_service.resolve_updates(
             conn,
             book_id=self.config.book_id,
@@ -2767,11 +3157,47 @@ class CloseReadRunner:
             source_verified_names=source_verified_names,
             source_verified_speakers=source_verified_speakers,
         )
+        self._emit_progress(
+            {
+                "stage": "close_reading",
+                "agent": "character_identity_resolution",
+                "event": "service_end",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "update_count": len(raw_character_updates),
+                "duration_seconds": round(time.perf_counter() - started_at, 3),
+            }
+        )
+        self._emit_progress(
+            {
+                "stage": "close_reading",
+                "agent": "character_canonical_name_resolution",
+                "event": "service_start",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "update_count": len(raw_character_updates),
+            }
+        )
+        started_at = time.perf_counter()
         raw_character_updates = canonical_name_service.resolve_updates(
             conn,
             book_id=self.config.book_id,
             model_client=model_client,
             updates=raw_character_updates,
+        )
+        self._emit_progress(
+            {
+                "stage": "close_reading",
+                "agent": "character_canonical_name_resolution",
+                "event": "service_end",
+                "document_title_indexes": batch.title_indexes,
+                "doc_count": len(batch.documents),
+                "total_chars": batch.total_chars,
+                "update_count": len(raw_character_updates),
+                "duration_seconds": round(time.perf_counter() - started_at, 3),
+            }
         )
         profile_service.merge_updates(
             conn,
@@ -2783,15 +3209,15 @@ class CloseReadRunner:
             speaking_doc_ids_by_name=self._invert_mentions(speaking_mentions),
             story_events_by_name={},
         )
-        self._apply_profile_brief_compacts(
+        self._apply_pending_character_reduces(
             conn=conn,
             model_client=model_client,
-            documents_repo=documents_repo,
+            batch=batch,
             profile_service=profile_service,
-            updates=raw_character_updates,
-            chapter_summary={
+            evidence_payload=evidence_payload,
+            summary_payload={
                 "chapter_summary_short": summary_short,
-                "chapter_summary_md": summary_for_outline,
+                "chapter_summaries": payload.get("chapter_summaries", []),
                 "document_title_index": batch.document_title_index,
                 "chapter_title": batch.chapter_title,
             },
@@ -2799,89 +3225,6 @@ class CloseReadRunner:
         )
         world_service.apply_update(book_id=self.config.book_id, world_update=payload.get("world_update", {}))
         return chapter_id
-
-    def _apply_profile_brief_compacts(
-        self,
-        *,
-        conn,
-        model_client: JsonModelClient,
-        documents_repo: DocumentsRepo,
-        profile_service: CharacterProfileService,
-        updates: list[dict[str, Any]],
-        chapter_summary: dict[str, Any],
-        current_outline_segment: dict[str, Any],
-    ) -> None:
-        repo = profile_service.profiles_repo
-        seen: set[int | str] = set()
-        for update in updates:
-            if not isinstance(update, dict):
-                continue
-            character_id = self._safe_int(update.get("character_id"))
-            canonical_name = str(update.get("canonical_name") or "").strip()
-            row = None
-            seen_key: int | str | None = None
-            if character_id is not None and character_id > 0:
-                row = repo.get_by_id(conn, book_id=self.config.book_id, character_id=character_id)
-                seen_key = character_id
-            if row is None and canonical_name:
-                row = repo.get(conn, book_id=self.config.book_id, canonical_name=canonical_name)
-                seen_key = canonical_name
-            if row is None or seen_key in seen:
-                continue
-            seen.add(seen_key)
-            current_brief = self._load_json_dict(row["profile_brief_json"]) if self._row_has_column(row, "profile_brief_json") else {}
-            if not self.profile_brief_service.should_compact(row=row, current_update=update):
-                continue
-            missing_brief = not current_brief
-            agent_name = "profile_brief_bootstrap" if missing_brief else "profile_brief_compact"
-            self._emit_progress(
-                {
-                    "stage": DEFAULT_CLOSE_READING_STAGE,
-                    "agent": agent_name,
-                    "event": "prompt_start",
-                    "character_id": str(row["character_id"]),
-                    "canonical_name": str(row["canonical_name"] or ""),
-                    "reason": "missing_profile_brief" if missing_brief else "brief_compact_gate",
-                }
-            )
-            started_at = time.perf_counter()
-            if missing_brief:
-                brief_payload = self.profile_brief_service.bootstrap_from_row(
-                    model_client=model_client,
-                    row=row,
-                )
-            else:
-                brief_payload = self.profile_brief_service.compact_loop(
-                    conn=conn,
-                    model_client=model_client,
-                    documents_repo=documents_repo,
-                    row=row,
-                    current_update=update,
-                    chapter_summary=chapter_summary,
-                    current_outline_segment=current_outline_segment,
-                )
-            compacted_until = self._profile_brief_compacted_until(brief_payload.get("profile_brief"))
-            repo.update_profile_brief(
-                conn,
-                book_id=self.config.book_id,
-                character_id=int(row["character_id"]),
-                profile_brief=brief_payload["profile_brief"],
-                profile_brief_status=brief_payload["profile_brief_status"],
-                compacted_until_doc_id=compacted_until["doc_id"],
-                compacted_until_segment_id=compacted_until["outline_segment_id"],
-                updated_at=_utc_now(),
-            )
-            self._emit_progress(
-                {
-                    "stage": DEFAULT_CLOSE_READING_STAGE,
-                    "agent": agent_name,
-                    "event": "prompt_end",
-                    "character_id": str(row["character_id"]),
-                    "canonical_name": str(row["canonical_name"] or ""),
-                    "duration_seconds": round(time.perf_counter() - started_at, 3),
-                    "profile_brief_status": brief_payload["profile_brief_status"],
-                }
-            )
 
     def _augment_character_updates_from_source_verified_names(
         self,

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { FileText, PenLine } from "lucide-react";
+import { FileText, PenLine, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { getArtifactTree, getArtifactView } from "../../api/artifacts";
@@ -17,10 +17,12 @@ interface ResultExplorerProps {
 export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionPending = false, onAction }: ResultExplorerProps) {
   const [surface, setSurface] = useState<ArtifactSurface>("close-read");
   const [selectedNode, setSelectedNode] = useState<ArtifactTreeNode | null>(null);
+  const [personQuery, setPersonQuery] = useState("");
+  const treeSearchQuery = surface === "close-read" ? personQuery : "";
 
   const treeQuery = useQuery({
-    queryKey: ["artifact-tree", selectedTaskId, surface],
-    queryFn: () => getArtifactTree(selectedTaskId, surface),
+    queryKey: ["artifact-tree", selectedTaskId, surface, treeSearchQuery],
+    queryFn: () => getArtifactTree(selectedTaskId, surface, treeSearchQuery),
     enabled: Boolean(selectedTaskId)
   });
 
@@ -90,6 +92,24 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
           Writer
         </button>
       </div>
+      {surface === "close-read" && selectedTaskId ? (
+        <label className="person-search">
+          <Search size={14} aria-hidden="true" />
+          <span className="sr-only">搜索人物档案</span>
+          <input
+            type="search"
+            value={personQuery}
+            onChange={(event) => setPersonQuery(event.target.value)}
+            placeholder="搜索人物档案"
+            aria-label="搜索人物档案"
+          />
+          {personQuery ? (
+            <button type="button" className="icon-button" aria-label="清空人物搜索" onClick={() => setPersonQuery("")}>
+              <X size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+        </label>
+      ) : null}
       {!selectedTaskId ? (
         <div className="empty-state">选择任务后会加载目录树。</div>
       ) : (

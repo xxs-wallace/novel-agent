@@ -506,6 +506,8 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
+    expect(await screen.findByLabelText("搜索人物档案")).toBeInTheDocument();
+    expect(within(screen.getByRole("tree")).queryByText("基本信息")).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "沈青" }));
 
     expect((await screen.findAllByText("人物百科")).length).toBeGreaterThan(0);
@@ -513,6 +515,17 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.getAllByText("当前目标").length).toBeGreaterThan(0);
     expect(screen.getAllByText("关系网络").length).toBeGreaterThan(0);
     expect(screen.getAllByText("禁止误写点").length).toBeGreaterThan(0);
+  });
+
+  it("filters close-read person profiles from the search box", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.type(await screen.findByLabelText("搜索人物档案"), "顾迟");
+
+    await waitFor(() => expect(within(screen.getByRole("tree")).getByText("顾迟")).toBeInTheDocument());
+    expect(within(screen.getByRole("tree")).queryByText("沈青")).not.toBeInTheDocument();
   });
 
   it("shows the Agent Loop Writer artifact tree", async () => {

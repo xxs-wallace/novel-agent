@@ -197,6 +197,39 @@ class NarrativeMemoryQueryService:
             pages = self._outline_segment_pages(conn, book_id=book_id)
         return [self._candidate_dict(page, budget=budget) for page in pages[: budget.max_root_candidates]]
 
+    def chapter_scan(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        query: str,
+        budget: MemoryQueryBudget | None = None,
+    ) -> MemoryQueryState:
+        budget = budget or MemoryQueryBudget()
+        candidates = self._rank_pages(
+            self._chapter_pages(conn, book_id=book_id),
+            query=query,
+            limit=budget.max_root_candidates,
+        )
+        candidate_dicts = [self._candidate_dict(page, budget=budget) for page in candidates]
+        return MemoryQueryState(
+            original_query=query,
+            current_level="chapter",
+            current_candidates=candidate_dicts,
+            budget=budget,
+            budget_used={"candidate_count": len(candidate_dicts)},
+            trace=[
+                {
+                    "operation": "chapter_scan",
+                    "level": "chapter",
+                    "query": query,
+                    "candidate_ids": [item["id"] for item in candidate_dicts],
+                    "budget": budget.to_dict(),
+                    "source_scope": "prefix_memory_only",
+                }
+            ],
+        )
+
     def drill_down(
         self,
         conn: sqlite3.Connection,

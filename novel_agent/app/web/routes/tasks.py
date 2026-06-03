@@ -90,14 +90,23 @@ def _with_active_job_status(summary: TaskSummary, *, job_manager: JobManager) ->
     active_job = _most_relevant_active_job(job_manager.active_jobs(task_id=summary.task_id))
     summary.active_job = active_job
     if summary.progress is not None:
-        summary.progress = _progress_with_active_job(summary.progress, active_job=active_job)
+        if active_job is not None:
+            summary.progress = _progress_with_active_job(summary.progress, active_job=active_job)
+        else:
+            failed_job = _most_relevant_failed_job(
+                _job_manager_jobs(job_manager, task_id=summary.task_id, statuses={"failed"})
+            )
+            summary.progress = _progress_with_failed_job(summary.progress, failed_job=failed_job)
     return summary
 
 
 def _progress_with_active_job_status(progress: TaskProgress, *, job_manager: JobManager) -> TaskProgress:
     active_jobs = job_manager.active_jobs(task_id=progress.task_id)
     active_job = _most_relevant_active_job(active_jobs)
-    return _progress_with_active_job(progress, active_job=active_job)
+    if active_job is not None:
+        return _progress_with_active_job(progress, active_job=active_job)
+    failed_job = _most_relevant_failed_job(_job_manager_jobs(job_manager, task_id=progress.task_id, statuses={"failed"}))
+    return _progress_with_failed_job(progress, failed_job=failed_job)
 
 
 def _progress_with_active_job(progress: TaskProgress, *, active_job: JobSummary | None) -> TaskProgress:
@@ -109,15 +118,42 @@ def _progress_with_active_job(progress: TaskProgress, *, active_job: JobSummary 
     progress.flow = override["flow"]
     progress.step = override["step"]
     progress.next_action = override["next_action"]
-    progress.message = active_job.message
+    progress.message = override.get("message") or active_job.message
+    return progress
+
+
+def _progress_with_failed_job(progress: TaskProgress, *, failed_job: JobSummary | None) -> TaskProgress:
+    if failed_job is None:
+        return progress
+    override = _FAILED_JOB_PROGRESS.get(failed_job.type)
+    if override is None:
+        return progress
+    progress.flow = override["flow"]
+    progress.step = override["step"]
+    progress.next_action = override["next_action"]
+    progress.message = failed_job.message
     return progress
 
 
 def _most_relevant_active_job(active_jobs: list[JobSummary]) -> JobSummary | None:
     if not active_jobs:
         return None
-    priority = {"writer": 4, "writer_resume": 4, "kb": 3, "close_read": 2, "read": 1}
+    priority = {"outline_analyzer": 5, "writer": 4, "writer_resume": 4, "kb": 3, "close_read": 2, "read": 1}
     return sorted(active_jobs, key=lambda job: (priority.get(job.type, 0), job.created_at))[-1]
+
+
+def _most_relevant_failed_job(failed_jobs: list[JobSummary]) -> JobSummary | None:
+    relevant = [job for job in failed_jobs if job.type in _FAILED_JOB_PROGRESS]
+    if not relevant:
+        return None
+    return sorted(relevant, key=lambda job: job.updated_at)[-1]
+
+
+def _job_manager_jobs(job_manager: JobManager, *, task_id: str, statuses: set[str]) -> list[JobSummary]:
+    jobs_method = getattr(job_manager, "jobs", None)
+    if not callable(jobs_method):
+        return []
+    return jobs_method(task_id=task_id, statuses=statuses)
 
 
 _ACTIVE_JOB_PROGRESS = {
@@ -150,5 +186,30 @@ _ACTIVE_JOB_PROGRESS = {
         "flow": "Writer 分层生成",
         "step": "正在处理你的决策",
         "next_action": "完成后会刷新审阅入口",
+    },
+    "outline_analyzer": {
+        "flow": "小说专家意见",
+        "step": "小说专家正在分析剧情",
+        "next_action": "分析完成后会把回复发到会话里",
+        "message": "小说专家正在分析剧情。",
+    },
+}
+
+
+_FAILED_JOB_PROGRESS = {
+    "read": {
+        "flow": "导入原文",
+        "step": "导入原文遇到问题",
+        "next_action": "查看错误并从 checkpoint 重试",
+    },
+    "close_read": {
+        "flow": "阅读",
+        "step": "阅读遇到问题",
+        "next_action": "查看错误并从最近 checkpoint 重试",
+    },
+    "outline_analyzer": {
+        "flow": "小说专家意见",
+        "step": "剧情分析遇到问题",
+        "next_action": "查看错误后重新提问或补充上下文",
     },
 }

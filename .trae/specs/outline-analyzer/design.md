@@ -610,8 +610,154 @@ Web Conversation Pane SHOULD：
 - 启用后，输入框进入 Analyzer mode。
 - 显示上下文提示，例如“正在和小说专家讨论剧情”。
 - 发送消息时带 `payload.channel = outline_analyzer`。
-- Analyzer 回复仍显示为普通 assistant message。
+- 后端收到 Analyzer 消息后立即创建 `outline_analyzer` 后台 job，并返回用户消息 / job metadata；不得在 message API 中同步等待模型完成。
+- Analyzer 运行中应显示“小说专家正在分析剧情”等任务状态，并通过 job events / message sync 更新进度。
+- Analyzer 回复仍显示为普通 assistant message；失败显示 error message；需要用户补充时显示 assistant message 并保持本轮 turn 未完成。
 - 退出模式后，输入框恢复普通自然语言或 Writer gate 上下文。
+
+### 9.1.1 Background Job Flow
+
+推荐实现流程：
+
+```text
+POST /api/tasks/{task_id}/messages
+  payload.channel = outline_analyzer
+  -> append user message
+  -> AnalyzerTurnService.create_turn(...)
+  -> JobManager.create_job(type="outline_analyzer", payload={turn_id, user_message_id})
+  -> return user message with payload.job_id / payload.turn_id
+
+JobManager runs outline_analyzer
+  -> AnalyzerTurnService.mark_running(turn_id)
+  -> OutlineAnalyzerService.chat / loop with persisted trace callbacks
+  -> if final answer:
+       append assistant message
+       AnalyzerTurnService.mark_succeeded(...)
+     elif need_user_input:
+       append assistant message with question / decision card or input hint
+       AnalyzerTurnService.mark_need_user_input(...)
+     else if error:
+       append error message
+       AnalyzerTurnService.mark_failed(...)
+```
+
+`outline_analyzer` job SHOULD be part of active task progress priority. When an Analyzer job is active, task status SHOULD not fall back to close-read paused / checkpoint status.
+
+### 9.1.2 Turn State Persistence
+
+新增 `AnalyzerTurnService`（或等价服务）负责可恢复状态，避免把持久化细节塞进 `WebSessionService`。
+
+推荐目录：
+
+```text
+.memory/analyzer/{book_id}/
+  analyzer_state.json
+  conversation.md
+  turns/
+    {turn_id}.md
+```
+
+`analyzer_state.json` 用于程序快速恢复：
+
+```json
+{
+  "schema_version": "1.0",
+  "book_id": "book-001",
+  "active_turn_id": "turn-001",
+  "turns": [
+    {
+      "turn_id": "turn-001",
+      "job_id": "job-001",
+      "status": "need_user_input",
+      "user_message_id": "msg-user",
+      "assistant_message_id": "msg-assistant",
+      "state_path": ".memory/analyzer/book-001/turns/turn-001.md",
+      "created_at": "2026-06-03T00:00:00Z",
+      "updated_at": "2026-06-03T00:10:00Z"
+    }
+  ]
+}
+```
+
+`conversation.md` 保存已完成 Analyzer 对话的压缩 memory：
+
+```markdown
+# Analyzer Conversation Memory
+
+## Completed Turns
+
+### turn-001
+- 用户问题：...
+- 最终结论：...
+- 关键来源：...
+- 注意：本文件是 Analyzer 对话记忆，不是小说事实 Memory。
+```
+
+未完成 turn 的 `{turn_id}.md` 保存完整 trace：
+
+```markdown
+# Analyzer Turn State
+
+- book_id:
+- turn_id:
+- job_id:
+- status: running | need_user_input | failed | interrupted_can_resume
+- user_message_id:
+- assistant_message_id:
+- created_at:
+- updated_at:
+
+## User Question
+
+...
+
+## Conversation Memory Input
+
+...
+
+## Active Notebook
+
+...
+
+## Prompt Trace
+
+### Step 1 Seed Prompt
+...
+
+### Step 1 Model Output
+...
+
+### Step 2 Research Request
+...
+
+### Step 2 Evidence Bundle
+...
+
+### Step 2 Notebook Delta
+...
+
+## Pending User Input
+
+仅 status=need_user_input 时存在。
+```
+
+保留策略：
+
+- `succeeded` turn SHOULD 写入 `conversation.md`，并可压缩或删除 `{turn_id}.md` 中的详细 prompt trace。
+- `running` / `need_user_input` / `failed` / `cancelled` / `interrupted_can_resume` turn MUST 保留完整 prompt trace，直到最终完成或用户明确废弃。
+- `need_user_input` 是未完成状态；用户补充后应恢复同一 turn，复用 notebook、committed evidence 和 prompt trace。
+- 进程重启时，服务 SHOULD 扫描 `analyzer_state.json`，将未完成且无活跃 job 的 turn 标记为 `interrupted_can_resume` 或 `failed`，并同步消息流。
+
+### 9.1.3 Message Sync
+
+`WebSessionService.messages(task_id)` SHOULD 同步 Analyzer turn 状态：
+
+- 对 `queued` / `running` turn，确保消息流有一条可见的 assistant status message 或 job metadata。
+- 对 `need_user_input` turn，确保用户能看到 Analyzer 的补充问题，并且后续 Analyzer mode 输入能绑定到同一 `turn_id`。
+- 对 `succeeded` turn，确保最终 assistant answer 存在且不会重复追加。
+- 对 `failed` / `interrupted_can_resume` turn，确保 error / recovery message 存在。
+
+Analyzer 用户补充消息 SHOULD 携带 `payload.channel = outline_analyzer` 和 `payload.turn_id`。如果存在 `need_user_input` active turn 且用户未显式指定新问题，后端 SHOULD 将该输入视为继续当前 turn。
 
 ### 9.2 Coexistence With Writer Gates
 
@@ -668,6 +814,23 @@ Loop 输出 JSON 解析失败时：
 - 可在有限次数内重试。
 - 重试后仍失败，返回 `failed` 或 `blocked`，并在技术详情保留错误。
 - 不得改用本地 deterministic fallback 生成语义判断。
+
+### 11.4 Background Job Interruption
+
+如果 Analyzer 后台 job 因进程重启、网络长时间无响应或服务中断而没有完成：
+
+- 系统 SHOULD 保留当前 turn trace。
+- 若 trace 足以继续等待用户输入或恢复下一步，状态设为 `interrupted_can_resume`。
+- 若 trace 不足以恢复，状态设为 `failed`，并提示用户重新运行 Analyzer 问题。
+- 页面不得只显示 close-read paused 之类无关状态；应明确显示 Analyzer 上轮分析被中断或失败。
+
+### 11.5 Model Timeout
+
+Analyzer 单轮模型调用 SHOULD 有明确超时。超时后：
+
+- job 标记 `failed` 或 `interrupted_can_resume`。
+- 消息流追加 error / recovery message。
+- `{turn_id}.md` 保留已完成 prompt trace 和最后一次未完成调用的 request metadata。
 
 ## 12. Analyzer Smoke Benchmark
 

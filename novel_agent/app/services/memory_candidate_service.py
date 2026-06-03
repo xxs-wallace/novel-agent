@@ -253,11 +253,16 @@ class MemoryCandidateService:
                 continue
             seen.add(canonical_name)
             normalized = dict(update)
+            normalized.pop("consumed_pending_experience_ids", None)
             normalized["canonical_name"] = canonical_name
             if output.get("character_id") and not normalized.get("character_id"):
                 normalized["character_id"] = str(output.get("character_id") or "").strip()
             if isinstance(output.get("key_experiences"), list) and not isinstance(normalized.get("key_experiences"), list):
                 normalized["key_experiences"] = output["key_experiences"]
+            if isinstance(output.get("profile_brief"), dict) and not isinstance(normalized.get("profile_brief"), dict):
+                normalized["profile_brief"] = output["profile_brief"]
+            if isinstance(output.get("source_ref_delta"), list) and not isinstance(normalized.get("source_ref_delta"), list):
+                normalized["source_ref_delta"] = output["source_ref_delta"]
             updates.append(normalized)
         return {"character_updates": updates}
 
@@ -700,11 +705,14 @@ class MemoryCandidateService:
         if not isinstance(profile, dict):
             return None
         brief = profile.get("profile_brief")
+        brief_for_prompt = dict(brief) if isinstance(brief, dict) else {}
+        brief_for_prompt.pop("source_refs", None)
+        brief_for_prompt.pop("compacted_until", None)
         existing_profile = {
             "character_id": profile.get("character_id"),
             "canonical_name": profile.get("canonical_name"),
             "aliases": profile.get("aliases", []),
-            "profile_brief": brief if isinstance(brief, dict) else {},
+            "profile_brief": brief_for_prompt,
             "profile_brief_status": str(profile.get("profile_brief_status") or "").strip() or (
                 "ready" if isinstance(brief, dict) and brief else "missing"
             ),

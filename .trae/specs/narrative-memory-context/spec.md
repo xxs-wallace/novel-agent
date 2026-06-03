@@ -241,16 +241,18 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** 系统维护人物档案
 - **THEN** 人物档案 SHOULD 分为至少三层：
   - 基础属性层：姓名、别名、年龄或阶段、国籍/身份、外貌或显著特征、性格、基础人际关系、能力和特长
-  - 常驻简档层：`profile_brief`，保存身份锚点、当前状态、稳定特征、能力/限制、关键关系摘要、未解问题、最近重大变化和 compact 进度
+  - 常驻简档层：`profile_brief`，保存身份锚点、简要背景（年龄/阶段、外貌/身高、身份/职业/社会位置）、当前状态、稳定特征、能力/限制、关键关系摘要、未解问题、最近重大变化和 compact 进度
   - 人物经历层：以该人物为维度保存 `recent_activity` 增量队列和 `story_events` 长期经历索引
 - **AND** `profile_brief` MUST 是持久化字段或等价投影，不得在每次 close-read 中通过超大 prompt 临时生成
 - **AND** 普通 close-read / Character Reduce SHOULD 默认只读取 `profile_brief`、当前人物 evidence、当前 chapter summary / outline segment 和必要身份索引
 - **AND** `recent_activity` SHOULD 保存尚热或尚未被概括吸收的近期经历增量，保留当前行动、关系推进、状态转折与行动结果；它不应默认进入每一次 Character Reduce prompt
 - **AND** `story_events` SHOULD 保存长期经历索引摘要，重点保留高度概括剧情、角色作用、`outline_segment_id` / source range 和可回源引用
 - **AND** 对低频、背景出场或弱相关人物，系统 SHOULD 只追加极简人物经历索引，不触发完整档案整理
-- **AND** 当 `profile_brief` 缺失时，系统 SHOULD 对该人物执行一次模型 compact/bootstrap，生成初始 `profile_brief` 后再进入普通增量更新；该兼容初始化是一次性成本，不得退回每批临时压缩完整档案
-- **AND** 当当前 document / outline segment 对人物造成重大状态、关系、身份、能力、性格、形象或未解谜题变化时，系统 SHOULD 触发 `profile_brief` compact loop
-- **AND** `profile_brief` compact loop MAY 由模型主导读取该人物的 `recent_activity`、`story_events`、outline segment、chapter summary 或必要原文摘录；模型必须说明读取原因和最终吸收哪些经历
+- **AND** 当 `profile_brief` 缺失时，系统 SHOULD 只在该人物即将进入 Character Reduce 前执行一次模型 bootstrap，生成初始 `profile_brief`；该兼容初始化是一次性成本，不得退回每批临时压缩完整档案
+- **AND** close-read SHOULD 先把 Character Evidence Agent 产出追加到 `character_evidence_log` / pending experiences，并同步写入轻量 recent activity / mention 索引
+- **AND** 当 pending evidence 达到阈值，或当前 document / outline segment 对人物造成重大状态、关系、身份、能力、性格、形象或未解谜题变化时，系统 SHOULD 触发 Character Reduce，由同一个模型调用把 pending evidence 归并进 `profile_brief`
+- **AND** Character Reduce MAY 读取该人物待归并 evidence、相关 outline segment、章节短摘要或必要索引；模型必须输出新的 `profile_brief` 和本轮 `source_ref_delta`
+- **AND** `profile_brief.compacted_until`、`consumed_pending_experience_ids` 和全量 `profile_brief.source_refs` MUST 由本地 merge 层维护：`compacted_until.outline_segment_id` 更新为本次 compact 输入中最后一个被吸收的 `outline_segment_id`，`consumed_pending_experience_ids` 来自本次 `recent_key_experiences` 的 id，`source_ref_delta` append / 去重进全量 `source_refs`
 - **AND** 每条人物经历 MUST 带有可回源索引，例如 `experience_id`、`outline_segment_id`、`source_chapter_indexes`、`source_doc_ids` 或 `source_doc_range`
 - **AND** 如果当前人物经历来自某个 `outline_segment` 覆盖范围，人物经历更新 MUST 保留 `outline_segment_id`，供 Analyzer / Writer 先定位剧情段，再按需展开 chapter / document
 - **AND** `mentioned_doc_ids` / `speaking_doc_ids` 仍可作为底层索引保存，但不应作为模型筛选人物过往的唯一入口
@@ -278,10 +280,10 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** 系统 SHOULD 传入持久化 `profile_brief`、当前 ordered evidence、当前 outline segment / chapter summary 和必要身份索引
 - **AND** `profile_summary_md` SHOULD 作为展示层或投影层存在，不应作为人物归并 prompt 的主要事实来源
 - **AND** 系统 MUST NOT 生成或依赖每批临时完整档案压缩上下文
-- **AND** Character Reduce SHOULD 只输出当前剧情带来的人物经历增量、短关系状态变化和 compact 触发信号，不负责每次整理完整人物档案
+- **AND** Character Reduce SHOULD 输出当前剧情带来的人物经历增量、短关系状态变化、本轮 `source_ref_delta`，并在本轮触发归并时直接输出更新后的 `profile_brief`；系统不再为 close-read 主链额外运行独立 `profile_brief_compact` prompt
 - **AND** Brief Compact Gate SHOULD 至少考虑当前窗口 document 覆盖率、发言证据、行动证据、关系变化证据、角色是否推动/承受主要剧情，以及是否产生重大身份/能力/性格/关系/谜题变化
 - **AND** 当人物被判定为 `index_only` / `defer_index_only` 时，系统 SHOULD 跳过 Character Reduce 模型调用，只保存可回源的 `outline_segment_id` / source range / role / one-line summary 索引更新
-- **AND** 当 brief 缺失、recent_activity 积累超阈值、人物长期冷却或出现重大变化时，系统 SHOULD 运行模型 compact loop，将必要经历吸收进 `profile_brief` 并把已吸收的热层经历转入长期索引或标记为已 compact
+- **AND** 当 brief 缺失时，系统 SHOULD 仅运行一次 `profile_brief_bootstrap`；当 pending evidence 积累超阈值、人物长期冷却或出现重大变化时，系统 SHOULD 运行 Character Reduce，将必要经历吸收进 `profile_brief`，由本地逻辑维护 compact 进度 / consumed ids / source refs，并把已吸收的 pending evidence 标记为 compacted
 
 ### Requirement: Character Evidence Batch
 系统 SHALL 为 Character Evidence Agent 引入独立于 Chapter Summary Agent 的轻量 batch 工作单元。
@@ -327,12 +329,13 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **AND** Character Evidence Agent 仍应发现本地候选名服务漏掉的真实角色
 
 ### Requirement: Character Reduce 与 Brief Compact Batch
-系统 SHALL 将人物证据抽取与人物档案归并拆成两个可独立调参的 batch。
+系统 SHALL 将人物证据抽取与人物档案归并拆成两个可独立调参的 batch，并以 pending evidence 作为两者之间的缓冲层。
 
 #### Scenario: Evidence Batch 与 Character Reduce 分工
 - **WHEN** close-read 需要更新人物档案
 - **THEN** Character Evidence Agent SHOULD 先按连续 `documents` 组装 evidence batch，目标是抽取当前原文窗口涉及哪些人物、发言、行动状态与关系变化
-- **AND** Character Reduce Agent SHOULD 再按人物维度读取 `profile_brief` 与 ordered evidence，输出可写回的人物档案增量和 brief compact 触发信号
+- **AND** 系统 SHOULD 先把可用 character evidence 追加到 `character_evidence_log` / pending experiences，并同步写入轻量 recent activity / mention 索引
+- **AND** Character Reduce Agent SHOULD 在 pending evidence 达到阈值或出现重大变化时，按人物维度读取 `profile_brief` 与 ordered evidence，输出可写回的人物档案增量和更新后的 `profile_brief`
 - **AND** Evidence Batch 的 document 预算和 Character Reduce 的 brief/evidence 预算 SHOULD 分开配置
 
 #### Scenario: Character Reduce Batch 预算
@@ -347,6 +350,7 @@ close-read 处理完的 Narrative Memory SHALL 表达为一种 BTree-like 的分
 - **WHEN** Character Reduce Agent 返回结果
 - **THEN** 输出 MUST 按 `character_id` 或 canonical identity 分离每个人物的更新
 - **AND** 不得把 A 人物的经历写入 B 人物档案
+- **AND** 当本轮负责 compact pending evidence 时，模型输出 MUST 包含更新后的 `profile_brief` 和本轮 `source_ref_delta`；`compacted_until`、`consumed_pending_experience_ids` 与全量 `source_refs` 由本地逻辑维护；所有语义压缩都必须由模型抽象概括，禁止按长度硬截断
 - **AND** 不得使用本地 heuristic 伪装模型完成了人物性、关系或经历归并
 
 ### Requirement: World Memory

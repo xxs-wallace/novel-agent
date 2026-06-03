@@ -15,9 +15,10 @@ router = APIRouter(prefix="/api", tags=["artifacts"])
 def artifact_tree(
     task_id: str,
     surface: str = Query("close-read"),
+    q: str = Query(""),
     service: ArtifactTreeService = Depends(get_artifact_tree_service),
 ) -> list[ArtifactTreeNode]:
-    return service.tree(task_id=task_id, surface=surface)
+    return service.tree(task_id=task_id, surface=surface, query=q)
 
 
 @router.get("/artifacts/{artifact_id}/view", response_model=ArtifactView)

@@ -412,17 +412,13 @@ const closeReadTree: ArtifactTreeNode[] = [
     ...node("people", "人物百科", "person", "close-read"),
     children: [
       {
-        ...node("people-main", "主角", "person", "close-read"),
+        ...node("person-shen-qing", "沈青", "person", "close-read"),
         children: [
-          {
-            ...node("person-shen-qing", "沈青", "person", "close-read"),
-            children: [
-              node("person-shen-qing-basic", "基本信息", "person_section", "close-read"),
-              node("person-shen-qing-relationships", "关系网络", "person_section", "close-read")
-            ]
-          }
+          node("person-shen-qing-basic", "基本信息", "person_section", "close-read"),
+          node("person-shen-qing-relationships", "关系网络", "person_section", "close-read")
         ]
-      }
+      },
+      node("person-gu-chi", "顾迟", "person", "close-read")
     ]
   },
   node("world", "世界观", "world_item", "close-read"),
@@ -455,6 +451,18 @@ function node(id: string, label: string, kind: string, surface: ArtifactSurface,
     children: [],
     has_lazy_children: false
   };
+}
+
+function filterCloseReadTree(query: string): ArtifactTreeNode[] {
+  if (!query) {
+    return closeReadTree;
+  }
+  const people = closeReadTree.find((item) => item.label === "人物百科");
+  if (!people) {
+    return closeReadTree;
+  }
+  const filteredPeople = people.children.filter((person) => person.label.includes(query));
+  return closeReadTree.map((item) => (item.label === "人物百科" ? { ...item, children: filteredPeople } : item));
 }
 
 function artifactView(artifactId: string): ArtifactView {
@@ -683,7 +691,8 @@ export const handlers = [
   }),
   http.get("/api/tasks/:taskId/artifact-tree", ({ request }) => {
     const surface = new URL(request.url).searchParams.get("surface");
-    return HttpResponse.json(surface === "writer" ? writerTree : closeReadTree);
+    const query = new URL(request.url).searchParams.get("q")?.trim() ?? "";
+    return HttpResponse.json(surface === "writer" ? writerTree : filterCloseReadTree(query));
   }),
   http.get("/api/artifacts/:artifactId/view", ({ params }) => {
     calls.artifactViews.push(String(params.artifactId));

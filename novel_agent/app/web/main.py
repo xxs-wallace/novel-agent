@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from .deps import default_repo_root
 from .routes import actions, artifacts, jobs, messages, tasks
 from .schemas import ApiError
+from .services.analyzer_turn_service import AnalyzerTurnService
 from .services.artifact_tree_service import ArtifactTreeService
 from .services.artifact_view_service import ArtifactViewService
 from .services.job_manager import JobManager
@@ -26,6 +27,8 @@ def create_app(*, repo_root: Path | None = None, job_manager: JobManager | None 
     app = FastAPI(title="Novel Agent Web Backend", version="0.1.0")
 
     session_service = WebSessionService(repo_root=root)
+    analyzer_turn_service = AnalyzerTurnService(repo_root=root)
+    session_service.analyzer_turn_service = analyzer_turn_service
     artifact_tree_service = ArtifactTreeService(repo_root=root, facade=session_service.facade)
     artifact_view_service = ArtifactViewService(repo_root=root, facade=session_service.facade)
     active_job_manager = job_manager or JobManager(repo_root=root)
@@ -41,6 +44,7 @@ def create_app(*, repo_root: Path | None = None, job_manager: JobManager | None 
     app.state.artifact_view_service = artifact_view_service
     app.state.job_manager = active_job_manager
     app.state.web_action_service = action_service
+    app.state.analyzer_turn_service = analyzer_turn_service
 
     app.include_router(tasks.router)
     app.include_router(messages.router)

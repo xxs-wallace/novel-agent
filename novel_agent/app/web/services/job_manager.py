@@ -98,8 +98,9 @@ class JobManager:
         payload: dict[str, Any] | None = None,
         runner: JobRunner | None = None,
         conflict_job_types: set[str] | None = None,
+        deduplicate_same_type: bool = True,
     ) -> JobSummary:
-        active_record = self._active_record(task_id=task_id, job_type=job_type)
+        active_record = self._active_record(task_id=task_id, job_type=job_type) if deduplicate_same_type else None
         if active_record is None and conflict_job_types is not None:
             active_record = self._active_record_for_task(task_id=task_id, job_types=conflict_job_types)
         if active_record is not None:
@@ -146,12 +147,17 @@ class JobManager:
 
     def summary(self, job_id: str) -> JobSummary:
         record = self._require_record(job_id)
+        message = record.message
+        if record.status == "failed":
+            error = str(record.result.get("error") or "")
+            if error:
+                message = f"{message}：{error}"
         return JobSummary(
             job_id=record.job_id,
             task_id=record.task_id,
             type=record.type,
             status=record.status,
-            message=record.message,
+            message=message,
             cancel_requested=record.cancel_requested,
             created_at=record.created_at,
             updated_at=record.updated_at,
@@ -169,6 +175,24 @@ class JobManager:
                 continue
             jobs.append(self.summary(record.job_id))
         return sorted(jobs, key=lambda job: job.created_at)
+
+    def jobs(
+        self,
+        *,
+        task_id: str | None = None,
+        job_type: str | None = None,
+        statuses: set[JobStatus] | None = None,
+    ) -> list[JobSummary]:
+        jobs: list[JobSummary] = []
+        for record in self._records.values():
+            if task_id is not None and record.task_id != task_id:
+                continue
+            if job_type is not None and record.type != job_type:
+                continue
+            if statuses is not None and record.status not in statuses:
+                continue
+            jobs.append(self.summary(record.job_id))
+        return sorted(jobs, key=lambda job: job.updated_at)
 
     def events(self, job_id: str, *, after_event_id: str = "") -> list[JobEventView]:
         self._require_record(job_id)
