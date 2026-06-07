@@ -112,6 +112,7 @@ flowchart TD
 模型可在多轮中返回四类核心请求：
 
 - `story_detail`：用一句自然语言说明想进一步了解的故事细节。
+- `text_search`：grep-like 词面定位；按关键词交集 / 并集在 root summary、人物档案、outline segment、章节摘要、index card 和受限 document scope 中定位候选章节或 source_doc_ids。
 - `character_profile`：按人名请求人物当前状态、能力边界、关系状态和最近变化。
 - `world_concept`：按概念名词请求规则、限制、代价、例外和禁止突破点。
 - `structure_pattern`：请求与当前写作目标匹配的结构模式或篇章节奏参考。
@@ -189,7 +190,8 @@ review gate 的记录至少包含：
 模型在 Draft Research Loop 中可以返回结构化请求：
 
 - `character_profile`：按 `character_id` 优先查询人物基础属性、当前状态、关系、称谓、能力边界和可展开的关键经历索引。
-- `character_experience`：按 `experience_id`、`outline_segment_id`、`source_doc_ids` 或 `source_doc_range` 展开某个人物关键经历。
+- `text_search`：当需要先定位历史细节、人物共同经历、伏笔、称谓、原文线索或关键词交集时，模型可请求词面定位，并用 `terms`、`match_mode`、`scopes` 表达查询；定位失败分支只保留 trace，不进入 notebook 事实。
+- `character_experience`：按 `experience_id`、`outline_segment_id`、`source_doc_ids` 或 `source_doc_range` 展开某个人物关键经历；当模型需要浏览人物经历时间线而非命中单个关键词时，可使用 `metadata.story_events_offset` / `metadata.story_events_char_budget` 分页读取，单页不超过 4096 字符。
 - `story_detail`：查询与本章事实、因果、伏笔或早期剧情相关的历史细节。
 - `chapter_excerpt`：按 `document_title_index`、`doc_id` 或 `source_doc_range` 请求原始正文摘录。
 - `scene_card`：查询 Narrative SceneCard / SourceArcMap 中与本章结构位置、人物互动或场景功能相关的索引。
@@ -198,6 +200,8 @@ review gate 的记录至少包含：
 - `WriterQuestionSet`：当本地资料不足或需要用户授权时，向用户提出少量关键问题。
 
 本地 `Context Broker` 负责执行查询、预算裁剪、去重、来源标注和泄漏审计。模型每轮判断信息是否足够；若仍缺少关键事实、人物边界或用户授权，应继续查询或进入 `needs_user_input`，而不是静默假设。
+
+`character_profile` / `character_experience` 的人物经历读取 SHOULD 与 Analyzer 共享分页语义：request metadata 中的 `story_events_offset` 表示从第几个 `story_events_json` item 开始，`story_events_char_budget` 控制本页字符预算且不得超过 4096。返回结果 SHOULD 包含 `story_events_page`，使模型能根据 `next_offset` 继续阅读同一角色的经历，而不是把 seed 中的少量经验索引误当完整人物历史。
 
 Draft Research Loop 的主要产物是 `draft_context_notebook.json`。它不是正式 Memory，也不得污染 canon；它只为当前草稿保存精炼、可追踪的写作事实：
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Mapping, Sequence, cast
@@ -121,6 +122,7 @@ FACT_STATUSES = {
     "missing",
 }
 RESEARCH_REQUEST_TYPES = {
+    "text_search",
     "story_detail",
     "character_profile",
     "world_concept",
@@ -231,7 +233,7 @@ GenerationReviewCheckpoint = Literal[
 ]
 ChapterReplanScope = Literal["current_chapter"]
 FactStatus = Literal["confirmed", "candidate", "assumption", "user_authorized", "missing"]
-ResearchRequestType = Literal["story_detail", "character_profile", "world_concept", "structure_pattern"]
+ResearchRequestType = Literal["text_search", "story_detail", "character_profile", "world_concept", "structure_pattern"]
 ResearchPriority = Literal["high", "medium", "low"]
 CharacterMentionStatus = Literal["resolved", "ambiguous", "missing"]
 CharacterMentionType = Literal["name", "alias", "title", "new_character_hint"]
@@ -549,12 +551,13 @@ class ResearchRequest:
     name: str = ""
     concept: str = ""
     facets_needed: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.request_id = _normalize_text(self.request_id)
         normalized_type = _normalize_text(self.request_type).lower()
         if normalized_type not in RESEARCH_REQUEST_TYPES:
-            raise ValueError("request_type must be story_detail, character_profile, world_concept, or structure_pattern")
+            raise ValueError("request_type must be text_search, story_detail, character_profile, world_concept, or structure_pattern")
         self.request_type = normalized_type  # type: ignore[assignment]
         self.query = _normalize_text(self.query)
         self.purpose = _normalize_text(self.purpose)
@@ -565,6 +568,7 @@ class ResearchRequest:
         self.name = _normalize_text(self.name)
         self.concept = _normalize_text(self.concept)
         self.facets_needed = _normalize_string_list(self.facets_needed)
+        self.metadata = dict(self.metadata) if isinstance(self.metadata, Mapping) else {}
         if not self.request_id:
             self.request_id = f"{self.request_type}:{self.query or self.name or self.concept}"
         if not (self.query or self.name or self.concept):
@@ -573,7 +577,8 @@ class ResearchRequest:
     @property
     def dedupe_key(self) -> str:
         target = self.name if self.request_type == "character_profile" else self.concept if self.request_type == "world_concept" else self.query
-        return f"{self.request_type}:{_normalize_text(target).lower()}"
+        metadata_key = json.dumps(self.metadata, ensure_ascii=False, sort_keys=True) if self.metadata else ""
+        return f"{self.request_type}:{_normalize_text(target).lower()}:{metadata_key}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -585,6 +590,7 @@ class ResearchRequest:
             "name": self.name,
             "concept": self.concept,
             "facets_needed": list(self.facets_needed),
+            "metadata": dict(self.metadata),
         }
 
     @classmethod
@@ -598,6 +604,7 @@ class ResearchRequest:
             name=str(data.get("name") or ""),
             concept=str(data.get("concept") or ""),
             facets_needed=[str(item) for item in (data.get("facets_needed") or [])],
+            metadata=dict(data.get("metadata") or {}) if isinstance(data.get("metadata"), Mapping) else {},
         )
 
 

@@ -22,13 +22,15 @@ def build_chapter_summary_prompt(prompt_input: dict[str, Any]) -> tuple[str, str
         "7. 结构功能/节奏要说明本章主要承担日常铺垫、关系推进、过渡缓冲、设定揭示、冲突升级、剧情转折、高潮或收束中的哪些功能。\n"
         "8. 如果输入 documents 基本没有可概括剧情（如作者信息、扉页、目录、版权/出版信息、乱码、广告、极短无关片段），不要编造剧情；summary_quality 设为 low_signal_needs_review，并在 noise_documents 标出 doc_id 和原因。\n"
         "9. importance_score 表示该章节对长期记忆和后续续写一致性的价值，范围 0-100。\n"
-        "10. world_evidence_candidates 只记录稳定世界观/规则/势力/能力/禁忌候选，不要写人物档案事实。\n"
-        "11. world_signal_score 表示本批次是否值得额外运行 World Evidence Agent，范围 0-100；普通剧情推进应低分，设定密集或候选低置信但重要时高分。\n"
-        "12. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "10. importance_reason 只解释本章的结构重要性和记忆价值，不得引入 chapter_summary_md 没有明确概括的精确事实；"
+        "涉及人物、对象、次数、代价、因果、时间线或在场者的关键事实，必须写入 chapter_summary_md 的剧情事件链，而不是只藏在 importance_reason 中。\n"
+        "11. world_evidence_candidates 只记录稳定世界观/规则/势力/能力/禁忌候选，不要写人物档案事实。\n"
+        "12. world_signal_score 表示本批次是否值得额外运行 World Evidence Agent，范围 0-100；普通剧情推进应低分，设定密集或候选低置信但重要时高分。\n"
+        "13. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     if len(title_indexes) > 1:
         system_prompt += (
-            f"13. 本次 documents 跨越多个 document_title_index：{title_indexes}。\n"
+            f"14. 本次 documents 跨越多个 document_title_index：{title_indexes}。\n"
             "   你必须返回 chapter_summaries 数组，每个 document_title_index 一个对象；"
             "每个对象只概括该章节自己的 documents，并遵守同样的 plot synopsis 规则。\n"
         )

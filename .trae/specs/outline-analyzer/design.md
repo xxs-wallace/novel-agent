@@ -1,4 +1,4 @@
-# Outline Analyzer Design
+# Analyzer Design
 
 ## Agent Reading Guide
 
@@ -13,7 +13,7 @@
 
 ## 1. Design Goal
 
-Outline Analyzer 的设计目标是把“分析一本小说”拆成可控的 Agent Loop：
+Analyzer（原 Outline Analyzer）的设计目标是把“分析一本小说”拆成可控的 Agent Loop：
 
 - 首轮只给模型轻量地图，不喂整本书。
 - 模型像代码阅读 agent 一样提出“我还需要看什么”。
@@ -28,7 +28,9 @@ Outline Analyzer 的设计目标是把“分析一本小说”拆成可控的 Ag
 ```text
 User chat message
   -> Analyzer Session Controller
-  -> Build AnalyzerSeedPacket
+  -> AnalyzerSeedBuilder builds local seed map
+  -> AnalyzerIntentGate model seed prompt selects AnalyzerAnalysisType
+  -> Build AnalyzerSeedPacket with analysis_type / intent_gate
   -> Analyzer Model: plan next information needs
   -> NarrativeInquiryBroker resolves research requests
   -> Analyzer Model updates AnalyzerNotebook
@@ -36,17 +38,19 @@ User chat message
   -> Answer in conversation stream
 ```
 
-首版可以同步执行；后续若一次分析需要多轮原文回读，可以升级为可取消的后台 job。但即使后台化，用户语义仍应是“和小说专家聊天”，不是 Writer run。
+Analyzer SHALL 作为可取消、可观测的后台 job 执行。但用户语义仍应是“和小说专家聊天”，不是 Writer run。
 
 ## 3. Components
 
-### 3.1 Analyzer Session Controller
+### 3.1 AnalyzerService / Analyzer Session Controller
 
 职责：
 
 - 接收 Web / CLI 的 Analyzer 消息。
 - 读取当前 `book_id`、用户问题和 Analyzer 会话历史。
-- 构造 `AnalyzerSeedPacket`。
+- 调用 `AnalyzerSeedBuilder` 装配本地 seed map。
+- 调用 `AnalyzerIntentGate` 的模型 seed prompt，得到 `AnalyzerAnalysisType` 和初始证据计划。
+- 构造带 `analysis_type` / `intent_gate` 的 `AnalyzerSeedPacket`。
 - 管理 research budget。
 - 调用模型和 `NarrativeInquiryBroker`。
 - 将最终答案追加到会话流。
@@ -64,6 +68,7 @@ User chat message
 - 从当前 book 的 Memory 和 artifact 中生成轻量 seed。
 - 控制 seed 文本预算。
 - 只提供索引和摘要入口，不展开完整原文。
+- 不判断最终 `analysis_type`；本地装配只能为 Gate prompt 提供可查询地图。
 
 推荐输入来源：
 
@@ -78,7 +83,46 @@ User chat message
 
 SeedBuilder SHOULD 优先读取结构化 Memory；只有缺失时才回退到 Markdown artifact 摘要。
 
-### 3.3 Analyzer Model
+### 3.3 AnalyzerIntentGate
+
+`AnalyzerIntentGate` 是第一个模型调用，也就是 Analyzer seed prompt。它把用户问题、会话摘要和本作 root summary 级提示转换成工作流选择和极简初始 evidence direction。
+
+职责：
+
+- 基于用户问题、Analyzer conversation brief、story overview 或 memory root summaries 判断分析类型。
+- 输出结构化 `AnalyzerIntent`，包括 `analysis_type`、`confidence`、`matched_signals`、`required_evidence_plan`、可选 `secondary_analysis_types` 和 `notes`。
+- 只做工作流和取证计划选择，不输出最终文学结论，不把推断写入 `AnalyzerNotebook`。
+- 当问题同时包含多个方向时，保留 primary / secondary 类型，并在 evidence plan 中说明先查什么。
+
+约束：
+
+- Gate MUST 使用模型；生产路径不得用本地关键词 heuristic 伪装已经完成 intent 判断。
+- Gate prompt 的类型说明必须通用，不包含某部小说专名、角色名或专属桥段。
+- Gate payload MUST 保持轻量，不传完整 `AnalyzerSeedPacket`、`character_index`、`world_concept_index`、source refs 或详细检索地图。
+- 详细取证顺序、可用 request types 和阅读策略应下沉到 `OutlineAnalyzer` / `RelationshipAnalyzer` workflow prompt。
+- 缺少模型、模型不可访问或 Gate JSON 重试后仍不可解析时，Analyzer MUST 返回 `needs_model` / `failed`，不得继续用默认工作流生成语义回答。
+- Gate 是轻量分流步骤，SHOULD 关闭 thinking / high reasoning，以减少长连接和无关深思；最终文学判断留给 final answer 阶段。
+
+推荐输出：
+
+```json
+{
+  "analysis_type": "relationship_analysis",
+  "confidence": 0.86,
+  "matched_signals": ["用户询问两名角色的感情与关系", "用户要求设计后续关系走向"],
+  "secondary_analysis_types": ["outline_analysis"],
+  "required_evidence_plan": [
+    "resolve participating characters",
+    "read character profiles and relationship/recent activity events",
+    "find shared experiences and relationship turning points",
+    "check third-party constraints",
+    "escalate to raw excerpts only for tone/motive ambiguity"
+  ],
+  "notes": "relationship workflow should drive retrieval; outline workflow remains secondary for ending design."
+}
+```
+
+### 3.4 Analyzer Model / Workflow Loop
 
 职责：
 
@@ -90,6 +134,8 @@ SeedBuilder SHOULD 优先读取结构化 Memory；只有缺失时才回退到 Ma
 - 生成用户可读分析。
 
 模型 SHALL 使用结构化 loop 输出，而不是自由文本中夹杂工具请求。
+
+RelationshipAnalyzer / OutlineAnalyzer 的 loop 与 triage 阶段 SHOULD 关闭 thinking，用于快速、集中地产生和筛选 evidence request；final answer 阶段 SHOULD 允许使用默认 Analyzer thinking / reasoning 配置，以便进行更充分的文学分析。
 
 推荐每轮输出：
 
@@ -115,7 +161,7 @@ SeedBuilder SHOULD 优先读取结构化 Memory；只有缺失时才回退到 Ma
 }
 ```
 
-### 3.4 NarrativeInquiryBroker
+### 3.5 NarrativeInquiryBroker
 
 职责：
 
@@ -204,6 +250,7 @@ Analyzer、Writer Research 和 Reviewer SHOULD 尽量复用同一套 request typ
 - `story_detail`
 - `fact_check`
 - `related_documents`
+- `text_search`
 - `chapter_summary`
 - `character_profile`
 - `world_concept`
@@ -217,11 +264,12 @@ Analyzer、Writer Research 和 Reviewer SHOULD 尽量复用同一套 request typ
 - `story_detail` 用于事件、因果链、伏笔状态、关系转折。
 - `fact_check` 用于判断某个事实是否被 Memory / 原文支持。
 - `related_documents` 用于返回与概念、人物、事件相关的 chapter / document refs。
+- `text_search` 用于 grep-like 词面定位：模型把问题拆成少量通用关键词，Broker 在 root summary / Memory root、outline segment、chapter summary、character profile、index card 或受限 document scope 中执行交集或并集匹配，返回候选 chapter refs / source doc ids。
 - `raw_excerpt` 只能在摘要层不足时使用，并必须带 read reason。
 
 这些 request type 的语义归属在 `NarrativeInquiryBroker`，不应由 Analyzer 单独定义一套平行字段。
 
-### 3.5 AnalyzerNotebook
+### 3.6 AnalyzerNotebook
 
 职责：
 
@@ -267,7 +315,43 @@ Analyzer 不能从“全文阅读”开始，而应从“小说地图”开始�
 
 注意：这种筛选只能用于 seed 裁剪，不得作为最终语义判断。真正的“需要看哪些章节”由 Analyzer Model 在 loop 中决定。
 
-### 4.3 Analyzer Retrieval Loop
+### 4.3 AnalyzerAnalysisType Workflows
+
+`AnalyzerAnalysisType` 决定后续 prompt 的默认取证顺序。首版支持：
+
+- `outline_analysis`
+- `relationship_analysis`
+
+`outline_analysis` 工作流：
+
+```text
+seed map
+  -> Gate confirms outline_analysis
+  -> query outline roots / source arcs / open threads / narrative cards
+  -> drill outline segment hits to chapter summary when needed
+  -> inspect character / world evidence only when it affects causality, stakes, or constraints
+  -> raw_excerpt only for summary-insufficient motive, wording, scene participation, or tension details
+```
+
+`relationship_analysis` 工作流：
+
+```text
+seed map
+  -> Gate confirms relationship_analysis
+  -> resolve participating character candidates
+  -> retrieve each relevant character profile and selected profile events
+  -> page through story_events_json by offset, at <=4KB per request, when relationship evidence depends on shared experiences or relationship turns
+  -> find shared experiences through character events, relationship records, recent activity, scene cards, chapter summaries, and outline segment refs
+  -> check third-party/social/world constraints named or implied by the user question
+  -> build relationship timeline, pressure points, confirmed gaps, and candidate relationship arcs
+  -> raw_excerpt only for tone, motive, interiority, scene ambiguity, or relationship tension that summaries cannot settle
+```
+
+Relationship analysis SHOULD behave like a human analyst reading two character files first, then intersecting their experiences, then returning to specific scenes only when summary evidence is too coarse. It MUST NOT infer a relationship arc solely from a global outline segment when more direct character evidence is available.
+
+`character_profile` request 的 `metadata.story_events_offset` 表示从该角色 `story_events_json` 的第几个 experience 开始分页读取；`metadata.story_events_char_budget` 控制本页 story events 字符预算，生产路径不得超过 4096。Broker 返回的 profile evidence SHOULD 带 `story_events_page`，其中包含 `offset`、`next_offset`、`total`、`has_more` 和 `chars_returned`。Analyzer 可用 `next_offset` 继续读取同一角色的下一页 experience。
+
+### 4.4 Analyzer Retrieval Loop
 
 Analyzer 每次回答 SHOULD 使用固定的探索-过滤-提交链路，而不是把 seed、全部 evidence 和历史对话一次性塞进最终 prompt。
 
@@ -287,16 +371,19 @@ Analyzer 每次回答 SHOULD 使用固定的探索-过滤-提交链路，而不�
 4. `Triage`
    - 候选 evidence SHOULD 逐条或小批量交给模型判断相关性。
    - 模型必须输出 selected / rejected / reason / summary_sufficiency 判断。
+   - 对 `importance_reason`、`importance_facets`、chapter summary digest 等 summary-derived annotation，triage MUST treat them as retrieval cues rather than canonical facts when they conflict with direct evidence or other summaries.
+   - 若 triage 发现人物、对象、次数、代价、因果、时间线或在场者等可核验事实冲突，冲突 note MUST enter `AnalyzerNotebook` / next loop context, not only debug trace.
 5. `Commit`
    - 只有 selected evidence 进入 `AnalyzerNotebook` 和后续 prompt。
    - rejected evidence 只进入 trace，不继续进入历史上下文。
 6. `Raw Read`
-   - 仅当 selected evidence 对当前问题高度相关且摘要不足时触发。
+   - 仅当 selected evidence 对当前问题高度相关且摘要不足，或 summary-derived evidence 与其他证据发生可核验事实冲突时触发。
    - request 必须包含 read reason、expected confirmation、affects analysis 和 source refs。
+   - 冲突核验最终以 raw excerpt 或更直接章节事实为准；Analyzer final answer 不得把未核验的冲突摘要注释写成 confirmed fact。
 
 该 loop 的目标是让 Analyzer 的单轮 prompt 远小于全文 baseline，同时允许总过程按需多轮读取；对于百万字小说，应优先增加精确小步读取，而不是扩大单轮上下文。
 
-### 4.4 Conversation Brief
+### 4.5 Conversation Brief
 
 Analyzer 多轮对话需要一个压缩的 `conversation_brief`：
 
@@ -312,12 +399,23 @@ Analyzer 多轮对话需要一个压缩的 `conversation_brief`：
 
 ```text
 notebook = empty
-seed = build_seed(book_id, question, conversation_history)
+local_seed_map = build_local_seed_map(book_id, question, conversation_history)
+gate_seed = build_gate_seed(user_question, conversation_brief, local_seed_map.root_summaries)
+intent = model.seed_prompt(gate_seed, available_analysis_types)
+seed = build_seed_packet(local_seed_map, intent)
 
 for round in max_rounds:
     loop_output = model.plan_or_answer(seed, notebook, evidence_history)
 
     if loop_output.status == ready_to_answer:
+        readiness = model.check_answer_readiness(seed, notebook, evidence_history, loop_output.final_answer)
+        if readiness.status == need_more_info:
+            evidence = broker.resolve(budget.filter(readiness.requests))
+            evidence_history.append(evidence)
+            notebook.apply(evidence)
+            continue
+        if readiness.status in {insufficient_memory, budget_exhausted}:
+            return explain_missing_memory(readiness, notebook)
         return model.final_answer(seed, notebook)
 
     if loop_output.status == needs_user_preference:
@@ -355,6 +453,7 @@ return answer_with_budget_limit(seed, notebook)
 预算策略：
 
 - `character_profile`、`world_concept`、`source_arc` 成本较低。
+- `text_search` 成本较低，属于定位工具，不是最终事实裁决工具。
 - `chapter_summary` 成本中等。
 - `raw_excerpt` 成本最高，必须有选择理由。
 - Broker 可以合并重复 request。
@@ -414,7 +513,25 @@ Analyzer 不应一开始就读原文。推荐升级路径：
 4. character / world detail。
 5. selected raw excerpt。
 
-只有当摘要层无法回答“措辞、动机、在场信息、关系张力、伏笔原句”等问题时，才进入 raw excerpt。
+只有当模型判断摘要层或 locator evidence 无法支撑用户所需的事实粒度时，才进入 raw excerpt。
+
+summary/index/card/text_search 的职责是快速定位章节或 source_doc_ids，而不是替代缺失的更直接事实证据。若候选 evidence 只证明“相关场景可能在此章节”，triage SHOULD 保留它作为定位证据；answer readiness SHOULD 判断当前 evidence 是否足以完整回答，不足时由模型请求 bounded `raw_excerpt` 或其他更直接 evidence。若人物档案、场景卡、chapter summary、outline root / segment、text_search 都无法把范围收敛到少量章节或 document，Analyzer SHOULD 停止扩大搜索，向用户说明当前无法定位具体剧情，并请求补充幕名、章节、前后事件或关键词。
+
+### 6.4 Lexical Locator / Text Search
+
+Analyzer SHOULD support a shared `text_search` inquiry request as a cheap locator, analogous to a constrained `rg` over modeled story artifacts. This request is not a private Analyzer retrieval layer; it is implemented by `NarrativeInquiryBroker` and is available to Writer Research and future Reviewer loops.
+
+`text_search` SHOULD accept:
+
+- `metadata.terms`: short generic search terms chosen by the model.
+- `metadata.match_mode`: `all` for intersection / AND, `any` for broad recall.
+- `metadata.scopes`: one or more of `memory_roots`, `outline_segments`, `chapter_summaries`, `character_profiles`, `index_cards`, and bounded `documents`.
+
+The root summary / Memory root, character profile, outline segment, chapter summary and index card branches are equivalent locator branches. A failed branch SHOULD remain in trace as a missing locator result, but SHOULD NOT be committed into the Analyzer notebook as a semantic fact or repeatedly replayed as prompt history. Once one branch narrows the location to a small set of chapter refs or source doc ids, the loop SHOULD request `chapter_summary` or bounded `raw_excerpt` according to model-judged evidence sufficiency.
+
+Unbounded document search is not the default. Document text search SHOULD run only when `source_doc_ids` / `document_ids` / chapter refs already bound the scope, or when a product-specific budget explicitly allows a bounded scan. If all locator branches fail, Analyzer SHOULD stop expanding and ask the user for a chapter, scene, nearby event or more specific keywords.
+
+Broker SHOULD 支持通用 query expansion 来处理细节措辞问题中的近义检索，例如“生日快乐歌 / 歌词”可扩展到“生日祝福 / 短信 / 彩信 / 语音 / 录音”等通用表达；该扩展不得包含只服务某一部小说的专名或桥段。
 
 ## 7. Prompt Design
 
@@ -422,7 +539,7 @@ Analyzer 不应一开始就读原文。推荐升级路径：
 
 System prompt SHOULD 明确：
 
-- 你是只读 Outline Analyzer。
+- 你是只读 Analyzer。
 - 你只能分析和建议，不能写 Memory 或 Writer artifact。
 - 不要假装已经读完整本书。
 - 先使用 seed 判断信息需求，再请求补充 evidence。
@@ -629,7 +746,7 @@ POST /api/tasks/{task_id}/messages
 
 JobManager runs outline_analyzer
   -> AnalyzerTurnService.mark_running(turn_id)
-  -> OutlineAnalyzerService.chat / loop with persisted trace callbacks
+  -> AnalyzerService.chat / loop with persisted trace callbacks
   -> if final answer:
        append assistant message
        AnalyzerTurnService.mark_succeeded(...)
@@ -831,6 +948,8 @@ Analyzer 单轮模型调用 SHOULD 有明确超时。超时后：
 - job 标记 `failed` 或 `interrupted_can_resume`。
 - 消息流追加 error / recovery message。
 - `{turn_id}.md` 保留已完成 prompt trace 和最后一次未完成调用的 request metadata。
+- `AnalyzerIntentGate` 是轻量 seed prompt，SHOULD 支持独立短超时；超时同样记录为 `model_timeout`，不得回退到本地关键词判断。
+- RelationshipAnalyzer / OutlineAnalyzer 的 final answer 阶段 MAY 使用比 Gate / loop / triage 更长的默认超时，因为它承担最终文学综合判断且可能启用 thinking / reasoning；该超时仍必须低于整体 Analyzer job timeout，并允许通过环境变量覆盖。
 
 ## 12. Analyzer Smoke Benchmark
 
@@ -880,8 +999,9 @@ Analyzer arm 使用正式项目路径：
 ```text
 source text
   -> rough-read / close-read / Memory build
-  -> Outline Analyzer chat
-  -> AnalyzerSeedPacket
+  -> AnalyzerService chat
+  -> AnalyzerIntentGate seed prompt
+  -> AnalyzerSeedPacket with analysis_type
   -> Plan
   -> NarrativeInquiryBroker evidence
   -> Triage
@@ -893,9 +1013,9 @@ source text
 执行要求：
 
 - 必须先对同一小说执行正式粗读 / 精读，生成当前项目的 Memory、章节摘要、人物档案、世界观、故事大纲或可用 close-read artifacts。
-- 调用正式 `OutlineAnalyzerService` 或 Web / CLI 等价入口，不得为 benchmark 另写一套 Analyzer prompt。
+- 调用正式 `AnalyzerService` 或 Web / CLI 等价入口，不得为 benchmark 另写一套 Analyzer prompt。
 - 使用与 baseline 完全相同的 `user_prompt`。
-- 每轮模型调用必须记录 stage：`loop`、`triage`、`final`，以及 prompt char / byte / token estimate、evidence bundle count、committed evidence ids、rejected evidence ids、request list 和最终 answer。
+- 每轮模型调用必须记录 stage：`intent_gate`、`loop`、`triage`、`final`，以及 prompt char / byte / token estimate、evidence bundle count、committed evidence ids、rejected evidence ids、request list 和最终 answer。
 - 若模型要求读全书原文，Broker 仍必须按产品规则拒绝或拆成受预算 request；benchmark 不得放宽 Analyzer 的产品约束。
 
 ### 12.3 Standard User Prompts

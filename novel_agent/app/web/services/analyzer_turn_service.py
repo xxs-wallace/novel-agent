@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -30,6 +31,24 @@ def _read_json(path: Path) -> dict[str, Any]:
     return dict(payload) if isinstance(payload, Mapping) else {}
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
+def _analyzer_job_timeout_seconds() -> float:
+    return max(0.01, _env_float("NOVEL_AGENT_WEB_ANALYZER_JOB_TIMEOUT_SECONDS", 600.0))
+
+
+def _analyzer_job_heartbeat_seconds() -> float:
+    return max(0.01, _env_float("NOVEL_AGENT_WEB_ANALYZER_JOB_HEARTBEAT_SECONDS", 30.0))
+
+
 @dataclass(slots=True)
 class AnalyzerTurn:
     book_id: str
@@ -51,6 +70,14 @@ class AnalyzerTurn:
     def state_path(self) -> str:
         return f".memory/analyzer/{self.book_id}/turns/{self.turn_id}.md"
 
+    @property
+    def prompt_trace_path(self) -> str:
+        return f".memory/analyzer/{self.book_id}/turns/{self.turn_id}.prompts.jsonl"
+
+    @property
+    def last_prompt_path(self) -> str:
+        return f".memory/analyzer/{self.book_id}/turns/{self.turn_id}.last_prompt.json"
+
     def to_state_item(self) -> dict[str, Any]:
         return {
             "turn_id": self.turn_id,
@@ -60,6 +87,8 @@ class AnalyzerTurn:
             "assistant_message_id": self.assistant_message_id,
             "error_message_id": self.error_message_id,
             "state_path": self.state_path,
+            "prompt_trace_path": self.prompt_trace_path,
+            "last_prompt_path": self.last_prompt_path,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "source_refs": list(self.source_refs),
@@ -75,6 +104,8 @@ class AnalyzerTurn:
             "user_message_id": self.user_message_id,
             "assistant_message_id": self.assistant_message_id,
             "error_message_id": self.error_message_id,
+            "prompt_trace_path": self.prompt_trace_path,
+            "last_prompt_path": self.last_prompt_path,
             "supplements": list(self.supplements),
             "source_refs": list(self.source_refs),
             "result": dict(self.result),
@@ -212,6 +243,22 @@ class AnalyzerTurnService:
         self._save_turn(turn)
         return turn
 
+    def mark_cancelled(
+        self,
+        *,
+        book_id: str,
+        turn_id: str,
+        error: Mapping[str, Any],
+        error_message_id: str = "",
+    ) -> AnalyzerTurn:
+        turn = self.require_turn(book_id, turn_id)
+        turn.status = "cancelled"
+        turn.error = dict(error)
+        turn.error_message_id = error_message_id or turn.error_message_id
+        turn.updated_at = _timestamp()
+        self._save_turn(turn)
+        return turn
+
     async def run_job(self, context: JobContext, *, session_service: Any) -> dict[str, Any]:
         payload = context.payload
         turn_id = str(payload.get("turn_id") or "")
@@ -223,19 +270,89 @@ class AnalyzerTurnService:
             "小说专家正在分析剧情。",
             payload={"channel": "outline_analyzer", "turn_id": turn.turn_id},
         )
-        try:
-            result = await asyncio.to_thread(
+        model_task = asyncio.create_task(
+            asyncio.to_thread(
                 session_service.facade.analyze_outline,
                 book_id=context.task_id,
                 question=self.question_for_model(turn),
                 conversation_history=self.conversation_history_for_model(turn, session_service=session_service),
+                prompt_trace_recorder=self.prompt_trace_recorder(
+                    book_id=context.task_id,
+                    turn_id=turn.turn_id,
+                    job_id=context.job_id,
+                ),
             )
+        )
+        try:
+            result = await self._await_analyzer_result(context=context, turn=turn, model_task=model_task)
+        except asyncio.CancelledError:
+            model_task.cancel()
+            trace_paths = self._trace_paths_payload(context.task_id, turn.turn_id)
+            error_payload = {
+                "status": "cancelled",
+                "error": "Analyzer job was cancelled before completion.",
+                "error_type": "CancelledError",
+                **trace_paths,
+            }
+            message = session_service.append_message(
+                context.task_id,
+                role="error",
+                content="小说专家分析已取消。需要时可以重新发送问题。",
+                payload={
+                    "channel": "outline_analyzer",
+                    "status": "cancelled",
+                    "job_id": context.job_id,
+                    "turn_id": turn.turn_id,
+                    "error_type": "CancelledError",
+                    **trace_paths,
+                },
+            )
+            self.mark_cancelled(
+                book_id=context.task_id,
+                turn_id=turn.turn_id,
+                error=error_payload,
+                error_message_id=message.message_id,
+            )
+            raise
+        except TimeoutError as exc:
+            model_task.cancel()
+            trace_paths = self._trace_paths_payload(context.task_id, turn.turn_id)
+            error_payload = {
+                "status": "failed",
+                "error": str(exc) or exc.__class__.__name__,
+                "error_type": "model_timeout",
+                "traceback": traceback.format_exc(),
+                **trace_paths,
+            }
+            message = session_service.append_message(
+                context.task_id,
+                role="error",
+                content=f"小说专家分析超时：{error_payload['error']}",
+                payload={
+                    "channel": "outline_analyzer",
+                    "status": "failed",
+                    "job_id": context.job_id,
+                    "turn_id": turn.turn_id,
+                    "error_type": "model_timeout",
+                    **trace_paths,
+                },
+            )
+            self.mark_failed(
+                book_id=context.task_id,
+                turn_id=turn.turn_id,
+                error=error_payload,
+                error_message_id=message.message_id,
+            )
+            raise RuntimeError(str(exc) or "Analyzer job timed out") from exc
         except Exception as exc:
+            model_task.cancel()
+            trace_paths = self._trace_paths_payload(context.task_id, turn.turn_id)
             error_payload = {
                 "status": "failed",
                 "error": str(exc) or exc.__class__.__name__,
                 "error_type": exc.__class__.__name__,
                 "traceback": traceback.format_exc(),
+                **trace_paths,
             }
             message = session_service.append_message(
                 context.task_id,
@@ -246,6 +363,8 @@ class AnalyzerTurnService:
                     "status": "failed",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "error_type": exc.__class__.__name__,
+                    **trace_paths,
                 },
             )
             self.mark_failed(
@@ -257,6 +376,7 @@ class AnalyzerTurnService:
             raise
 
         status = str(result.get("status") or "")
+        trace_paths = self._trace_paths_payload(context.task_id, turn.turn_id)
         if status == "needs_user_preference":
             message = session_service.append_message(
                 context.task_id,
@@ -268,6 +388,7 @@ class AnalyzerTurnService:
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
                     "sources": result.get("sources") or [],
+                    **trace_paths,
                 },
             )
             self.mark_need_user_input(
@@ -289,9 +410,11 @@ class AnalyzerTurnService:
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
                     "sources": result.get("sources") or [],
+                    **trace_paths,
                 },
             )
             error_payload = {"status": status or "failed", "error": str(result.get("answer") or status), "result": dict(result)}
+            error_payload.update(trace_paths)
             self.mark_failed(
                 book_id=context.task_id,
                 turn_id=turn.turn_id,
@@ -310,6 +433,7 @@ class AnalyzerTurnService:
                 "job_id": context.job_id,
                 "turn_id": turn.turn_id,
                 "sources": result.get("sources") or [],
+                **trace_paths,
             },
         )
         self.mark_succeeded(
@@ -319,6 +443,53 @@ class AnalyzerTurnService:
             result=result,
         )
         return {"status": status or "ok", "turn_id": turn.turn_id, "assistant_message_id": message.message_id}
+
+    def prompt_trace_recorder(self, *, book_id: str, turn_id: str, job_id: str):
+        def record(snapshot: Mapping[str, Any]) -> None:
+            payload = {
+                "created_at": _timestamp(),
+                "book_id": book_id,
+                "turn_id": turn_id,
+                "job_id": job_id,
+                **dict(snapshot),
+            }
+            trace_path = self._prompt_trace_path(book_id, turn_id)
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.open("a", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False) + "\n")
+            last_path = self._last_prompt_path(book_id, turn_id)
+            last_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return record
+
+    async def _await_analyzer_result(
+        self,
+        *,
+        context: JobContext,
+        turn: AnalyzerTurn,
+        model_task: asyncio.Task[dict[str, Any]],
+    ) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        timeout_seconds = _analyzer_job_timeout_seconds()
+        heartbeat_seconds = _analyzer_job_heartbeat_seconds()
+        deadline = loop.time() + timeout_seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"模型请求超过 {timeout_seconds:g}s 未返回。请稍后重试，或调整 Analyzer 模型/超时配置。"
+                )
+            done, _pending = await asyncio.wait({model_task}, timeout=min(heartbeat_seconds, remaining))
+            if model_task in done:
+                return model_task.result()
+            context.emit(
+                "progress",
+                "小说专家仍在分析剧情。",
+                payload={
+                    "channel": "outline_analyzer",
+                    "turn_id": turn.turn_id,
+                    "elapsed_seconds": round(timeout_seconds - max(0.0, deadline - loop.time()), 1),
+                },
+            )
 
     def question_for_model(self, turn: AnalyzerTurn) -> str:
         if not turn.supplements:
@@ -484,6 +655,8 @@ class AnalyzerTurnService:
             "## Error\n\n"
             f"```json\n{error}\n```\n\n"
             "## Prompt Trace\n\n"
+            f"- prompt_trace_jsonl: {self._relative_prompt_trace_path(turn.book_id, turn.turn_id)}\n"
+            f"- last_prompt_json: {self._relative_last_prompt_path(turn.book_id, turn.turn_id)}\n\n"
             f"```json\n{payload}\n```\n"
         )
 
@@ -530,3 +703,21 @@ class AnalyzerTurnService:
 
     def _turn_path(self, book_id: str, turn_id: str) -> Path:
         return self.root / book_id / "turns" / f"{turn_id}.md"
+
+    def _prompt_trace_path(self, book_id: str, turn_id: str) -> Path:
+        return self.root / book_id / "turns" / f"{turn_id}.prompts.jsonl"
+
+    def _last_prompt_path(self, book_id: str, turn_id: str) -> Path:
+        return self.root / book_id / "turns" / f"{turn_id}.last_prompt.json"
+
+    def _trace_paths_payload(self, book_id: str, turn_id: str) -> dict[str, str]:
+        return {
+            "prompt_trace_path": self._relative_prompt_trace_path(book_id, turn_id),
+            "last_prompt_path": self._relative_last_prompt_path(book_id, turn_id),
+        }
+
+    def _relative_prompt_trace_path(self, book_id: str, turn_id: str) -> str:
+        return f".memory/analyzer/{book_id}/turns/{turn_id}.prompts.jsonl"
+
+    def _relative_last_prompt_path(self, book_id: str, turn_id: str) -> str:
+        return f".memory/analyzer/{book_id}/turns/{turn_id}.last_prompt.json"

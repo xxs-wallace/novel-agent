@@ -154,9 +154,11 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 初始输入只应包含用户续写意图、故事规模、高潮约束、人物姓名索引、世界观精炼梗概、世界观概念名词索引、历史故事精炼总览，以及可选未决伏笔标题级索引
 - `OutlineSeedPacket` 中的重点人物 SHOULD 来自 `CharacterMentionResolution`，而不是用户手工填写的人物清单
 - 模型 SHALL 通过语义请求向本地 Agent 查询更多信息，而不是直接编写 SQL 或读取任意文件
-- 语义请求至少 SHOULD 支持 `story_detail`、`character_profile`、`world_concept`
+- 语义请求至少 SHOULD 支持 `text_search`、`story_detail`、`character_profile`、`world_concept`
 - 本地 Agent SHALL 将语义请求转换为 SQLite / Markdown / Memory / KB 可理解的查询，并返回带来源的 evidence
 - 对 `story_detail`，本地 Agent SHOULD 优先调用 Memory 层提供的 BTree descent / page query 接口，而不是由 Writer 直接读取 SQLite、扫描 Markdown 或拼接原文
+- 对细节定位、人物共同经历、伏笔回收或关键词交集问题，本地 Agent SHOULD 支持共享 `text_search` 请求作为 grep-like locator；模型可指定关键词、交集 / 并集模式和检索范围，失败分支只进入 trace，不应写入 planning notebook 作为事实。
+- 对 `character_profile`，本地 Agent SHOULD 支持 `metadata.story_events_offset` 和 `metadata.story_events_char_budget` 分页读取 `story_events_json`；单页生产路径不得超过 4096 字符，并应返回 `story_events_page`，包含 `offset`、`next_offset`、`total`、`has_more` 和 `chars_returned`。
 - Writer 模型 SHALL 负责在每层 Memory candidates 中选择需要继续展开的节点，并返回 `selected_ids`、`query_suffix`、`reason`、`confidence`；Memory 层 SHALL 负责确定性展开 selected ids 到下一层 Page 或 document
 - Writer 层不得重定义 Memory Page schema、outline segment / segment group 压缩规则、chapter summary 回源规则或 document excerpt 裁剪规则
 - 模型 MAY 发起多轮请求，但必须受 `ResearchBudget` 限制
@@ -356,6 +358,8 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 `Draft Research Loop` 负责在写正文前主动判断信息是否足够。它 SHALL 从轻量 `DraftSeedPacket` 开始，只携带本章 brief、用户补充、上游规划摘要、最近章节梗概、人物索引、关系门禁、禁止项和可查询资源目录。模型 MAY 通过结构化请求查询：
 
 - 人物档案、人物关键经历索引和可按 `outline_segment_id` 回源的人物关键经历
+- `text_search` 词面定位，用于在 root summary、人物档案、outline segment、章节摘要、index card 和受限 document scope 中先缩小候选范围
+- 可分页的 `character_profile` / `character_experience`，用于浏览人物经历时间线，避免只看到早期或窄 query 命中的经验切片
 - `story_detail`、segment group / outline root、outline segment、章节摘要、原始正文摘录
 - Narrative SceneCard、SourceArcMap、Creative KB 结构模式或风格参考
 - 世界观概念、规则、限制和禁止突破点

@@ -30,7 +30,9 @@ def build_close_read_prompt(prompt_input: dict[str, Any]) -> tuple[str, str]:
         "11. world_update.changes[].section 只能使用这 6 个固定分区：世界类型、时代背景、能力体系、超自然要素、阵营势力、核心禁忌与规则。\n"
         "12. outline_update.chapter_line 优先概括主线推进、不可逆事件和关键转折；纯气氛或弱支线不要写得比主线更长。\n"
         "13. outline_update 只返回章节级一句话大纲，不要返回事件数组、事件列表或内部索引字段。\n"
-        "14. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "14. importance_reason 只解释本章为什么重要或不重要，不得引入 chapter_summary_md 没有明确概括的精确事实；"
+        "涉及人物、对象、次数、代价、因果、时间线或在场者的关键事实，必须写进 chapter_summary_md 或相关结构化字段，不能只写在 importance_reason。\n"
+        "15. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
         "请按以下 JSON schema 返回：\n"

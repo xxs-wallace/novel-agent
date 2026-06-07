@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ...runs.writer import RunWriter
 from ...schemas.continuity import ContinuityIssue, ContinuityReport
@@ -987,7 +987,7 @@ class RestrictedWriterExecutor:
         aliases = _normalize_string_list(profile.get("aliases"))[:12]
         relationships = self._prompt_relationship_facts(profile, matcher_text=matcher_text)
         recent_activity = self._prompt_profile_items(profile.get("recent_activity"), limit=6)
-        story_events = self._prompt_profile_items(profile.get("story_events"), limit=6)
+        story_events, story_events_page = self._prompt_story_events(profile.get("story_events"), matcher_text=matcher_text, limit=6)
         return {
             "canonical_name": str(profile.get("canonical_name") or ""),
             "aliases": aliases,
@@ -997,6 +997,7 @@ class RestrictedWriterExecutor:
             "relationships": relationships,
             "recent_activity": recent_activity,
             "story_events": story_events,
+            "story_events_page": story_events_page,
         }
 
     def _prompt_relationship_facts(self, profile: Mapping[str, Any], *, matcher_text: str, limit: int = 12) -> list[dict[str, Any]]:
@@ -1041,6 +1042,53 @@ class RestrictedWriterExecutor:
             if len(cleaned) >= limit:
                 break
         return cleaned
+
+    def _prompt_story_events(self, value: Any, *, matcher_text: str, limit: int) -> tuple[list[Any], dict[str, Any]]:
+        items = [item for item in (value if isinstance(value, list) else []) if isinstance(item, Mapping)]
+        selected = self._select_prompt_story_events(items, matcher_text=matcher_text, limit=limit)
+        return self._prompt_profile_items(selected, limit=limit), {
+            "mode": "relevance_and_recent_safety_net",
+            "offset": 0,
+            "next_offset": len(selected) if len(selected) < len(items) else None,
+            "total": len(items),
+            "has_more": len(selected) < len(items),
+            "returned": len(selected),
+            "selection_policy": "not_first_n; prefer matcher-relevant and recent story_events",
+        }
+
+    def _select_prompt_story_events(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        matcher_text: str,
+        limit: int,
+    ) -> list[Mapping[str, Any]]:
+        if not items or limit <= 0:
+            return []
+        tokens = [
+            token
+            for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", matcher_text)
+            if token
+        ][:80]
+        scored: list[tuple[int, int, Mapping[str, Any]]] = []
+        for index, item in enumerate(items):
+            rendered = json.dumps(item, ensure_ascii=False)
+            score = sum(4 for token in tokens if token in rendered)
+            if item.get("source_doc_ids") or item.get("source_doc_range") or item.get("outline_segment_id"):
+                score += 1
+            if index >= max(0, len(items) - limit):
+                score += 2
+            scored.append((score, index, item))
+        selected: list[Mapping[str, Any]] = []
+        seen: set[int] = set()
+        for _score, index, item in sorted(scored, key=lambda value: (-value[0], value[1])):
+            if index in seen:
+                continue
+            seen.add(index)
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+        return selected
 
     @staticmethod
     def _compact_relation_text(item: Mapping[str, Any]) -> str:

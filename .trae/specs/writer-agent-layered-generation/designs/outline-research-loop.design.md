@@ -171,9 +171,29 @@
 
 ```json
 {
-  "type": "story_detail",
-  "query": "主角上一次因为信任问题和关键同伴发生冲突的经过，以及冲突结束后两人的关系状态",
-  "purpose": "判断新大纲中是否可以安排二人短期合作",
+  "type": "text_search",
+  "query": "定位主角、关键同伴、信任问题同时出现的历史片段",
+  "purpose": "先缩小候选章节和 source_doc_ids，再决定是否请求 story_detail 或原文摘录",
+  "priority": "high",
+  "metadata": {
+    "terms": ["主角", "关键同伴", "信任"],
+    "match_mode": "all",
+    "scopes": ["outline_segments", "chapter_summaries", "character_profiles", "index_cards"]
+  }
+}
+```
+
+### 4.0 text_search
+
+用于 grep-like 词面定位。模型把问题拆为少量通用关键词，由本地 Context Broker 在 root summary / Memory root、人物档案、outline segment、chapter summary、index card 或受限 document scope 中执行交集 / 并集匹配，返回候选 chapter refs 与 source doc ids。
+
+`text_search` 是 locator，不是最终事实裁决。失败分支只进入 trace，不应写入 planning notebook；命中后 SHOULD 再请求 `story_detail`、`character_profile`、`chapter_excerpt` 或其他更直接证据。
+
+```json
+{
+  "type": "text_search",
+  "query": "定位包含某人物、某物件和某事件结果的历史段落",
+  "purpose": "确定需要展开哪个 outline segment 或章节摘要",
   "priority": "high"
 }
 ```
@@ -202,6 +222,22 @@
   "query": "重点了解当前身份、能力边界、与主角的关系状态、最近一次登场后的状态",
   "purpose": "判断是否适合承担本批次行动支援角色",
   "priority": "high"
+}
+```
+
+当规划判断依赖人物经历时间线、关系转折、共同经历或当前状态边界时，模型 SHOULD 使用 `metadata.story_events_offset` 和 `metadata.story_events_char_budget` 分页读取人物 `story_events_json`。单页字符预算不得超过 4096；返回结果 SHOULD 包含 `story_events_page.next_offset` 以便继续读取。
+
+```json
+{
+  "type": "character_profile",
+  "name": "角色A",
+  "query": "浏览角色A的经历时间线以确认关系和状态边界",
+  "purpose": "避免只依据早期经历或过窄 query 规划后续人物行为",
+  "priority": "high",
+  "metadata": {
+    "story_events_offset": 0,
+    "story_events_char_budget": 4096
+  }
 }
 ```
 

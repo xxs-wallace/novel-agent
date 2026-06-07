@@ -21,12 +21,25 @@ from novel_agent.app.services.outline_analyzer_benchmark_service import (
 
 
 class ScriptedBenchmarkModel:
-    def __init__(self, outputs: list[str]) -> None:
+    def __init__(self, outputs: list[str], *, auto_intent: bool = True) -> None:
         self.outputs = list(outputs)
         self.calls: list[dict[str, str]] = []
+        self.auto_intent = auto_intent
 
     def generate_text(self, *, system_prompt: str, user_prompt: str) -> str:
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+        if self.auto_intent and "AnalyzerIntentGate" in system_prompt:
+            return json.dumps(
+                {
+                    "analysis_type": "outline_analysis",
+                    "confidence": 0.8,
+                    "matched_signals": ["benchmark prompt needs Analyzer evidence"],
+                    "secondary_analysis_types": [],
+                    "required_evidence_plan": ["query benchmark memory"],
+                    "notes": "test auto intent",
+                },
+                ensure_ascii=False,
+            )
         if not self.outputs:
             raise AssertionError("scripted benchmark model has no more outputs")
         return self.outputs.pop(0)
@@ -158,6 +171,7 @@ def test_outline_analyzer_benchmark_writes_artifacts_and_records_prompt_stats(tm
             ),
             json.dumps({"kept_request_ids": ["req-001"], "rejected_request_ids": []}, ensure_ascii=False),
             json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
+            json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             "Analyzer：甲会继续求证，乙可能主动推进冲突。",
             _judge_pass_payload(),
         ]
@@ -185,7 +199,7 @@ def test_outline_analyzer_benchmark_writes_artifacts_and_records_prompt_stats(tm
     assert "甲和乙在雨夜发现秘密线索。" in baseline_payload
     assert "甲  和" not in baseline_payload
     prompt_stats = json.loads((run_dir / "analyzer" / "prompt_stats.json").read_text(encoding="utf-8"))
-    assert [item["stage"] for item in prompt_stats["calls"]] == ["loop", "triage", "loop", "final"]
+    assert [item["stage"] for item in prompt_stats["calls"]] == ["intent_gate", "loop", "triage", "loop", "readiness", "final"]
     summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
     assert summary["prompts"][0]["quality_pass"] is True
 
@@ -212,8 +226,10 @@ def test_outline_analyzer_benchmark_reuses_cached_baseline(tmp_path: Path) -> No
         [
             "baseline：完整原文分析。",
             json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
+            json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             "Analyzer：第一次分析。",
             _judge_pass_payload(),
+            json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             "Analyzer：第二次分析。",
             _judge_pass_payload(),
@@ -257,6 +273,7 @@ def test_outline_analyzer_benchmark_can_shape_check_existing_longzu_120kb_memory
     model = ScriptedBenchmarkModel(
         [
             "baseline：这是完整原文分析。",
+            json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
             "Analyzer：这是基于 Memory 的分析。",
             _judge_pass_payload(),

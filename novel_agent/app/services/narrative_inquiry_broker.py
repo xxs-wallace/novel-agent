@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..repos.assets_repo import AssetsRepo
+from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
+from ..repos.documents_repo import DocumentsRepo
 from ..repos.fragment_cards_repo import FragmentCardsRepo
 from ..schemas.narrative_index_schema import IndexQueryBudget, IndexQueryIntent
 from ..schemas.narrative_inquiry_schema import (
@@ -113,6 +115,37 @@ def _profile_item_text(value: object) -> str:
     return " | ".join(parts)
 
 
+def _profile_story_event_text(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return str(value or "")
+    parts = [_text(value.get(key)) for key in ("label", "summary", "value") if _text(value.get(key))]
+    participants = value.get("participants")
+    if isinstance(participants, Sequence) and not isinstance(participants, (str, bytes)):
+        participant_text = "、".join(_text(item) for item in participants if _text(item))
+        if participant_text:
+            parts.append(f"participants: {participant_text}")
+    source_range = _text(value.get("source_doc_range"))
+    if source_range:
+        parts.append(f"source_doc_range: {source_range}")
+    chapter_indexes = value.get("source_chapter_indexes")
+    if isinstance(chapter_indexes, Sequence) and not isinstance(chapter_indexes, (str, bytes)):
+        chapter_text = ", ".join(str(item) for item in chapter_indexes if str(item))
+        if chapter_text:
+            parts.append(f"source_chapter_indexes: {chapter_text}")
+    return " | ".join(part for part in parts if part)
+
+
+def _metadata_int(metadata: Mapping[str, Any], *keys: str, default: int = 0) -> int:
+    for key in keys:
+        if key not in metadata:
+            continue
+        try:
+            return int(metadata[key])
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
 class NarrativeInquiryBroker:
     """Shared semantic evidence broker for Analyzer, Writer Research, and future Reviewer.
 
@@ -139,14 +172,18 @@ class NarrativeInquiryBroker:
         repo_root: Path,
         memory_query_service: NarrativeMemoryQueryService | None = None,
         assets_repo: AssetsRepo | None = None,
+        chapters_repo: ChaptersRepo | None = None,
         character_profiles_repo: CharacterProfilesRepo | None = None,
+        documents_repo: DocumentsRepo | None = None,
         fragment_cards_repo: FragmentCardsRepo | None = None,
         narrative_index_facade: NarrativeIndexFacade | None = None,
     ) -> None:
         self.repo_root = repo_root.expanduser().resolve()
         self.memory_query_service = memory_query_service or NarrativeMemoryQueryService(repo_root=self.repo_root)
         self.assets_repo = assets_repo or AssetsRepo()
+        self.chapters_repo = chapters_repo or ChaptersRepo()
         self.character_profiles_repo = character_profiles_repo or CharacterProfilesRepo()
+        self.documents_repo = documents_repo or DocumentsRepo()
         self.fragment_cards_repo = fragment_cards_repo or FragmentCardsRepo()
         self.narrative_index_facade = narrative_index_facade or NarrativeIndexFacade(
             repo_root=self.repo_root,
@@ -215,6 +252,8 @@ class NarrativeInquiryBroker:
     ) -> EvidenceBundle:
         if request.request_type in self.INDEX_CARD_TYPES:
             return self._resolve_index_cards(conn, book_id=book_id, request=request, budget=budget)
+        if request.request_type == "text_search":
+            return self._resolve_text_search(conn, book_id=book_id, request=request, budget=budget)
         if request.request_type in {"story_detail", "fact_check", "related_documents"}:
             return self._resolve_story_memory(
                 conn,
@@ -236,6 +275,199 @@ class NarrativeInquiryBroker:
         if request.request_type == "open_threads":
             return self._resolve_open_threads(conn, book_id=book_id, request=request, budget=budget)
         return self._resolve_structure_pattern(conn, request=request, budget=budget)
+
+    def _resolve_text_search(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        request: NarrativeInquiryRequest,
+        budget: AnalyzerBudget,
+    ) -> EvidenceBundle:
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        terms = self._text_search_terms(request)
+        if not terms:
+            return EvidenceBundle.missing(request, "search_terms")
+        match_mode = _text(metadata.get("match_mode") or "all").lower()
+        if match_mode not in {"all", "any"}:
+            match_mode = "all"
+        scopes = _string_list(metadata.get("scopes")) or [
+            "memory_roots",
+            "outline_segments",
+            "chapter_summaries",
+            "character_profiles",
+            "index_cards",
+        ]
+        max_matches = max(1, min(24, _metadata_int(metadata, "max_matches", default=12) or 12))
+        default_per_scope_limit = 10 if any(scope in {"document", "documents", "raw_documents"} for scope in scopes) else 4
+        per_scope_limit = max(
+            1,
+            min(10, _metadata_int(metadata, "max_matches_per_scope", default=default_per_scope_limit) or default_per_scope_limit),
+        )
+        document_match_offset = max(0, _metadata_int(metadata, "match_offset", "document_match_offset", default=0))
+        doc_ids = list(request.document_ids or request.source_doc_ids)
+        if not doc_ids and request.chapter_refs:
+            refs = [ref for ref in (self._normalize_chapter_ref(item) for item in request.chapter_refs) if ref]
+            memory_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
+            doc_ids = list(memory_bundle.source_doc_ids)
+        if not doc_ids:
+            doc_ids, too_broad = self._doc_ids_from_text(
+                " ".join([request.query, request.purpose, request.expected_depth]),
+                limit=12,
+            )
+            if too_broad:
+                doc_ids = []
+
+        matches: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = [
+            {
+                "operation": "text_search_start",
+                "terms": list(terms),
+                "match_mode": match_mode,
+                "scopes": list(scopes),
+                "bounded_document_ids": list(doc_ids),
+            }
+        ]
+        scope_counts: dict[str, int] = {}
+        for scope in scopes:
+            before = len(matches)
+            if scope in {"memory_root", "memory_roots", "root_summary", "story_overview"}:
+                matches.extend(
+                    self._text_search_memory_roots(
+                        conn,
+                        book_id=book_id,
+                        terms=terms,
+                        match_mode=match_mode,
+                        budget=budget,
+                        limit=per_scope_limit,
+                    )
+                )
+            elif scope in {"outline_segment", "outline_segments"}:
+                matches.extend(
+                    self._text_search_outline_segments(
+                        book_id=book_id,
+                        terms=terms,
+                        match_mode=match_mode,
+                        budget=budget,
+                        limit=per_scope_limit,
+                    )
+                )
+            elif scope in {"chapter_summary", "chapter_summaries", "chapters"}:
+                matches.extend(
+                    self._text_search_chapter_summaries(
+                        conn,
+                        book_id=book_id,
+                        terms=terms,
+                        match_mode=match_mode,
+                        budget=budget,
+                        limit=per_scope_limit,
+                    )
+                )
+            elif scope in {"character_profile", "character_profiles", "profiles"}:
+                matches.extend(
+                    self._text_search_character_profiles(
+                        conn,
+                        book_id=book_id,
+                        terms=terms,
+                        match_mode=match_mode,
+                        budget=budget,
+                        limit=per_scope_limit,
+                    )
+                )
+            elif scope in {"index_card", "index_cards", "cards", "scene_cards"}:
+                matches.extend(
+                    self._text_search_index_cards(
+                        book_id=book_id,
+                        terms=terms,
+                        match_mode=match_mode,
+                        budget=budget,
+                        limit=per_scope_limit,
+                    )
+                )
+            elif scope in {"document", "documents", "raw_documents"}:
+                if doc_ids or bool(metadata.get("allow_document_scan")):
+                    matches.extend(
+                        self._text_search_documents(
+                            conn,
+                            book_id=book_id,
+                            terms=terms,
+                            match_mode=match_mode,
+                            budget=budget,
+                            limit=per_scope_limit,
+                            doc_ids=doc_ids[:12],
+                            match_offset=document_match_offset,
+                        )
+                    )
+                else:
+                    trace.append(
+                        {
+                            "operation": "text_search_scope_skipped",
+                            "scope": scope,
+                            "reason": "documents_require_source_doc_ids_or_allow_document_scan",
+                        }
+                    )
+            scope_counts[scope] = len(matches) - before
+            if len(matches) >= max_matches:
+                break
+
+        deduped = self._dedupe_text_search_matches(matches)[:max_matches]
+        source_doc_ids: list[int] = []
+        seen_doc_ids: set[int] = set()
+        for item in deduped:
+            for doc_id in item.get("source_doc_ids") or []:
+                if not str(doc_id).isdigit():
+                    continue
+                normalized_doc_id = int(doc_id)
+                if normalized_doc_id in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(normalized_doc_id)
+                source_doc_ids.append(normalized_doc_id)
+        chapter_refs = self._merge_chapter_refs(
+            [
+                str(ref)
+                for item in deduped
+                for ref in (item.get("chapter_refs") or [])
+                if str(ref)
+            ],
+            [],
+        )
+        trace.append(
+            {
+                "operation": "text_search_complete",
+                "scope_counts": scope_counts,
+                "match_count": len(deduped),
+                "document_match_offset": document_match_offset,
+            }
+        )
+        if not deduped:
+            return EvidenceBundle(
+                request_id=request.request_id,
+                request_type=request.request_type,
+                query=request.query,
+                status="missing",
+                fact_status="missing",
+                missing_facets=["text_matches"],
+                trace=trace,
+            )
+        return EvidenceBundle(
+            request_id=request.request_id,
+            request_type=request.request_type,
+            query=request.query,
+            status="found",
+            fact_status="candidate",
+            evidence_items=deduped,
+            chapter_refs=chapter_refs,
+            source_doc_ids=source_doc_ids,
+            sources=[
+                {
+                    "type": "text_search",
+                    "path": f"{item.get('scope')}:{item.get('id')}",
+                    "status": item.get("status") or "candidate",
+                }
+                for item in deduped
+            ],
+            trace=trace,
+        )
 
     def _resolve_index_cards(
         self,
@@ -276,6 +508,13 @@ class NarrativeInquiryBroker:
                 "evidence_type": "index_card",
                 "score": hit.score,
                 "matched_by": list(hit.matched_by),
+                "evidence_derivation": "summary_derived_index_card",
+                "canonical_fact_status": "candidate_requires_direct_confirmation_for_conflicts",
+                "evidence_warning": (
+                    "Index card summaries and importance facets are retrieval cues, not canonical facts. "
+                    "When they conflict on participants, counts, costs, causality, timeline, or scene presence, "
+                    "confirm with chapter summary or raw excerpt."
+                ),
                 **hit.card.to_dict(),
             }
             for hit in result.candidate_cards
@@ -312,6 +551,390 @@ class NarrativeInquiryBroker:
             "creative_reference_card_search": ["creative_reference"],
         }
         return mapping.get(request_type, [])
+
+    def _text_search_terms(self, request: NarrativeInquiryRequest) -> list[str]:
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        terms = _string_list(metadata.get("terms") or metadata.get("keywords"))
+        if not terms:
+            terms = [item for item in re.findall(r'"([^"]+)"|“([^”]+)”|\'([^\']+)\'', request.query) for item in item if item]
+        if not terms:
+            terms = _tokens(" ".join([request.query, request.name, request.concept]))
+        if not terms and request.query:
+            terms = [request.query]
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            text = _text(term)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        return deduped[:8]
+
+    def _text_matches(self, text: str, terms: Sequence[str], *, match_mode: str) -> tuple[bool, list[str]]:
+        haystack = text.casefold()
+        matched: list[str] = []
+        for term in terms:
+            needle = term.casefold()
+            if needle and needle in haystack:
+                matched.append(term)
+        if match_mode == "any":
+            return bool(matched), matched
+        return len(matched) == len(terms), matched
+
+    def _text_search_item(
+        self,
+        *,
+        scope: str,
+        item_id: str,
+        label: str,
+        text: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        chapter_refs: Sequence[str] = (),
+        source_doc_ids: Sequence[object] = (),
+        status: str = "",
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        ok, matched_terms = self._text_matches(text, terms, match_mode=match_mode)
+        if not ok:
+            return None
+        normalized_doc_ids: list[int] = []
+        seen_doc_ids: set[int] = set()
+        for item in source_doc_ids:
+            if not str(item).isdigit():
+                continue
+            doc_id = int(item)
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
+            normalized_doc_ids.append(doc_id)
+        payload = {
+            "evidence_type": "text_search_match",
+            "scope": scope,
+            "id": item_id,
+            "label": label,
+            "matched_terms": list(matched_terms),
+            "matched_term_count": len(matched_terms),
+            "match_mode": match_mode,
+            "snippet": self._text_search_snippet(text, terms, limit=min(520, budget.max_evidence_chars_per_request)),
+            "chapter_refs": [ref for ref in (self._normalize_chapter_ref(item) for item in chapter_refs) if ref],
+            "source_doc_ids": normalized_doc_ids,
+            "status": status or "candidate",
+            "evidence_derivation": "lexical_text_search_locator",
+            "canonical_fact_status": "locator_only_requires_followup_for_semantic_or_verbatim_answers",
+        }
+        if extra:
+            payload.update(dict(extra))
+        return payload
+
+    def _text_search_snippet(self, text: str, terms: Sequence[str], *, limit: int) -> str:
+        normalized = re.sub(r"\s+", " ", _text(text))
+        if len(normalized) <= limit:
+            return normalized
+        positions = [normalized.casefold().find(term.casefold()) for term in terms if term and term.casefold() in normalized.casefold()]
+        start = min((pos for pos in positions if pos >= 0), default=0)
+        start = max(0, start - max(20, limit // 5))
+        snippet = normalized[start : start + limit].strip()
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if start + limit < len(normalized) else ""
+        return f"{prefix}{snippet}{suffix}"
+
+    def _dedupe_text_search_matches(self, matches: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in matches:
+            key = (str(item.get("scope") or ""), str(item.get("id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(item))
+        return deduped
+
+    def _text_search_memory_roots(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        matches: list[dict[str, Any]] = []
+        try:
+            state = self.memory_query_service.root_map(
+                conn,
+                book_id=book_id,
+                budget=MemoryQueryBudget(max_root_candidates=24, max_candidate_chars=budget.max_evidence_chars_per_request),
+            )
+        except Exception:
+            return []
+        for item in state.current_candidates:
+            text = " ".join(
+                _text(item.get(key))
+                for key in ("summary", "title", "page_id", "id", "source_doc_range")
+                if _text(item.get(key))
+            )
+            match = self._text_search_item(
+                scope="memory_root",
+                item_id=str(item.get("page_id") or item.get("id") or ""),
+                label=str(item.get("title") or item.get("page_id") or item.get("id") or "memory_root"),
+                text=text,
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(value) for value in (item.get("source_title_indexes") or [])],
+                source_doc_ids=item.get("source_doc_ids") or [],
+                status=str(item.get("status") or ""),
+            )
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _text_search_outline_segments(
+        self,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        data = self._load_book_json(self.repo_root / ".memory" / "outlines" / f"{book_id}.outline_segments.json")
+        segments = _json_list(data.get("segments")) if data else []
+        matches: list[dict[str, Any]] = []
+        for item in segments:
+            if not isinstance(item, Mapping):
+                continue
+            text = " ".join(
+                [
+                    _text(item.get("summary")),
+                    _text(item.get("chapter_line")),
+                    _json_text(item.get("metadata")),
+                ]
+            )
+            match = self._text_search_item(
+                scope="outline_segment",
+                item_id=str(item.get("outline_segment_id") or item.get("id") or ""),
+                label=str(item.get("chapter_line") or item.get("outline_segment_id") or "outline_segment"),
+                text=text,
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(value) for value in (item.get("source_title_indexes") or [])],
+                source_doc_ids=item.get("source_doc_ids") or [],
+                status=str(item.get("status") or ""),
+                extra={
+                    "outline_segment_id": item.get("outline_segment_id") or "",
+                    "source_doc_range": item.get("source_doc_range") or "",
+                },
+            )
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _text_search_chapter_summaries(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            rows = self.chapters_repo.list_by_book(conn, book_id=book_id)
+        except sqlite3.OperationalError:
+            rows = []
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            chapter_index = int(row["document_title_index"] or 0)
+            text = " ".join(
+                [
+                    str(row["chapter_title"] or ""),
+                    str(row["summary_short"] or ""),
+                    str(row["summary_md"] or ""),
+                    str(row["importance_reason"] or ""),
+                    str(row["outline_update_json"] or ""),
+                    str(row["mentioned_characters_json"] or ""),
+                ]
+            )
+            match = self._text_search_item(
+                scope="chapter_summary",
+                item_id=f"chapter-{chapter_index}",
+                label=f"chapter-{chapter_index} {row['chapter_title'] or ''}",
+                text=text,
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(chapter_index)],
+                source_doc_ids=range(int(row["source_doc_start_id"] or 0), int(row["source_doc_end_id"] or 0) + 1),
+                status=str(row["summary_status"] or ""),
+                extra={
+                    "chapter_title": str(row["chapter_title"] or ""),
+                    "source_doc_range": f"{int(row['source_doc_start_id'] or 0)}-{int(row['source_doc_end_id'] or 0)}",
+                },
+            )
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _text_search_character_profiles(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        try:
+            rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
+        except sqlite3.OperationalError:
+            rows = []
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            text = " ".join(
+                [
+                    str(row["canonical_name"] or ""),
+                    str(row["aliases_json"] or ""),
+                    str(row["profile_summary_md"] or ""),
+                    str(row["recent_activity_json"] or ""),
+                    str(row["relationships_json"] or ""),
+                    str(row["story_events_json"] or ""),
+                    str(row["profile_brief_json"] or ""),
+                ]
+            )
+            match = self._text_search_item(
+                scope="character_profile",
+                item_id=str(row["character_id"] or row["canonical_name"] or ""),
+                label=str(row["canonical_name"] or "character_profile"),
+                text=text,
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(value) for value in _json_list(row["chapter_indexes_json"])],
+                source_doc_ids=_json_list(row["mentioned_doc_ids_json"]),
+                status=str(row["evidence_level"] or ""),
+                extra={"canonical_name": str(row["canonical_name"] or "")},
+            )
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _text_search_index_cards(
+        self,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        data = self._load_book_json(self.repo_root / ".memory" / "index_cards" / f"{book_id}.scene_cards.json")
+        cards = _json_list(data.get("scene_cards")) if data else []
+        matches: list[dict[str, Any]] = []
+        for item in cards:
+            if not isinstance(item, Mapping):
+                continue
+            text = " ".join(
+                [
+                    _text(item.get("summary")),
+                    _json_text(item.get("query_facets")),
+                    _json_text(item.get("importance_facets")),
+                    _json_text(item.get("payload")),
+                ]
+            )
+            match = self._text_search_item(
+                scope="index_card",
+                item_id=str(item.get("card_id") or ""),
+                label=str(item.get("summary") or item.get("card_id") or "index_card"),
+                text=text,
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(value) for value in (item.get("source_title_indexes") or [])],
+                source_doc_ids=item.get("source_doc_ids") or [],
+                status=str(item.get("status") or ""),
+                extra={
+                    "card_type": item.get("card_type") or "",
+                    "source_doc_range": item.get("source_doc_range") or "",
+                    "summary_sufficiency": item.get("summary_sufficiency") or "",
+                },
+            )
+            if match:
+                matches.append(match)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _text_search_documents(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        terms: Sequence[str],
+        match_mode: str,
+        budget: AnalyzerBudget,
+        limit: int,
+        doc_ids: Sequence[int],
+        match_offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if doc_ids:
+            placeholders = ",".join("?" for _ in doc_ids)
+            rows = conn.execute(
+                f"SELECT * FROM documents WHERE book_id = ? AND doc_id IN ({placeholders}) ORDER BY doc_id",
+                [book_id, *doc_ids],
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM documents WHERE book_id = ? ORDER BY doc_id", (book_id,)).fetchall()
+        matches: list[dict[str, Any]] = []
+        matched_count = 0
+        for row in rows:
+            match = self._text_search_item(
+                scope="document",
+                item_id=f"doc-{int(row['doc_id'])}",
+                label=f"doc-{int(row['doc_id'])} {row['document_title'] or ''}",
+                text=str(row["content"] or ""),
+                terms=terms,
+                match_mode=match_mode,
+                budget=budget,
+                chapter_refs=[str(row["document_title_index"] or "")],
+                source_doc_ids=[int(row["doc_id"])],
+                status="raw_locator",
+                extra={
+                    "document_title": str(row["document_title"] or ""),
+                    "document_title_index": int(row["document_title_index"] or 0),
+                    "document_match_index": matched_count,
+                    "next_match_offset_hint": matched_count + 1,
+                },
+            )
+            if match and matched_count >= match_offset:
+                matches.append(match)
+            if match:
+                matched_count += 1
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def _load_book_json(self, path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(data) if isinstance(data, Mapping) else {}
 
     def _resolve_story_memory(
         self,
@@ -740,14 +1363,15 @@ class NarrativeInquiryBroker:
         request: NarrativeInquiryRequest,
         budget: AnalyzerBudget,
     ) -> EvidenceBundle:
-        refs = list(request.chapter_refs)
+        query = self._expanded_query_for_detail_lookup(request.query)
+        refs = [ref for ref in (self._normalize_chapter_ref(item) for item in request.chapter_refs) if ref]
         if not refs:
-            refs = [f"chapter-{match}" for match in re.findall(r"\d+", request.query)[:4]]
+            refs = self._chapter_refs_from_query(query)
         if not refs:
             state = self.memory_query_service.root_scan(
                 conn,
                 book_id=book_id,
-                query=request.query,
+                query=query,
                 budget=MemoryQueryBudget(max_root_candidates=6, max_child_candidates=12),
             )
             if state.current_candidates:
@@ -763,7 +1387,7 @@ class NarrativeInquiryBroker:
                         book_id=book_id,
                         state=state,
                         selected_ids=selected_ids,
-                        query_suffix="定位相关章节摘要",
+                        query_suffix=f"定位相关章节摘要：{query}",
                         selection_reason="broker summary-level expansion",
                         confidence=0.5,
                     )
@@ -772,15 +1396,15 @@ class NarrativeInquiryBroker:
             chapter_state = self.memory_query_service.chapter_scan(
                 conn,
                 book_id=book_id,
-                query=request.query,
+                query=query,
                 budget=MemoryQueryBudget(max_root_candidates=4, max_candidate_chars=budget.max_evidence_chars_per_request),
             )
             refs = self._chapter_refs_from_memory_candidates(chapter_state.current_candidates)
-        elif request.query:
+        elif query:
             chapter_state = self.memory_query_service.chapter_scan(
                 conn,
                 book_id=book_id,
-                query=request.query,
+                query=query,
                 budget=MemoryQueryBudget(max_root_candidates=4, max_candidate_chars=budget.max_evidence_chars_per_request),
             )
             direct_refs = self._chapter_refs_from_memory_candidates(chapter_state.current_candidates)
@@ -790,26 +1414,114 @@ class NarrativeInquiryBroker:
         memory_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
         return self._bundle_from_memory(request, memory_bundle, status_if_empty="missing")
 
+    def _expanded_query_for_detail_lookup(self, query: str) -> str:
+        text = _text(query)
+        additions: list[str] = []
+        if re.search(r"歌词|唱.*什么|唱歌|歌(曲|词)?|生日快乐", text):
+            additions.extend(["生日祝福", "祝福短信", "彩信", "语音", "录音", "草稿箱"])
+        if re.search(r"短信|彩信|信件|邮件|留言|原句|原文|具体措辞|写了什么|说了什么", text):
+            additions.extend(["原文", "措辞", "内容", "发送", "收到", "发现"])
+        unique = [item for item in additions if item and item not in text]
+        return f"{text} {' '.join(unique)}" if unique else text
+
     def _merge_chapter_refs(self, preferred_refs: Sequence[str], fallback_refs: Sequence[str]) -> list[str]:
         merged: list[str] = []
         seen: set[str] = set()
         for ref in [*preferred_refs, *fallback_refs]:
-            text = _text(ref)
+            text = self._normalize_chapter_ref(ref)
             if text and text not in seen:
                 seen.add(text)
                 merged.append(text)
         return merged[:4]
+
+    def _normalize_chapter_ref(self, value: object) -> str:
+        text = _text(value)
+        if not text:
+            return ""
+        if text.isdigit():
+            return f"chapter-{text}"
+        match = re.fullmatch(r"(?:chapter|章节|第)?[-\s_]*(\d+)(?:章|幕)?", text, flags=re.IGNORECASE)
+        if match:
+            return f"chapter-{match.group(1)}"
+        match = re.search(r"chapter-(\d+)", text, flags=re.IGNORECASE)
+        if match:
+            return f"chapter-{match.group(1)}"
+        return text if text.startswith("chapter-") else ""
+
+    def _chapter_refs_from_query(self, query: str, *, limit: int = 4) -> list[str]:
+        refs: list[str] = []
+        seen: set[str] = set()
+
+        def add(number: str) -> None:
+            ref = self._normalize_chapter_ref(number)
+            if ref and ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+
+        for start, end in re.findall(r"第?\s*(\d+)\s*[-~—–至到]\s*第?\s*(\d+)\s*[章节幕]?", query):
+            try:
+                start_i = int(start)
+                end_i = int(end)
+            except ValueError:
+                continue
+            if start_i <= 0 or end_i <= 0 or abs(end_i - start_i) > limit - 1:
+                continue
+            for number in range(min(start_i, end_i), max(start_i, end_i) + 1):
+                add(str(number))
+                if len(refs) >= limit:
+                    return refs
+        for match in re.findall(r"(?:chapter|章节|第)\s*[-_ ]?(\d+)\s*[章节幕]?", query, flags=re.IGNORECASE):
+            add(match)
+            if len(refs) >= limit:
+                break
+        return refs
+
+    def _doc_ids_from_text(self, text: str, *, limit: int = 6) -> tuple[list[int], bool]:
+        ids: list[int] = []
+        seen: set[int] = set()
+        too_broad = False
+
+        def add(number: int) -> None:
+            if number > 0 and number not in seen:
+                seen.add(number)
+                ids.append(number)
+
+        for start, end in re.findall(
+            r"(?:source[_ ]?doc(?:ument)?s?|docs?|documents?|文档)\s*[:：]?\s*(\d+)\s*[-~—–至到]\s*(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            try:
+                start_i = int(start)
+                end_i = int(end)
+            except ValueError:
+                continue
+            span = abs(end_i - start_i) + 1
+            if span > limit:
+                too_broad = True
+                continue
+            for number in range(min(start_i, end_i), max(start_i, end_i) + 1):
+                add(number)
+        if too_broad:
+            return [], True
+        for match in re.findall(
+            r"(?:source[_ ]?doc(?:ument)?s?|docs?|documents?|文档)\s*[:：]?\s*(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            add(int(match))
+            if len(ids) >= limit:
+                break
+        return ids[:limit], too_broad
 
     def _chapter_refs_from_memory_candidates(self, candidates: Sequence[Mapping[str, Any]]) -> list[str]:
         refs: list[str] = []
         seen: set[str] = set()
 
         def add_ref(value: object) -> None:
-            text = _text(value)
+            text = self._normalize_chapter_ref(value)
             if not text:
                 return
-            if text.isdigit():
-                text = f"chapter-{text}"
             if not text.startswith("chapter-"):
                 return
             if text not in seen:
@@ -860,21 +1572,73 @@ class NarrativeInquiryBroker:
             )
         doc_ids = list(request.document_ids or request.source_doc_ids)
         if not doc_ids and request.chapter_refs:
-            chapter_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=request.chapter_refs)
+            refs = [ref for ref in (self._normalize_chapter_ref(item) for item in request.chapter_refs) if ref]
+            chapter_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
             doc_ids = list(chapter_bundle.source_doc_ids)
         if not doc_ids and request.chapter_read_plan:
             refs = [f"chapter-{item.document_title_index}" for item in request.chapter_read_plan if item.document_title_index > 0]
             chapter_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
             doc_ids = list(chapter_bundle.source_doc_ids)
         if not doc_ids:
+            refs = self._chapter_refs_from_query(request.query)
+            if refs:
+                chapter_bundle = self.memory_query_service.resolve_chapter_refs(conn, book_id=book_id, chapter_refs=refs)
+                doc_ids = list(chapter_bundle.source_doc_ids)
+        if not doc_ids:
+            doc_ids, too_broad = self._doc_ids_from_text(
+                " ".join(
+                    [
+                        request.query,
+                        request.purpose,
+                        request.read_reason,
+                        request.expected_confirmation,
+                        request.affects_analysis,
+                    ]
+                ),
+                limit=6,
+            )
+            if too_broad and not doc_ids:
+                return EvidenceBundle(
+                    request_id=request.request_id,
+                    request_type=request.request_type,
+                    query=request.query,
+                    status="blocked",
+                    fact_status="insufficient_context",
+                    missing_facets=["bounded_raw_excerpt_target"],
+                    trace=[{"operation": "raw_excerpt_blocked", "reason": "document_range_too_broad"}],
+                )
+        if not doc_ids:
             return EvidenceBundle.missing(request, "document_ids_or_chapter_refs")
+        selected_doc_ids, selection_trace = self._select_raw_excerpt_doc_ids(
+            conn,
+            book_id=book_id,
+            doc_ids=doc_ids,
+            request=request,
+            limit=6,
+        )
         memory_bundle = self.memory_query_service.resolve_document_refs(
             conn,
             book_id=book_id,
-            doc_ids=doc_ids[:6],
+            doc_ids=selected_doc_ids,
             excerpt_budget=budget.max_raw_excerpt_chars_per_request,
         )
         bundle = self._bundle_from_memory(request, memory_bundle, status_if_empty="missing")
+        snippet_by_doc_id = self._raw_excerpt_snippets_by_doc_id(
+            conn,
+            book_id=book_id,
+            doc_ids=selected_doc_ids,
+            request=request,
+            limit=budget.max_raw_excerpt_chars_per_request,
+        )
+        if snippet_by_doc_id:
+            for item in bundle.evidence_items:
+                doc_id = item.get("doc_id")
+                if isinstance(doc_id, int) and doc_id in snippet_by_doc_id:
+                    item["summary"] = snippet_by_doc_id[doc_id]
+            for excerpt in bundle.excerpts:
+                doc_id = excerpt.get("doc_id")
+                if isinstance(doc_id, int) and doc_id in snippet_by_doc_id:
+                    excerpt["text"] = snippet_by_doc_id[doc_id]
         for excerpt in bundle.excerpts:
             excerpt["text"] = _safe_excerpt(str(excerpt.get("text") or ""), limit=budget.max_raw_excerpt_chars_per_request)
             excerpt["truncated"] = True
@@ -887,7 +1651,174 @@ class NarrativeInquiryBroker:
                 "affects_analysis": request.affects_analysis,
             }
         )
+        if selection_trace:
+            bundle.trace.append(selection_trace)
+        if snippet_by_doc_id:
+            bundle.trace.append(
+                {
+                    "operation": "raw_excerpt_query_snippets",
+                    "doc_ids": sorted(snippet_by_doc_id),
+                }
+            )
         return bundle
+
+    def _raw_excerpt_snippets_by_doc_id(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        doc_ids: Sequence[int],
+        request: NarrativeInquiryRequest,
+        limit: int,
+    ) -> dict[int, str]:
+        priority_terms, context_terms = self._raw_excerpt_filter_terms(request)
+        terms = [*priority_terms, *context_terms]
+        clean_ids = [int(item) for item in doc_ids if int(item) > 0]
+        if not clean_ids or not terms:
+            return {}
+        placeholders = ",".join("?" for _ in clean_ids)
+        rows = conn.execute(
+            f"""
+            SELECT doc_id, content
+            FROM documents
+            WHERE book_id = ? AND doc_id IN ({placeholders})
+            ORDER BY doc_id
+            """,
+            (book_id, *clean_ids),
+        ).fetchall()
+        snippets: dict[int, str] = {}
+        for row in rows:
+            text = str(row["content"] or "")
+            if not text:
+                continue
+            snippets[int(row["doc_id"])] = self._text_search_snippet(
+                text,
+                priority_terms or terms,
+                limit=max(80, int(limit or 80)),
+            )
+        return snippets
+
+    def _select_raw_excerpt_doc_ids(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        doc_ids: Sequence[int],
+        request: NarrativeInquiryRequest,
+        limit: int,
+    ) -> tuple[list[int], dict[str, Any]]:
+        clean_ids: list[int] = []
+        seen: set[int] = set()
+        for item in doc_ids:
+            try:
+                doc_id = int(item)
+            except (TypeError, ValueError):
+                continue
+            if doc_id <= 0 or doc_id in seen:
+                continue
+            seen.add(doc_id)
+            clean_ids.append(doc_id)
+        if len(clean_ids) <= limit:
+            return clean_ids[:limit], {
+                "operation": "raw_excerpt_doc_selection",
+                "strategy": "bounded_order",
+                "input_doc_count": len(clean_ids),
+                "selected_doc_ids": clean_ids[:limit],
+            }
+
+        priority_terms, _context_terms = self._raw_excerpt_filter_terms(request)
+        if not priority_terms:
+            return clean_ids[:limit], {
+                "operation": "raw_excerpt_doc_selection",
+                "strategy": "bounded_page_no_filter_terms",
+                "input_doc_count": len(clean_ids),
+                "selected_doc_ids": clean_ids[:limit],
+                "next_doc_offset": limit if len(clean_ids) > limit else None,
+            }
+
+        placeholders = ",".join("?" for _ in clean_ids)
+        rows = conn.execute(
+            f"""
+            SELECT doc_id, content, document_title
+            FROM documents
+            WHERE book_id = ? AND doc_id IN ({placeholders})
+            ORDER BY doc_id
+            """,
+            (book_id, *clean_ids),
+        ).fetchall()
+        row_by_id = {int(row["doc_id"]): row for row in rows}
+        matched_doc_ids: list[int] = []
+        matched_terms_by_doc_id: dict[int, list[str]] = {}
+        for doc_id in clean_ids:
+            row = row_by_id.get(doc_id)
+            text = " ".join([str(row["document_title"] or ""), str(row["content"] or "")]) if row is not None else ""
+            matched = self._matched_raw_excerpt_terms(text, priority_terms)
+            if matched:
+                matched_doc_ids.append(doc_id)
+                matched_terms_by_doc_id[doc_id] = matched
+
+        if not matched_doc_ids:
+            return clean_ids[:limit], {
+                "operation": "raw_excerpt_doc_selection",
+                "strategy": "bounded_page_no_filter_hits",
+                "input_doc_count": len(clean_ids),
+                "selected_doc_ids": clean_ids[:limit],
+                "filter_terms": priority_terms[:12],
+                "next_doc_offset": limit if len(clean_ids) > limit else None,
+            }
+
+        selected = matched_doc_ids[:limit]
+        return selected[:limit], {
+            "operation": "raw_excerpt_doc_selection",
+            "strategy": "bounded_keyword_filter_preserve_order",
+            "input_doc_count": len(clean_ids),
+            "matched_doc_count": len(matched_doc_ids),
+            "selected_doc_ids": selected[:limit],
+            "filter_terms": priority_terms[:12],
+            "matched_terms_by_doc_id": {str(doc_id): matched_terms_by_doc_id[doc_id][:8] for doc_id in selected[:limit]},
+            "next_match_offset": limit if len(matched_doc_ids) > limit else None,
+        }
+
+    def _raw_excerpt_filter_terms(self, request: NarrativeInquiryRequest) -> tuple[list[str], list[str]]:
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        filter_terms = [
+            *_string_list(metadata.get("terms") or metadata.get("keywords")),
+            *_string_list(request.excerpt_focus),
+            *self._text_search_terms(request),
+        ]
+        context_text = " ".join(
+            item
+            for item in [
+                request.purpose,
+                request.read_reason,
+                request.expected_confirmation,
+                request.affects_analysis,
+                request.expected_depth,
+            ]
+            if item
+        )
+        return self._dedupe_limited_terms(filter_terms, limit=24), self._dedupe_limited_terms(_tokens(context_text), limit=24)
+
+    def _dedupe_limited_terms(self, terms: Sequence[str], *, limit: int) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            text = _text(term)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+        return deduped[:limit]
+
+    def _matched_raw_excerpt_terms(self, text: str, terms: Sequence[str]) -> list[str]:
+        haystack = text.casefold()
+        matched: list[str] = []
+        for term in terms:
+            needle = term.casefold()
+            if not needle or needle not in haystack:
+                continue
+            matched.append(term)
+        return matched
 
     def _bundle_from_memory(
         self,
@@ -900,13 +1831,23 @@ class NarrativeInquiryBroker:
         fact_status = "confirmed" if memory_bundle.status == "committed" else "candidate"
         if not has_evidence:
             fact_status = "missing"
+        evidence_items = [dict(item) for item in memory_bundle.evidence_items]
+        if request.request_type == "chapter_summary":
+            for item in evidence_items:
+                item.setdefault("evidence_derivation", "summary_derived_chapter_summary")
+                item.setdefault("canonical_fact_status", "candidate_requires_raw_excerpt_for_conflicts")
+                item.setdefault(
+                    "evidence_warning",
+                    "Chapter summaries are compact narrative memory. If they conflict with other evidence on "
+                    "participants, counts, costs, causality, timeline, or scene presence, confirm with raw excerpt.",
+                )
         return EvidenceBundle(
             request_id=request.request_id,
             request_type=request.request_type,
             query=request.query or request.name or request.concept,
             status="found" if has_evidence else status_if_empty,  # type: ignore[arg-type]
             fact_status=fact_status,  # type: ignore[arg-type]
-            evidence_items=memory_bundle.evidence_items,
+            evidence_items=evidence_items,
             chapter_refs=memory_bundle.chapter_refs,
             source_doc_ids=memory_bundle.source_doc_ids,
             excerpts=[
@@ -951,6 +1892,14 @@ class NarrativeInquiryBroker:
             if item
         )
         query_tokens = _expanded_query_tokens(query_text)
+        metadata = request.metadata if isinstance(request.metadata, Mapping) else {}
+        story_events_offset_raw = _metadata_int(metadata, "story_events_offset", "experience_offset", default=-1)
+        story_events_offset = max(0, story_events_offset_raw)
+        story_events_char_budget = max(
+            160,
+            min(4096, _metadata_int(metadata, "story_events_char_budget", "experience_char_budget", default=4096)),
+        )
+        page_story_events = story_events_offset_raw >= 0
         try:
             rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
         except sqlite3.OperationalError:
@@ -997,14 +1946,31 @@ class NarrativeInquiryBroker:
                 limit=3,
                 item_char_limit=220,
             )
-            story_events = self._select_relevant_profile_items(
-                _json_list(row["story_events_json"]),
-                query_text=query_text,
-                query_tokens=query_tokens,
-                target_names=[target_text, canonical, *aliases],
-                limit=4,
-                item_char_limit=260,
-            )
+            all_story_events = _json_list(row["story_events_json"])
+            story_events_page = {}
+            if page_story_events:
+                story_events, story_events_page = self._select_profile_story_events_page(
+                    all_story_events,
+                    offset=story_events_offset,
+                    char_budget=story_events_char_budget,
+                )
+            else:
+                story_events = self._select_relevant_profile_items(
+                    all_story_events,
+                    query_text=query_text,
+                    query_tokens=query_tokens,
+                    target_names=[target_text, canonical, *aliases],
+                    limit=4,
+                    item_char_limit=260,
+                )
+                story_events_page = {
+                    "mode": "query_relevant",
+                    "total": len(all_story_events),
+                    "offset": 0,
+                    "next_offset": None,
+                    "has_more": False,
+                    "char_budget": 0,
+                }
             scored_matches.append(
                 (
                     score,
@@ -1020,6 +1986,7 @@ class NarrativeInquiryBroker:
                         "relationships": relationships,
                         "recent_activity": recent_activity,
                         "story_events": story_events,
+                        "story_events_page": story_events_page,
                         "evidence_level": str(row["evidence_level"] or "inferred"),
                         "match_score": score,
                     },
@@ -1047,7 +2014,15 @@ class NarrativeInquiryBroker:
                 for item in matches[:4]
             ],
             missing_facets=[] if matches else ["character_profile"],
-            trace=[{"operation": "character_profile_resolver", "source_scope": "character_memory"}],
+            trace=[
+                {
+                    "operation": "character_profile_resolver",
+                    "source_scope": "character_memory",
+                    "story_events_mode": "offset_page" if page_story_events else "query_relevant",
+                    "story_events_offset": story_events_offset if page_story_events else None,
+                    "story_events_char_budget": story_events_char_budget if page_story_events else None,
+                }
+            ],
         )
 
     def _select_relevant_profile_items(
@@ -1086,6 +2061,45 @@ class NarrativeInquiryBroker:
             _safe_excerpt(_profile_item_text(item), limit=item_char_limit)
             for _score, _index, item in selected
         ]
+
+    def _select_profile_story_events_page(
+        self,
+        items: Sequence[Any],
+        *,
+        offset: int,
+        char_budget: int,
+    ) -> tuple[list[str], dict[str, Any]]:
+        total = len(items)
+        start = min(max(0, offset), total)
+        selected: list[str] = []
+        used_chars = 0
+        next_offset = start
+        for index in range(start, total):
+            text = _profile_story_event_text(items[index])
+            if not text:
+                next_offset = index + 1
+                continue
+            if not selected and len(text) > char_budget:
+                selected.append(_safe_excerpt(text, limit=char_budget))
+                used_chars = len(selected[-1])
+                next_offset = index + 1
+                break
+            if selected and used_chars + len(text) > char_budget:
+                next_offset = index
+                break
+            selected.append(text)
+            used_chars += len(text)
+            next_offset = index + 1
+        has_more = next_offset < total
+        return selected, {
+            "mode": "offset_page",
+            "offset": start,
+            "next_offset": next_offset if has_more else None,
+            "total": total,
+            "has_more": has_more,
+            "char_budget": char_budget,
+            "chars_returned": used_chars,
+        }
 
     def _resolve_world_concept(
         self,

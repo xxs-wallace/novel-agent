@@ -9,9 +9,11 @@ from typing import Any, Mapping, Sequence, cast
 
 from ...runs.writer import RunWriter
 from ..repos.character_profiles_repo import CharacterProfilesRepo
+from ..schemas.narrative_inquiry_schema import AnalyzerBudget, NarrativeInquiryRequest
 from ..schemas.narrative_index_schema import IndexQueryBudget, IndexQueryIntent
 from ..schemas.narrative_memory_schema import MemoryCandidateSelection, MemoryQueryBudget, MemoryQueryState
 from ..schemas.orchestration_schema import DraftResearchDecision, DraftRewritePlan, OutlineResearchQuestion, OutlineResearchQuestionSet
+from .narrative_inquiry_broker import NarrativeInquiryBroker
 from .narrative_index_facade import NarrativeIndexFacade
 from .narrative_memory_query_service import NarrativeMemoryQueryService
 
@@ -249,8 +251,9 @@ class DraftResearchService:
             "forbidden_inputs": execution_input.get("forbidden_inputs") or [],
             "planned_character_constraints": execution_input.get("planned_character_constraints") or [],
             "queryable_resources": {
-                "character_profile": "按 character_id / name 查询人物档案与关键经历索引。",
-                "character_experience": "按 experience_id / outline_segment_id / source_doc_ids 展开人物关键经历。",
+                "text_search": "grep-like 词面定位；按 terms/match_mode/scopes 在 root summary、人物档案、outline segment、章节摘要、index card 中找关键词交集。",
+                "character_profile": "按 character_id / name 查询人物档案与关键经历索引；可用 metadata.story_events_offset/story_events_char_budget 分页读取经历。",
+                "character_experience": "按 experience_id / outline_segment_id / source_doc_ids 展开人物关键经历；也可用 metadata.story_events_offset 分页浏览人物经历。",
                 "story_detail": "通过 segment_group / outline_root -> outline_segment -> chapter -> document 查询历史剧情。",
                 "chapter_excerpt": "按 doc_id / source_doc_range 请求原始正文摘录。",
                 "scene_card": "查询 Narrative SceneCard / SourceArcMap / Creative KB 卡片。",
@@ -281,6 +284,10 @@ class DraftResearchService:
             system_prompt=(
                 "你是 Draft Research Loop。只返回 JSON。"
                 "你不能直接写正文；你要判断正文前还需要查哪些事实，并把已确认材料摘取进 notebook。"
+                "如果需要先定位历史剧情或关键词交集，优先请求 text_search；定位失败的分支不要写成事实。"
+                "如果当前章节依赖人物当前状态、关系债务、共同经历、声音/行为边界或连续性约束，"
+                "应通过 character_profile/character_experience 的 metadata.story_events_offset 分页翻阅经历；"
+                "metadata.story_events_char_budget 不得超过 4096，并根据 story_events_page.next_offset 继续。"
                 "剧情查询入口只能使用 segment_group / outline_root、outline_segment、chapter、document；"
                 "不要使用 event_summary/event 作为 Memory 主路径。"
             ),
@@ -293,10 +300,16 @@ class DraftResearchService:
                         "status": "continue_research | ready_for_draft | needs_user_input | replan_requested | blocked",
                         "requests": [
                             {
-                                "type": "character_profile | character_experience | story_detail | chapter_excerpt | scene_card | world_concept | structure_pattern",
+                                "type": "text_search | character_profile | character_experience | story_detail | chapter_excerpt | scene_card | world_concept | structure_pattern",
                                 "query": "...",
                                 "purpose": "...",
                                 "priority": "high | medium | low",
+                                "metadata": {
+                                    "terms": ["关键词A", "关键词B"],
+                                    "match_mode": "all",
+                                    "story_events_offset": 0,
+                                    "story_events_char_budget": 4096,
+                                },
                             }
                         ],
                         "notebook_updates": {
@@ -415,6 +428,8 @@ class DraftResearchService:
 
     def _execute_request(self, conn: sqlite3.Connection, *, book_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
         request_type = _text(request.get("type") or request.get("request_type"))
+        if request_type == "text_search":
+            return self._query_text_search(conn, book_id=book_id, request=request)
         if request_type == "character_profile":
             return self._query_character_profile(conn, book_id=book_id, request=request)
         if request_type == "character_experience":
@@ -426,6 +441,45 @@ class DraftResearchService:
         if request_type in {"scene_card", "structure_pattern", "world_concept"}:
             return self._query_index_cards(conn, book_id=book_id, request=request, request_type=request_type)
         return {"type": request_type or "unknown", "status": "skipped", "request": dict(request), "reason": "unsupported_request_type"}
+
+    def _query_text_search(self, conn: sqlite3.Connection, *, book_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = dict(request.get("metadata") or {}) if isinstance(request.get("metadata"), Mapping) else {}
+        if not metadata.get("terms"):
+            metadata["terms"] = self._query_tokens(_text(request.get("query") or request.get("purpose")))[:6]
+        metadata.setdefault("match_mode", "all")
+        metadata.setdefault(
+            "scopes",
+            ["memory_roots", "outline_segments", "chapter_summaries", "character_profiles", "index_cards"],
+        )
+        inquiry_request = NarrativeInquiryRequest(
+            request_id=str(request.get("request_id") or request.get("id") or "draft-text-search"),
+            request_type="text_search",
+            query=_text(request.get("query") or request.get("purpose")),
+            purpose=_text(request.get("purpose")),
+            priority=cast(Any, _text(request.get("priority")) or "medium"),
+            expected_depth="locator",
+            source_doc_ids=_int_list(request.get("source_doc_ids") or request.get("doc_ids")),
+            document_ids=_int_list(request.get("document_ids")),
+            metadata=metadata,
+        )
+        broker = NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.memory_query_service,
+            character_profiles_repo=self.character_profiles_repo,
+            narrative_index_facade=self.narrative_index_facade,
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id=book_id,
+            request=inquiry_request,
+            budget=AnalyzerBudget(max_total_requests=1, max_requests_per_round=1, max_evidence_chars_per_request=1800),
+        )
+        return {
+            "type": "text_search",
+            "status": "answered" if bundle.status == "found" else "missing",
+            "request": dict(request),
+            "evidence": bundle.to_dict(),
+        }
 
     def _query_story_detail(self, conn: sqlite3.Connection, *, book_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
         query = _text(request.get("query") or request.get("purpose"))
@@ -521,6 +575,36 @@ class DraftResearchService:
         return self.memory_query_service.resolve_document_refs(conn, book_id=book_id, doc_ids=doc_ids, excerpt_budget=1800).to_dict()
 
     def _query_character_profile(self, conn: sqlite3.Connection, *, book_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = dict(request.get("metadata") or {}) if isinstance(request.get("metadata"), Mapping) else {}
+        if "story_events_offset" in metadata or "experience_offset" in metadata:
+            inquiry_request = NarrativeInquiryRequest(
+                request_id=str(request.get("request_id") or request.get("id") or "draft-character-profile"),
+                request_type="character_profile",
+                query=_text(request.get("query") or request.get("name") or request.get("character_id")),
+                purpose=_text(request.get("purpose")),
+                priority=cast(Any, _text(request.get("priority")) or "medium"),
+                name=_text(request.get("name") or request.get("character_id")),
+                metadata=metadata,
+            )
+            broker = NarrativeInquiryBroker(
+                repo_root=self.repo_root,
+                memory_query_service=self.memory_query_service,
+                character_profiles_repo=self.character_profiles_repo,
+                narrative_index_facade=self.narrative_index_facade,
+            )
+            bundle = broker.resolve_one(
+                conn,
+                book_id=book_id,
+                request=inquiry_request,
+                budget=AnalyzerBudget(max_total_requests=1, max_requests_per_round=1, max_evidence_chars_per_request=2400),
+            )
+            return {
+                "type": "character_profile",
+                "status": "answered" if bundle.status == "found" else "missing",
+                "request": dict(request),
+                "profiles": [dict(item) for item in bundle.evidence_items],
+                "evidence": bundle.to_dict(),
+            }
         query = _text(request.get("query") or request.get("name") or request.get("character_id"))
         rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
         profiles = [self._profile_from_row(row) for row in rows]
@@ -528,6 +612,39 @@ class DraftResearchService:
         return {"type": "character_profile", "status": "answered" if matches else "missing", "request": dict(request), "profiles": matches}
 
     def _query_character_experience(self, conn: sqlite3.Connection, *, book_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
+        metadata = dict(request.get("metadata") or {}) if isinstance(request.get("metadata"), Mapping) else {}
+        if "story_events_offset" in metadata or "experience_offset" in metadata:
+            paged = self._query_character_profile(
+                conn,
+                book_id=book_id,
+                request={
+                    **dict(request),
+                    "type": "character_profile",
+                    "request_type": "character_profile",
+                    "name": request.get("name") or request.get("character_id") or request.get("query"),
+                    "metadata": metadata,
+                },
+            )
+            experiences: list[dict[str, Any]] = []
+            for profile in paged.get("profiles") or []:
+                if not isinstance(profile, Mapping):
+                    continue
+                for event in profile.get("story_events") or []:
+                    experiences.append(
+                        {
+                            "canonical_name": profile.get("canonical_name"),
+                            "summary": event,
+                            "story_events_page": profile.get("story_events_page") or {},
+                        }
+                    )
+            return {
+                "type": "character_experience",
+                "status": "answered" if experiences else "missing",
+                "request": dict(request),
+                "experiences": experiences,
+                "profile_pages": paged.get("profiles") or [],
+                "evidence": paged.get("evidence") or {},
+            }
         query = json.dumps(request, ensure_ascii=False)
         profiles = [self._profile_from_row(row) for row in self.character_profiles_repo.list_by_book(conn, book_id=book_id)]
         experiences: list[dict[str, Any]] = []
@@ -737,21 +854,75 @@ class DraftResearchService:
                 "canonical_name": item.get("canonical_name") or "",
                 "aliases": item.get("aliases") or [],
                 "summary": _safe_excerpt(_text(item.get("profile_summary_md")), limit=260),
-                "key_experience_index": [
-                    {
-                        "experience_id": event.get("experience_id") or event.get("event_id") or "",
-                        "outline_segment_id": event.get("outline_segment_id") or "",
-                        "label": event.get("label") or "",
-                        "summary": _safe_excerpt(_text(event.get("summary")), limit=180),
-                        "source_doc_ids": event.get("source_doc_ids") or [],
-                        "source_doc_range": event.get("source_doc_range") or "",
-                    }
-                    for event in (item.get("story_events") or [])[:6]
-                    if isinstance(event, Mapping)
-                ],
+                **self._character_experience_index(item, matcher_text=matcher_text, limit=6),
             }
             for item in selected
         ]
+
+    def _character_experience_index(
+        self,
+        profile: Mapping[str, Any],
+        *,
+        matcher_text: str,
+        limit: int,
+    ) -> dict[str, Any]:
+        events = [item for item in (profile.get("story_events") or []) if isinstance(item, Mapping)]
+        selected = self._select_profile_events_for_prompt(events, matcher_text=matcher_text, limit=limit)
+        return {
+            "key_experience_index": [self._prompt_experience_index_item(event) for event in selected],
+            "story_events_page": {
+                "mode": "relevance_and_recent_index",
+                "offset": 0,
+                "next_offset": len(selected) if len(selected) < len(events) else None,
+                "total": len(events),
+                "has_more": len(selected) < len(events),
+                "returned": len(selected),
+                "page_read_instruction": (
+                    "Use character_profile or character_experience with metadata.story_events_offset "
+                    "and metadata.story_events_char_budget <= 4096 to page through this character's chronology."
+                ),
+            },
+        }
+
+    def _select_profile_events_for_prompt(
+        self,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        matcher_text: str,
+        limit: int,
+    ) -> list[Mapping[str, Any]]:
+        if not events or limit <= 0:
+            return []
+        tokens = self._query_tokens(matcher_text)
+        scored: list[tuple[int, int, Mapping[str, Any]]] = []
+        for index, event in enumerate(events):
+            rendered = json.dumps(event, ensure_ascii=False)
+            score = sum(4 for token in tokens if token and token in rendered)
+            if event.get("source_doc_ids") or event.get("source_doc_range") or event.get("outline_segment_id"):
+                score += 1
+            if index >= max(0, len(events) - limit):
+                score += 2
+            scored.append((score, index, event))
+        selected: list[Mapping[str, Any]] = []
+        seen: set[int] = set()
+        for _score, index, event in sorted(scored, key=lambda item: (-item[0], item[1])):
+            if index in seen:
+                continue
+            seen.add(index)
+            selected.append(event)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def _prompt_experience_index_item(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "experience_id": event.get("experience_id") or event.get("event_id") or "",
+            "outline_segment_id": event.get("outline_segment_id") or "",
+            "label": event.get("label") or "",
+            "summary": _safe_excerpt(_text(event.get("summary")), limit=180),
+            "source_doc_ids": event.get("source_doc_ids") or [],
+            "source_doc_range": event.get("source_doc_range") or "",
+        }
 
     def _profile_from_row(self, row: sqlite3.Row) -> dict[str, Any]:
         json_fields = {

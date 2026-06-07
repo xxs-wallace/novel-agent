@@ -853,6 +853,117 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
     assert outcome_result.results[0]["outcome"]
 
 
+def test_outline_research_character_profile_pages_story_events_by_offset(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-character-page"
+    story_events = [
+        {"label": f"经历{i}", "summary": f"沈青第{i}段经历。", "source_doc_ids": [i + 1]}
+        for i in range(10)
+    ]
+    story_events[8] = {
+        "label": "后段关键经历",
+        "summary": "沈青在后段经历中确认与顾迟只能有限合作。",
+        "source_doc_ids": [9],
+        "source_doc_range": "9",
+        "outline_segment_id": "outline-segment:chapter-9:docs-9",
+    }
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_assets(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_document(conn, book_id=book_id)
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "canonical_name": "沈青",
+                "aliases": [],
+                "profile_summary_md": "沈青长期调查旧案。",
+                "story_events": story_events,
+                "evidence_level": "confirmed",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        broker = OutlineResearchContextBroker(repo_root=orchestrator.repo_root)
+        [result] = broker.resolve_requests(
+            conn,
+            book_id=book_id,
+            requests=[
+                ResearchRequest(
+                    request_id="char-page",
+                    request_type="character_profile",
+                    name="沈青",
+                    query="沈青经历分页",
+                    priority="high",
+                    metadata={"story_events_offset": 8, "story_events_char_budget": 99999},
+                )
+            ],
+            budget=ResearchBudget(max_total_requests=1, max_return_tokens_per_request=900),
+        )
+
+    assert result.request_type == "character_profile"
+    assert result.results[0]["story_events"][0].startswith("后段关键经历")
+    assert result.results[0]["story_events_page"]["offset"] == 8
+    assert result.results[0]["story_events_page"]["char_budget"] == 4096
+
+
+def test_outline_research_character_profile_pagination_metadata_is_not_deduped(tmp_path: Path) -> None:
+    db, orchestrator = _build_db_and_orchestrator(tmp_path)
+    book_id = "book-character-dedupe"
+    story_events = [{"label": f"经历{i}", "summary": f"沈青第{i}段经历。"} for i in range(4)]
+    with db.connect() as conn:
+        db.init_schema(conn)
+        init_creative_kb_schema(conn)
+        _seed_assets(conn, book_id=book_id, repo_root=orchestrator.repo_root)
+        _seed_document(conn, book_id=book_id)
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": book_id,
+                "canonical_name": "沈青",
+                "aliases": [],
+                "profile_summary_md": "沈青长期调查旧案。",
+                "story_events": story_events,
+                "evidence_level": "confirmed",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        broker = OutlineResearchContextBroker(repo_root=orchestrator.repo_root)
+        results = broker.resolve_requests(
+            conn,
+            book_id=book_id,
+            requests=[
+                ResearchRequest(
+                    request_id="char-page-0",
+                    request_type="character_profile",
+                    name="沈青",
+                    query="沈青经历分页",
+                    priority="high",
+                    metadata={"story_events_offset": 0, "story_events_char_budget": 80},
+                ),
+                ResearchRequest(
+                    request_id="char-page-2",
+                    request_type="character_profile",
+                    name="沈青",
+                    query="沈青经历分页",
+                    priority="high",
+                    metadata={"story_events_offset": 2, "story_events_char_budget": 80},
+                ),
+            ],
+            budget=ResearchBudget(max_total_requests=2, max_return_tokens_per_request=900),
+        )
+
+    assert [item.request_id for item in results] == ["char-page-0", "char-page-2"]
+    assert results[0].results[0]["story_events_page"]["offset"] == 0
+    assert results[1].results[0]["story_events_page"]["offset"] == 2
+
+
 def test_outline_research_story_detail_uses_narrative_scene_cards_first(tmp_path: Path) -> None:
     db, orchestrator = _build_db_and_orchestrator(tmp_path)
     book_id = "book-scene-cards"

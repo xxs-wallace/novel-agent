@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping, Sequence, cast
 
@@ -8,6 +9,7 @@ NarrativeInquiryRequestType = Literal[
     "story_detail",
     "fact_check",
     "related_documents",
+    "text_search",
     "chapter_summary",
     "character_profile",
     "world_concept",
@@ -37,12 +39,14 @@ AnalyzerLoopStatus = Literal[
     "failed",
     "blocked",
 ]
+AnalyzerAnalysisType = Literal["outline_analysis", "relationship_analysis"]
 
 
 REQUEST_TYPES = {
     "story_detail",
     "fact_check",
     "related_documents",
+    "text_search",
     "chapter_summary",
     "character_profile",
     "world_concept",
@@ -72,6 +76,7 @@ LOOP_STATUSES = {
     "failed",
     "blocked",
 }
+ANALYSIS_TYPES = {"outline_analysis", "relationship_analysis"}
 
 
 def _text(value: object) -> str:
@@ -200,7 +205,10 @@ class NarrativeInquiryRequest:
     @property
     def dedupe_key(self) -> str:
         target = self.name or self.concept or self.query or ",".join(self.chapter_refs) or ",".join(map(str, self.document_ids))
-        return f"{self.request_type}:{target.lower()}"
+        metadata_key = ""
+        if self.metadata:
+            metadata_key = json.dumps(self.metadata, ensure_ascii=False, sort_keys=True)
+        return f"{self.request_type}:{target.lower()}:{metadata_key}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -327,7 +335,13 @@ class AnalyzerBudget:
     max_raw_excerpt_chars_per_request: int = 3000
     max_evidence_chars_per_request: int = 2500
     max_prompt_bytes: int = 65536
+    triage_page_bytes: int = 16384
     max_json_retries: int = 1
+    prompt_timeout_seconds: int = 120
+    gate_prompt_timeout_seconds: int | None = 60
+    loop_prompt_timeout_seconds: int | None = None
+    triage_prompt_timeout_seconds: int | None = None
+    final_prompt_timeout_seconds: int | None = 300
 
     def __post_init__(self) -> None:
         self.max_rounds = max(1, int(self.max_rounds or 1))
@@ -337,16 +351,88 @@ class AnalyzerBudget:
         self.max_raw_excerpt_chars_per_request = max(1, int(self.max_raw_excerpt_chars_per_request or 1))
         self.max_evidence_chars_per_request = max(160, int(self.max_evidence_chars_per_request or 160))
         self.max_prompt_bytes = max(4096, int(self.max_prompt_bytes or 4096))
+        self.triage_page_bytes = max(2048, int(self.triage_page_bytes or 2048))
         self.max_json_retries = max(0, int(self.max_json_retries or 0))
+        self.prompt_timeout_seconds = max(1, int(self.prompt_timeout_seconds or 1))
+        self.gate_prompt_timeout_seconds = self._normalize_optional_timeout(self.gate_prompt_timeout_seconds)
+        self.loop_prompt_timeout_seconds = self._normalize_optional_timeout(self.loop_prompt_timeout_seconds)
+        self.triage_prompt_timeout_seconds = self._normalize_optional_timeout(self.triage_prompt_timeout_seconds)
+        self.final_prompt_timeout_seconds = self._normalize_optional_timeout(self.final_prompt_timeout_seconds)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @staticmethod
+    def _normalize_optional_timeout(value: int | None) -> int | None:
+        if value is None:
+            return None
+        return max(1, int(value or 1))
+
+
+@dataclass(slots=True)
+class AnalyzerIntent:
+    analysis_type: AnalyzerAnalysisType
+    confidence: float = 0.0
+    matched_signals: list[str] = field(default_factory=list)
+    required_evidence_plan: list[str] = field(default_factory=list)
+    secondary_analysis_types: list[AnalyzerAnalysisType] = field(default_factory=list)
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        analysis_type = _text(self.analysis_type).lower()
+        if analysis_type not in ANALYSIS_TYPES:
+            raise ValueError("analysis_type must be outline_analysis or relationship_analysis")
+        self.analysis_type = cast(AnalyzerAnalysisType, analysis_type)
+        self.confidence = max(0.0, min(1.0, float(self.confidence or 0.0)))
+        self.matched_signals = _string_list(self.matched_signals)
+        self.required_evidence_plan = _string_list(self.required_evidence_plan)
+        self.secondary_analysis_types = [
+            cast(AnalyzerAnalysisType, item)
+            for item in _string_list(self.secondary_analysis_types)
+            if item in ANALYSIS_TYPES and item != self.analysis_type
+        ]
+        self.notes = _text(self.notes)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "analysis_type": self.analysis_type,
+            "confidence": self.confidence,
+            "matched_signals": list(self.matched_signals),
+            "required_evidence_plan": list(self.required_evidence_plan),
+            "secondary_analysis_types": list(self.secondary_analysis_types),
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AnalyzerIntent":
+        analysis_type = str(data.get("analysis_type") or data.get("type") or "")
+        return cls(
+            analysis_type=cast(AnalyzerAnalysisType, analysis_type),
+            confidence=float(data.get("confidence") or 0.0),
+            matched_signals=[str(item) for item in (data.get("matched_signals") or [])],
+            required_evidence_plan=[
+                str(item)
+                for item in (
+                    data.get("required_evidence_plan")
+                    or data.get("evidence_plan")
+                    or data.get("initial_evidence_plan")
+                    or []
+                )
+            ],
+            secondary_analysis_types=[
+                cast(AnalyzerAnalysisType, str(item))
+                for item in (data.get("secondary_analysis_types") or data.get("secondary_types") or [])
+            ],
+            notes=str(data.get("notes") or ""),
+        )
 
 
 @dataclass(slots=True)
 class AnalyzerSeedPacket:
     book_id: str
     user_question: str
+    analysis_type: AnalyzerAnalysisType | None = None
+    intent_gate: dict[str, Any] = field(default_factory=dict)
     conversation_brief: str = ""
     modeling_status: dict[str, bool] = field(default_factory=dict)
     story_overview: str = ""
@@ -361,6 +447,12 @@ class AnalyzerSeedPacket:
     def __post_init__(self) -> None:
         self.book_id = _text(self.book_id)
         self.user_question = _text(self.user_question)
+        if self.analysis_type is not None:
+            analysis_type = _text(self.analysis_type).lower()
+            if analysis_type not in ANALYSIS_TYPES:
+                raise ValueError("analysis_type must be outline_analysis or relationship_analysis")
+            self.analysis_type = cast(AnalyzerAnalysisType, analysis_type)
+        self.intent_gate = dict(self.intent_gate) if isinstance(self.intent_gate, Mapping) else {}
         self.conversation_brief = _text(self.conversation_brief)
         self.modeling_status = {str(key): bool(value) for key, value in self.modeling_status.items()}
         self.story_overview = _text(self.story_overview)
@@ -378,6 +470,8 @@ class AnalyzerSeedPacket:
         return {
             "book_id": self.book_id,
             "user_question": self.user_question,
+            "analysis_type": self.analysis_type,
+            "intent_gate": dict(self.intent_gate),
             "conversation_brief": self.conversation_brief,
             "modeling_status": dict(self.modeling_status),
             "story_overview": self.story_overview,
@@ -427,7 +521,9 @@ class AnalyzerNotebook:
     def add_evidence(self, bundles: Sequence[EvidenceBundle]) -> None:
         self.evidence_bundles.extend(bundles)
         for bundle in bundles:
-            if bundle.fact_status in {"missing", "insufficient_context", "conflicting"}:
+            if bundle.status == "missing" or bundle.fact_status in {"missing", "insufficient_context"}:
+                continue
+            if bundle.fact_status == "conflicting":
                 gap = bundle.query or bundle.request_id
                 if gap and gap not in self.uncertain_gaps:
                     self.uncertain_gaps.append(gap)

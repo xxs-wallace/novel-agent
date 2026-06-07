@@ -21,8 +21,9 @@ from ..runner.creative_kb_benchmark_runner import (
     CreativeKBBenchmarkRunner,
     CreativeKBBenchmarkSummaryPresenter,
 )
+from ..schemas import AnalyzerBudget
 from ..services.narrative_scene_indexer_service import NarrativeSceneIndexerService
-from ..services.outline_analyzer_service import OutlineAnalyzerService
+from ..services.outline_analyzer_service import AnalyzerService
 from ..services.paragraph_benchmark_service import ParagraphBenchmarkService
 from ..services.smoke_benchmark_service import AgenticSmokeBenchmarkService
 from .events import RunEventStream
@@ -44,6 +45,18 @@ def _env_optional_int(name: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    value = _env_optional_text(name)
+    if value is None:
+        return None
+    normalized = value.lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,12 +368,18 @@ class WorkflowFacade:
         question: str,
         conversation_history: list[Mapping[str, str]] | None = None,
         api_key: str | None = None,
+        prompt_trace_recorder: Any | None = None,
     ) -> dict[str, Any]:
         db_path = self.db_path_for_book(book_id)
         if not db_path.exists():
             raise FileNotFoundError(f"close-read sqlite not found: {db_path}")
         model_client = self._build_outline_analyzer_model(api_key=api_key)
-        service = OutlineAnalyzerService(repo_root=self.repo_root, model_client=model_client)
+        service = AnalyzerService(
+            repo_root=self.repo_root,
+            model_client=model_client,
+            budget=self._build_outline_analyzer_budget(),
+            prompt_trace_recorder=prompt_trace_recorder,
+        )
         db = NovelAgentDB(db_path)
         with db.connect() as conn:
             result = service.chat(
@@ -381,6 +400,10 @@ class WorkflowFacade:
         resolved_api_key = str(api_key or os.getenv("DEEPSEEK_API_KEY") or "").strip()
         if not resolved_api_key:
             return None
+        thinking = _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING") or "enabled"
+        reasoning_effort = _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT") or "high"
+        if thinking.strip().lower() == "disabled":
+            reasoning_effort = None
         return JsonModelClient(
             ModelSettings(
                 model_type="OpenAIModel",
@@ -391,15 +414,38 @@ class WorkflowFacade:
                 base_url=_env_optional_text("NOVEL_AGENT_ANALYZER_BASE_URL") or "https://api.deepseek.com",
                 api_key=resolved_api_key,
                 api_key_env="DEEPSEEK_API_KEY",
-                retry_without_thinking_on_failure=True,
-                thinking=_env_optional_text("NOVEL_AGENT_ANALYZER_THINKING") or "enabled",
-                reasoning_effort=_env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT") or "high",
-                include_reasoning_content=bool(
-                    _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING")
-                    or _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT")
-                ),
+                timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_TIMEOUT_SECONDS") or 120,
+                request_retry_attempts=_env_optional_int("NOVEL_AGENT_ANALYZER_REQUEST_RETRY_ATTEMPTS")
+                or _env_optional_int("NOVEL_AGENT_ANALYZER_RETRY_ATTEMPTS")
+                or 1,
+                request_retry_backoff_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_RETRY_BACKOFF_SECONDS") or 1,
+                retry_without_thinking_on_failure=_env_optional_bool("NOVEL_AGENT_ANALYZER_RETRY_WITHOUT_THINKING") or False,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                include_reasoning_content=thinking.strip().lower() != "disabled" and bool(thinking or reasoning_effort),
                 dry_run=False,
             )
+        )
+
+    def _build_outline_analyzer_budget(self) -> AnalyzerBudget:
+        return AnalyzerBudget(
+            max_rounds=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_ROUNDS") or 5,
+            max_requests_per_round=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_REQUESTS_PER_ROUND") or 4,
+            max_total_requests=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_TOTAL_REQUESTS") or 16,
+            max_raw_excerpt_requests=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_RAW_EXCERPT_REQUESTS") or 6,
+            max_raw_excerpt_chars_per_request=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_RAW_EXCERPT_CHARS") or 3000,
+            max_evidence_chars_per_request=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_EVIDENCE_CHARS") or 2500,
+            max_prompt_bytes=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_PROMPT_BYTES") or 65536,
+            max_json_retries=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_JSON_RETRIES") or 1,
+            prompt_timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_PROMPT_TIMEOUT_SECONDS")
+            or _env_optional_int("NOVEL_AGENT_ANALYZER_TIMEOUT_SECONDS")
+            or 120,
+            gate_prompt_timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_GATE_PROMPT_TIMEOUT_SECONDS")
+            or _env_optional_int("NOVEL_AGENT_ANALYZER_INTENT_GATE_TIMEOUT_SECONDS")
+            or 60,
+            loop_prompt_timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_LOOP_PROMPT_TIMEOUT_SECONDS"),
+            triage_prompt_timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_TRIAGE_PROMPT_TIMEOUT_SECONDS"),
+            final_prompt_timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_FINAL_PROMPT_TIMEOUT_SECONDS") or 300,
         )
 
     def start_read_pipeline(

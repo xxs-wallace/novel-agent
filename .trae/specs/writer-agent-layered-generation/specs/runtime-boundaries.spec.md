@@ -68,6 +68,7 @@ Draft Research Loop SHALL 使用 `draft_seed_packet.json` 作为初始输入。�
 
 Draft Research Loop 可发起以下结构化请求：
 
+- `text_search`
 - `character_profile`
 - `character_experience`
 - `story_detail`
@@ -78,6 +79,8 @@ Draft Research Loop 可发起以下结构化请求：
 - `WriterQuestionSet`
 
 本地 Agent / Context Broker SHALL 负责查询执行、预算裁剪、来源标注、泄漏审计和 trace 落盘。模型负责选择需要查看的候选、判断信息是否足够，以及输出下一步状态。
+
+当 Draft Research Loop 使用 `character_profile` 或 `character_experience` 查询人物经历时，SHOULD 支持 `metadata.story_events_offset` / `metadata.story_events_char_budget` 分页读取 `story_events_json`，单页不超过 4096 字符，并返回 `story_events_page` 供后续继续读取。
 
 Draft Research Loop 的出口只有：
 

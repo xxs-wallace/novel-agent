@@ -16,7 +16,7 @@ from ..llm import JsonModelClient, ModelSettings
 from ..repos.db import NovelAgentDB
 from ..schemas.narrative_inquiry_schema import AnalyzerBudget
 from ..utils.json_utils import extract_json_blob
-from .outline_analyzer_service import OutlineAnalyzerService
+from .outline_analyzer_service import AnalyzerService
 
 
 DEFAULT_ANALYZER_BENCHMARK_TIMEOUT_SECONDS = 600
@@ -225,14 +225,28 @@ class _RecordingModelClient:
     def settings(self) -> Any:
         return getattr(self.wrapped, "settings", None)
 
-    def generate_text(self, *, system_prompt: str, user_prompt: str) -> str:
+    def generate_text(self, *, system_prompt: str, user_prompt: str, timeout_seconds: int | None = None, **model_kwargs: Any) -> str:
         stage = self._stage(system_prompt)
         started_monotonic = time.monotonic()
         started_at = _utc_now()
         error = ""
         response = ""
         try:
-            response = str(self.wrapped.generate_text(system_prompt=system_prompt, user_prompt=user_prompt))
+            try:
+                response = str(
+                    self.wrapped.generate_text(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        timeout_seconds=timeout_seconds,
+                        **model_kwargs,
+                    )
+                )
+            except TypeError as exc:
+                unsupported_timeout = "timeout_seconds" in str(exc)
+                unsupported_model_kwargs = any(key in str(exc) for key in model_kwargs)
+                if not (unsupported_timeout or unsupported_model_kwargs):
+                    raise
+                response = str(self.wrapped.generate_text(system_prompt=system_prompt, user_prompt=user_prompt))
             return response
         except Exception as exc:  # noqa: BLE001 - benchmark must persist failed call stats.
             error = str(exc)
@@ -253,8 +267,12 @@ class _RecordingModelClient:
             )
 
     def _stage(self, system_prompt: str) -> str:
+        if "AnalyzerIntentGate" in system_prompt:
+            return "intent_gate"
         if "evidence triage" in system_prompt:
             return "triage"
+        if "answer readiness" in system_prompt:
+            return "readiness"
         if "每轮只返回 JSON" in system_prompt:
             return "loop"
         if "用户可读中文分析" in system_prompt:
@@ -360,7 +378,7 @@ class OutlineAnalyzerBenchmarkService:
         _write_json(run_dir / "baseline" / "raw_response.json", baseline_raw)
 
         recording_client = _RecordingModelClient(model_client)
-        analyzer_service = OutlineAnalyzerService(
+        analyzer_service = AnalyzerService(
             repo_root=self.repo_root,
             model_client=recording_client,
             budget=analyzer_budget,
@@ -500,7 +518,7 @@ class OutlineAnalyzerBenchmarkService:
         model_client: Any,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         system_prompt = (
-            "你是 Outline Analyzer smoke benchmark 的独立 Judge。比较 baseline answer 与 Analyzer answer。\n"
+            "你是 Analyzer smoke benchmark 的独立 Judge。比较 baseline answer 与 Analyzer answer。\n"
             "你不能读取完整原文；baseline answer 只是参照。请按题型评分，并惩罚幻觉、过度断言和证据缺失。\n"
             "`hallucination_or_overclaim_penalty` 是反向惩罚分：0 表示没有发现幻觉或过度断言，"
             "5 表示严重幻觉或严重过度断言；不要把它当作质量分。\n"

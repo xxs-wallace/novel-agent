@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, replace
 from typing import Any, Callable, cast
-import time
 
 from .bootstrap import read_api_key
 from .utils.json_utils import extract_json_blob
+
 
 JSON_RETRY_ATTEMPTS = 3
 DEFAULT_REQUEST_RETRY_ATTEMPTS = 3
@@ -67,7 +69,9 @@ class JsonModelClient:
         if settings.model_type == "OpenAIModel":
             from smolagents.models import OpenAIModel
 
-            extra_body = {"thinking": {"type": settings.thinking}} if settings.thinking else None
+            thinking = str(settings.thinking or "").strip()
+            thinking_disabled = thinking.lower() == "disabled"
+            extra_body = {"thinking": {"type": thinking}} if thinking and thinking.lower() != "disabled" else None
             return OpenAIModel(
                 model_id=settings.model_name,
                 api_base=settings.base_url,
@@ -79,9 +83,9 @@ class JsonModelClient:
                 temperature=settings.temperature,
                 max_tokens=settings.max_output_tokens,
                 timeout=settings.timeout_seconds,
-                reasoning_effort=settings.reasoning_effort,
+                reasoning_effort=None if thinking_disabled else settings.reasoning_effort,
                 extra_body=extra_body,
-                include_reasoning_content=settings.include_reasoning_content,
+                include_reasoning_content=False if thinking_disabled else settings.include_reasoning_content,
             )
         from smolagents.cli import load_model
 
@@ -100,6 +104,9 @@ class JsonModelClient:
         user_prompt: str,
         fallback_text: str | None = None,
         timeout_seconds: int | None = None,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        include_reasoning_content: bool | None = None,
     ) -> str:
         if self.settings.dry_run:
             if fallback_text is None:
@@ -117,10 +124,16 @@ class JsonModelClient:
         backoff = max(0.0, float(self.settings.request_retry_backoff_seconds))
         prompt_chars = len(system_prompt) + len(user_prompt)
         request_timeout_seconds = max(1, int(timeout_seconds or self.settings.timeout_seconds or 1))
+        active_settings = self._settings_for_call(
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            include_reasoning_content=include_reasoning_content,
+        )
+        model = self.model if active_settings is self.settings else self._build_model(active_settings)
 
         try:
             text = self._generate_text_with_retries(
-                model=self.model,
+                model=model,
                 messages=messages,
                 attempts=attempts,
                 backoff=backoff,
@@ -129,14 +142,14 @@ class JsonModelClient:
                 timeout_seconds=request_timeout_seconds,
             )
         except Exception as primary_error:
-            if not self._should_retry_without_thinking():
+            if not self._should_retry_without_thinking(active_settings):
                 raise
             logger.warning(
                 "LLM request exhausted primary attempts for model=%s; retrying with thinking disabled: %s",
                 self.settings.model_name,
                 primary_error,
             )
-            fallback_settings = self._settings_without_thinking()
+            fallback_settings = self._settings_without_thinking(active_settings)
             fallback_model = self._build_model(fallback_settings)
             return self._generate_text_with_retries(
                 model=fallback_model,
@@ -147,13 +160,13 @@ class JsonModelClient:
                 retry_label="thinking_disabled",
                 timeout_seconds=request_timeout_seconds,
             )
-        if text or not self._should_retry_without_thinking():
+        if text or not self._should_retry_without_thinking(active_settings):
             return text
         logger.warning(
             "LLM returned empty text after primary attempts for model=%s; retrying with thinking disabled",
             self.settings.model_name,
         )
-        fallback_settings = self._settings_without_thinking()
+        fallback_settings = self._settings_without_thinking(active_settings)
         fallback_model = self._build_model(fallback_settings)
         return self._generate_text_with_retries(
             model=fallback_model,
@@ -163,6 +176,33 @@ class JsonModelClient:
             prompt_chars=prompt_chars,
             retry_label="thinking_disabled",
             timeout_seconds=request_timeout_seconds,
+        )
+
+    def _settings_for_call(
+        self,
+        *,
+        thinking: str | None,
+        reasoning_effort: str | None,
+        include_reasoning_content: bool | None,
+    ) -> ModelSettings:
+        if thinking is None and reasoning_effort is None and include_reasoning_content is None:
+            return self.settings
+        next_thinking = self.settings.thinking if thinking is None else thinking
+        next_reasoning_effort = self.settings.reasoning_effort if reasoning_effort is None else reasoning_effort
+        next_include_reasoning = (
+            self.settings.include_reasoning_content
+            if include_reasoning_content is None
+            else include_reasoning_content
+        )
+        if str(next_thinking or "").strip().lower() == "disabled":
+            next_thinking = None
+            next_reasoning_effort = None
+            next_include_reasoning = False
+        return replace(
+            self.settings,
+            thinking=next_thinking,
+            reasoning_effort=next_reasoning_effort,
+            include_reasoning_content=next_include_reasoning,
         )
 
     def _generate_text_with_retries(
@@ -176,7 +216,6 @@ class JsonModelClient:
         retry_label: str,
         timeout_seconds: int,
     ) -> str:
-        last_text = ""
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             started_at = time.monotonic()
@@ -187,7 +226,6 @@ class JsonModelClient:
                     text = self._extract_text_from_raw_response(response).strip()
                 if text:
                     return text
-                last_text = text
                 last_error = None
                 if attempt < attempts:
                     logger.warning(
@@ -252,18 +290,20 @@ class JsonModelClient:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _should_retry_without_thinking(self) -> bool:
+    def _should_retry_without_thinking(self, settings: ModelSettings | None = None) -> bool:
+        settings = settings or self.settings
         if not self.settings.retry_without_thinking_on_failure:
             return False
-        if self.settings.model_type != "OpenAIModel":
+        if settings.model_type != "OpenAIModel":
             return False
-        thinking = str(self.settings.thinking or "").strip().lower()
+        thinking = str(settings.thinking or "").strip().lower()
         return bool(thinking) and thinking != "disabled"
 
-    def _settings_without_thinking(self) -> ModelSettings:
+    def _settings_without_thinking(self, settings: ModelSettings | None = None) -> ModelSettings:
+        settings = settings or self.settings
         return replace(
-            self.settings,
-            thinking="disabled",
+            settings,
+            thinking=None,
             reasoning_effort=None,
             include_reasoning_content=False,
         )

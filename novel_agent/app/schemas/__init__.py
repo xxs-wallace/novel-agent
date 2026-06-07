@@ -41,7 +41,9 @@ from .narrative_index_schema import (
     NarrativeScenePayload,
 )
 from .narrative_inquiry_schema import (
+    AnalyzerAnalysisType,
     AnalyzerBudget,
+    AnalyzerIntent,
     AnalyzerLoopOutput,
     AnalyzerNotebook,
     AnalyzerSeedPacket,
@@ -86,15 +88,15 @@ from .reviewer_schema import (
     ResolvedReviewTarget,
     ReviewBudget,
     ReviewContextPolicy,
+    ReviewerManifest,
+    ReviewerToolCall,
+    ReviewerToolResult,
     ReviewFinding,
     ReviewPlan,
     ReviewReport,
     ReviewRequest,
     ReviewSuiteReport,
     ReviewTarget,
-    ReviewerManifest,
-    ReviewerToolCall,
-    ReviewerToolResult,
 )
 from .smoke_schema import (
     AllowedOutlineScope,
@@ -149,7 +151,9 @@ __all__ = [
     "NarrativeSceneBoundary",
     "NarrativeSceneCard",
     "NarrativeScenePayload",
+    "AnalyzerAnalysisType",
     "AnalyzerBudget",
+    "AnalyzerIntent",
     "AnalyzerLoopOutput",
     "AnalyzerNotebook",
     "AnalyzerSeedPacket",

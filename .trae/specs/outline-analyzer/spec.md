@@ -1,4 +1,4 @@
-# Outline Analyzer Spec
+# Analyzer Spec
 
 ## Source Of Truth
 
@@ -10,9 +10,9 @@
 
 ## Purpose
 
-Outline Analyzer 是一个可选、独立、只读的小说宏观剧情分析模块。
+Analyzer（原 Outline Analyzer）是一个可选、独立、只读的小说分析模块。历史 Web channel、job type 和本 spec 目录名可以继续使用 `outline_analyzer` 作为兼容标识，但领域服务与用户语义 SHOULD 使用 Analyzer 命名。
 
-它的目标不是直接生成续写 artifact，而是帮助用户和系统在大纲层面讨论：
+它的目标不是直接生成续写 artifact，而是帮助用户和系统在合适的分析工作流中讨论：
 
 - 当前故事已经发生了什么。
 - 哪些主线、支线、伏笔、人物关系和世界观约束仍未解决。
@@ -24,7 +24,7 @@ Analyzer 的用户可见形态 SHOULD 是会话框中的“小说专家意见”
 
 ## Product Boundary
 
-Outline Analyzer SHALL：
+Analyzer SHALL：
 
 - 只读取当前 book 的 Memory、索引、粗读导入的原始 documents、close-read 产物和可用 artifacts。
 - 只在当前会话消息流中输出分析、建议、问题和候选走向。
@@ -33,7 +33,7 @@ Outline Analyzer SHALL：
 - 区分 `confirmed fact`、`reasonable inference`、`uncertain gap`、`user preference` 和 `speculative option`。
 - 在推荐故事走向时给出依据、收益、风险、仍需确认的问题。
 
-Outline Analyzer SHALL NOT：
+Analyzer SHALL NOT：
 
 - 修改 Memory、KB、Writer run state、workflow state 或任何正式续写 artifact。
 - 把自己的候选走向写入 `BookContinuationPlan`、`BatchPlan`、`ChapterBrief` 或正文草稿。
@@ -46,18 +46,61 @@ Outline Analyzer SHALL NOT：
 
 首版 Scope：
 
-- 只支持大纲层 / 全书宏观层分析。
+- 支持 `outline_analysis` 和 `relationship_analysis` 两种分析类型。
+- `outline_analysis` 支持大纲层 / 全书宏观层分析。
+- `relationship_analysis` 支持围绕两个或多个角色的关系、共同经历、情感债务、阵营约束、关系走向和关系线结构风险进行分析。
 - 可读取故事大纲、章节摘要、人物档案、世界观、源作品篇章地图、Memory Page root、粗读 documents 摘录。
 - 支持模型主导的多轮 Analyzer Research Loop。
+- 支持通过共享 `NarrativeInquiryBroker` 发起 grep-like `text_search` 词面定位请求，在 root summary / Memory root、人物档案、outline segment、chapter summary、index card 和受限 document scope 中定位候选章节或 source_doc_ids。
 - 支持向用户提出非阻塞讨论问题。
 - 支持建议“应重点回读哪些章节或原文片段”。
 
 非首版 Scope：
 
 - 正文章节草稿逐段评审。
+- 独立文风 / 文笔专项评审工作流。
 - Reviewer 对生成结果的质量审阅。
 - 自动把 Analyzer 结论注入 Writer prompt。
 - 自动更新 Memory、人物档案、世界观或故事大纲。
+
+## Analyzer Intent Gate And Analysis Types
+
+Analyzer SHALL 在构造本地 root summary 级提示后，通过 `AnalyzerIntentGate` 的模型 seed prompt 识别本轮问题的 `AnalyzerAnalysisType`。Gate 是 Analyzer 的第一个模型步骤：它基于用户问题、会话摘要和本作 root summary 选择工作流、提出极简初始证据方向，并把结果写入 `AnalyzerSeedPacket`。Gate 不负责给出最终语义结论。
+
+首版 `AnalyzerAnalysisType`：
+
+- `outline_analysis`：用于主线 / 支线 / 伏笔 / 结构位置 / 因果链 / 节奏 / 世界观约束 / 后续剧情走向等宏观问题。
+- `relationship_analysis`：用于人物关系、感情线、共同经历、关系转折、人物之间的债务或承诺、第三方关系约束、关系线后续设计等问题。
+
+`AnalyzerIntentGate` SHALL：
+
+- 输入用户问题、Analyzer 会话摘要、本作 root summary / root summaries 和两个可用 analysis type 的简短定义。
+- 输出 `analysis_type`、`confidence`、`matched_signals`、`required_evidence_plan` 和可选 `secondary_analysis_types`。
+- 由模型判断问题属于哪种分析工作流；不得用本地关键词 heuristic 伪装模型已经完成意图判断。
+- Gate prompt 只能使用通用、非作品专名的分析类型说明；不得在默认词典、prompt 或测试默认数据中写入只服务某一部小说的角色名、设定名或桥段偏好。
+- Gate payload SHALL NOT 包含完整 `AnalyzerSeedPacket`、`character_index`、`world_concept_index`、`sources` 或详细检索地图；这些内容只进入后续 `OutlineAnalyzer` / `RelationshipAnalyzer` workflow prompt。
+- 当问题同时包含大纲走向和人物关系时，优先选择最能决定取证路径的类型；例如“某两个人关系如何发展”应进入 `relationship_analysis`，并可在 secondary 中保留 `outline_analysis`。
+- 当置信度不足时 SHALL 在 Gate 输出中标记低置信和 secondary 类型，并让后续 loop 先请求澄清性证据或向用户提出非阻塞问题；不得用本地默认值掩盖不确定性。
+- 若缺少可用模型或 Gate JSON 无法在重试后解析，Analyzer SHALL 返回 `needs_model` / `failed`，不得创建伪造的 `analysis_type` 继续生产路径。
+
+`outline_analysis` 的默认取证计划 SHOULD：
+
+1. 查看 story overview、outline segment roots、source arc、open threads 和相关 compact cards。
+2. 围绕用户问题请求 `index_card_search` / `factual_event_card_search` / `mystery_card_search` / `theme_signal_card_search`。
+3. 对命中的 outline segment SHALL 能下钻或映射到对应 chapter summary。
+4. 当摘要层不足以判断动机、措辞、在场人物或关系张力时，再请求 `raw_excerpt`。
+5. 当语义索引未能定位细节问题时，SHOULD 使用 `text_search` 将问题拆成少量通用关键词，在 outline segment、chapter summary、character profile、index card 等等价 locator 分支中做交集匹配；失败分支只进入 trace，不应污染 notebook 的事实结论。
+
+`relationship_analysis` 的默认取证计划 SHOULD：
+
+1. 识别用户问题中的参与角色；如果角色职能词或称谓不唯一，先列出候选和证据缺口。
+2. 查询相关角色的人物档案概述、当前状态、近期变化、`story_events_json`、`relationships_json` 和 `recent_activity_json`。
+3. 按 query 关键词和参与角色筛选人物档案中的相关事件，而不是固定截取前若干条。
+4. 当关系判断依赖共同经历、付出、救助、冲突、承诺、背叛、身体 / 身份 / 目标变化或其他关系转折时，RelationshipAnalyzer SHOULD 使用 `character_profile` request 的 `metadata.story_events_offset` 分页读取相关角色的 `story_events_json`。单次分页读取的 `story_events` 内容 SHALL 不超过 4KB；返回 evidence SHOULD 包含下一页 offset / total / has_more，以便模型继续翻阅 experience。
+5. 构造共同经历候选：综合角色档案交集、人物状态卡、叙事场景卡、chapter summary、outline segment 和必要原文摘录，定位直接互动、关系变化、身份/身体/目标变化、承诺/冲突/救助/背叛/牺牲等通用关系转折。
+5a. 若人物档案或语义卡片无法定位共同经历，RelationshipAnalyzer SHOULD 使用 `text_search` 对参与角色名、关系关键词和用户给出的细节关键词做交集定位，再基于候选 chapter/source_doc_ids 请求 `chapter_summary` 或 bounded `raw_excerpt`。
+6. 若用户问题涉及已有伴侣、阵营、家族、组织或社会身份约束，查询第三方关系和世界 / 社会规则。
+7. 在最终回答中分离已确认事实、基于共同经历的合理推断、证据缺口、可选关系走向和需要用户确认的价值偏好。
 
 ## Analyzer Chat Mode
 
@@ -67,7 +110,7 @@ Web 主界面 SHOULD 在会话顶部提供“小说专家意见”按钮。
 
 - 同一个聊天输入框进入 Analyzer mode。
 - 用户消息 SHALL 以结构化 payload 标记，例如 `channel = outline_analyzer`。
-- 后端 SHALL 创建 Outline Analyzer 后台任务，而不是在消息接口中同步阻塞调用 Analyzer，也不是走普通自然语言回执或 Writer action。
+- 后端 SHALL 创建 Analyzer 后台任务，而不是在消息接口中同步阻塞调用 Analyzer，也不是走普通自然语言回执或 Writer action。
 - 用户消息 SHALL 立即进入消息流；系统 SHOULD 追加或返回可见的“小说专家正在分析”状态，并带可追踪的 `job_id` / `turn_id` 技术详情。
 - Analyzer 回复作为普通 assistant message 出现在同一消息流中；任务失败时 SHALL 追加 error message；需要用户补充时 SHALL 追加 assistant message 并保持 Analyzer turn 为未完成状态。
 - 用户可退出 Analyzer mode，回到普通 Agent / Writer 输入。
@@ -80,7 +123,7 @@ Analyzer mode MAY 与 Writer review gate 并存，但不得绕过 Writer gate：
 
 ## Analyzer Background Job And Recoverable Turn State
 
-Outline Analyzer SHALL 作为可观测、可恢复的后台任务执行。
+Analyzer SHALL 作为可观测、可恢复的后台任务执行。
 
 - Web Analyzer message endpoint MUST NOT 长时间同步等待模型返回。
 - 每条 Analyzer 用户问题 SHOULD 创建一个 `outline_analyzer` job，并绑定一个 `turn_id`。
@@ -137,6 +180,12 @@ Prompt trace 保留规则：
 {
   "book_id": "book-001",
   "user_question": "当前未解之谜里哪条最适合下一阶段回收？",
+  "analysis_type": "outline_analysis",
+  "intent_gate": {
+    "confidence": 0.82,
+    "matched_signals": ["未解之谜", "下一阶段回收"],
+    "required_evidence_plan": ["open_threads", "mystery cards", "outline segment drill-down"]
+  },
   "conversation_brief": "本轮对话已讨论过旧案线索和主角信任危机。",
   "modeling_status": {
     "documents_ready": true,
@@ -203,6 +252,7 @@ Prompt trace 保留规则：
 要求：
 
 - Seed 只给模型“可查询入口”，不展开全部章节、人物档案或原文。
+- `analysis_type` 和 `intent_gate` 用于约束本轮取证顺序和 prompt 工作流，不得代替 evidence 或最终判断。
 - `chapter_index` 可以包含全部章节的标题和极短 hint；若章节数量极大，SHOULD 先返回 outline segment / source arc 级索引。
 - `conversation_brief` 只总结当前 Analyzer 会话，不得把 Analyzer 候选推断写成 Memory 事实。
 - 若 close-read 尚未完成，Analyzer 可以降级为“粗读文档级分析”，但回答必须标记证据不足。
@@ -255,8 +305,20 @@ Analyzer MAY 请求读取原文，但必须遵守“必要、可解释、受预�
 
 - 只返回被选中的原文摘录，不返回整本书。
 - 优先返回与 request 目的相关的片段、上下文窗口和来源索引。
+- 支持将短章节引用（例如 `35`、`chapter-35`、`第35章`）规范化到 Memory chapter id，并可从短章节范围中解析受预算的候选章节。
 - 控制单次返回 token / char 预算。
 - 在返回结果中标注 `source_doc_ids`、`chapter_index`、`excerpt_type` 和裁剪说明。
+
+当章节摘要、索引卡、`importance_reason`、`importance_facets` 或其他 summary-derived annotation 与其他证据在人物、对象、次数、代价、因果、时间线或在场者等可核验事实上冲突时，Analyzer SHALL 将其视为 candidate/conflicting evidence，并请求 `raw_excerpt` 或更直接的章节事实核验；最终回答必须以原文或更直接事实证据为标准，不得把冲突摘要注释升级为 confirmed fact。
+
+当用户问题要求的回答粒度超过当前 summary / locator evidence 能直接支撑的事实细节时：
+
+- chapter summary、outline segment、index card、人物档案和 `text_search` 结果只能作为定位线索，不能替代缺失的更直接事实证据。
+- 是否需要 `raw_excerpt` SHALL 由模型基于 evidence sufficiency 判断：用户问题需要什么事实粒度、拟回答会断言什么、已提交 evidence 是否已经覆盖这些断言。
+- 一旦模型判断现有 locator 已收敛到少量候选章节、document 或 source range，但仍无法完整回答，Analyzer SHALL 请求 bounded `raw_excerpt`。
+- 若无法通过人物档案、场景卡、chapter summary、outline root / segment 或 `text_search` 将范围收敛到少量章节或 document，Analyzer SHALL 明确说明当前无法定位具体剧情范围，并请求用户提供章节、幕名、前后事件或关键词。
+- Analyzer SHALL NOT 从第一章开始无界阅读，也不得在缺少可执行定位时无限循环思考。
+- 最终回答在没有 committed evidence 覆盖所需事实粒度时，不得给出超出证据的具体断言，只能说明已定位范围、证据缺口和下一步需要的线索。
 
 Analyzer SHALL NOT 因为模型要求“读取所有原文”而满足该请求。本地 Broker 必须拒绝或拆分为可预算的 request。
 

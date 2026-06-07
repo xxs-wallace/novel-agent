@@ -4,15 +4,17 @@ import json
 import logging
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..repos.assets_repo import AssetsRepo
 from ..repos.chapters_repo import ChaptersRepo
 from ..repos.character_profiles_repo import CharacterProfilesRepo
 from ..schemas.narrative_inquiry_schema import (
+    AnalyzerAnalysisType,
     AnalyzerBudget,
+    AnalyzerIntent,
     AnalyzerLoopOutput,
     AnalyzerNotebook,
     AnalyzerSeedPacket,
@@ -39,7 +41,6 @@ ANALYZER_ANALYSIS_QUESTION_POLICY = (
     "遇到“男主、女主、主角、核心角色”等未点名的角色职能词时，如果 seed 中存在多个可能候选，"
     "不要静默只选一个，也不要直接说无证据；应先列出候选与选择依据，再给默认分析。"
 )
-
 
 GENERIC_CHARACTER_QUERY_TERMS = (
     "主角",
@@ -145,6 +146,39 @@ class EvidenceTriageResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class AnswerReadinessResult:
+    status: str = "ready_to_answer"
+    requests: list[NarrativeInquiryRequest] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    message: str = ""
+
+    @classmethod
+    def from_mapping(cls, data: Mapping[str, Any]) -> "AnswerReadinessResult":
+        status = normalize_whitespace(str(data.get("status") or "ready_to_answer")).lower()
+        if status not in {"ready_to_answer", "need_more_info", "insufficient_memory", "budget_exhausted"}:
+            raise ValueError("Analyzer answer readiness status is unsupported")
+        requests = [
+            item if isinstance(item, NarrativeInquiryRequest) else NarrativeInquiryRequest.from_mapping(item, index=index)
+            for index, item in enumerate(data.get("requests") or [], start=1)
+            if isinstance(item, (NarrativeInquiryRequest, Mapping))
+        ]
+        return cls(
+            status=status,
+            requests=requests,
+            notes=_dedup_strings(data.get("notes") or data.get("reasons")),
+            message=normalize_whitespace(str(data.get("message") or "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "requests": [request.to_dict() for request in self.requests],
+            "notes": list(self.notes),
+            "message": self.message,
+        }
+
+
 def _dedup_strings(value: object) -> list[str]:
     if isinstance(value, str):
         value = [value]
@@ -199,6 +233,9 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
         "outcome",
         "summary",
         "summary_sufficiency",
+        "evidence_warning",
+        "evidence_derivation",
+        "canonical_fact_status",
         "summary_hint",
         "summary_short",
         "profile_summary",
@@ -210,6 +247,14 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
         "raw_read_reason",
         "future_consequence",
         "confidence",
+        "snippet",
+        "text",
+        "match_mode",
+        "matched_term_count",
+        "document_match_index",
+        "next_match_offset_hint",
+        "document_title",
+        "document_title_index",
     )
     result: dict[str, Any] = {}
     for key in keep_scalar:
@@ -225,6 +270,7 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
         ("participants", 8),
         ("source_doc_ids", 12),
         ("chapter_refs", 12),
+        ("matched_terms", 8),
         ("query_facets", 8),
         ("importance_facets", 8),
         ("consumer_hints", 6),
@@ -246,13 +292,15 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
 
 
 def _compact_evidence_bundle(bundle: EvidenceBundle, *, item_text_limit: int = 360) -> dict[str, Any]:
+    item_limit = 10 if bundle.request_type == "text_search" else 3
+    effective_item_text_limit = min(item_text_limit, 260) if bundle.request_type == "text_search" else item_text_limit
     return {
         "request_id": bundle.request_id,
         "request_type": bundle.request_type,
         "query": safe_excerpt(bundle.query, 180),
         "status": bundle.status,
         "fact_status": bundle.fact_status,
-        "evidence_items": [_compact_mapping(item, text_limit=item_text_limit) for item in bundle.evidence_items[:3]],
+        "evidence_items": [_compact_mapping(item, text_limit=effective_item_text_limit) for item in bundle.evidence_items[:item_limit]],
         "chapter_refs": list(bundle.chapter_refs[:12]),
         "source_doc_ids": list(bundle.source_doc_ids[:12]),
         "excerpts": [_compact_mapping(item, text_limit=min(item_text_limit, 260)) for item in bundle.excerpts[:2]],
@@ -310,8 +358,16 @@ def _compact_final_evidence_bundles(bundles: Sequence[EvidenceBundle]) -> list[d
     return result[:6]
 
 
+def _is_committable_evidence(bundle: EvidenceBundle) -> bool:
+    return bundle.status == "found" and bundle.fact_status not in {"missing", "insufficient_context"}
+
+
 def _prompt_bytes(system_prompt: str, user_prompt: str) -> int:
     return len(system_prompt.encode("utf-8")) + len(user_prompt.encode("utf-8"))
+
+
+def _json_prompt(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _json_prompt_budget_note(stage: str, max_prompt_bytes: int) -> str:
@@ -377,6 +433,18 @@ def _notebook_prompt_payload(notebook: AnalyzerNotebook) -> dict[str, Any]:
     }
 
 
+def _active_notebook_prompt_payload(notebook: AnalyzerNotebook) -> dict[str, Any]:
+    payload = _notebook_prompt_payload(notebook)
+    payload["uncertain_gaps"] = [
+        item
+        for item in payload["uncertain_gaps"]
+        if not normalize_whitespace(item).startswith("triage evidence note:")
+    ][:4]
+    payload["blocked_directions"] = payload["blocked_directions"][-3:]
+    payload["candidate_directions"] = payload["candidate_directions"][-3:]
+    return payload
+
+
 def _notebook_final_payload(notebook: AnalyzerNotebook) -> dict[str, Any]:
     def strings(values: Sequence[str], *, limit: int = 5) -> list[str]:
         return [safe_excerpt(value, 160) for value in values[:limit]]
@@ -384,30 +452,124 @@ def _notebook_final_payload(notebook: AnalyzerNotebook) -> dict[str, Any]:
     return {
         "confirmed_facts": strings(notebook.confirmed_facts),
         "reasonable_inferences": strings(notebook.reasonable_inferences),
-        "uncertain_gaps": strings(notebook.uncertain_gaps),
+        "uncertain_gaps": strings(
+            [
+                item
+                for item in notebook.uncertain_gaps
+                if not normalize_whitespace(item).startswith("triage evidence note:")
+            ]
+        ),
         "candidate_directions": strings(notebook.candidate_directions, limit=4),
         "chapters_worth_raw_read": [_compact_mapping(item, text_limit=140) for item in notebook.chapters_worth_raw_read[:4]],
     }
 
 
-def _seed_prompt_payload(seed: AnalyzerSeedPacket) -> dict[str, Any]:
-    payload = seed.to_dict()
-    payload["character_index"] = [
-        {
-            "character_id": str(item.get("character_id") or ""),
-            "canonical_name": str(item.get("canonical_name") or ""),
-            "aliases": list(item.get("aliases") or [])[:4] if isinstance(item.get("aliases"), Sequence) and not isinstance(item.get("aliases"), (str, bytes)) else [],
-            "role_hint": safe_excerpt(str(item.get("role_hint") or ""), 120),
-            "status_hint": str(item.get("status_hint") or ""),
-        }
-        for item in seed.character_index[:8]
-    ]
+def _source_range_bounds(value: object) -> tuple[int, int] | None:
+    numbers = [int(item) for item in re.findall(r"\d+", str(value or ""))]
+    if not numbers:
+        return None
+    if len(numbers) == 1:
+        return numbers[0], numbers[0]
+    return min(numbers[0], numbers[1]), max(numbers[0], numbers[1])
+
+
+def _bundle_source_doc_ids(bundles: Sequence[EvidenceBundle]) -> set[int]:
+    result: set[int] = set()
+    for bundle in bundles:
+        result.update(int(item) for item in bundle.source_doc_ids if int(item) > 0)
+        for item in list(bundle.evidence_items) + list(bundle.excerpts):
+            doc_id = item.get("doc_id") if isinstance(item, Mapping) else None
+            if isinstance(doc_id, int) and doc_id > 0:
+                result.add(doc_id)
+    return result
+
+
+def _range_overlaps_doc_ids(source_range: object, doc_ids: set[int]) -> bool:
+    bounds = _source_range_bounds(source_range)
+    if bounds is None:
+        return False
+    start, end = bounds
+    return any(start <= doc_id <= end for doc_id in doc_ids)
+
+
+def _question_character_index(seed: AnalyzerSeedPacket, *, limit: int = 4) -> list[dict[str, Any]]:
+    question = normalize_whitespace(seed.user_question)
+    explicit: list[dict[str, Any]] = []
+    generic_role_query = any(term in question for term in GENERIC_CHARACTER_QUERY_TERMS)
+    for item in seed.character_index:
+        names = [str(item.get("canonical_name") or "")]
+        aliases = item.get("aliases")
+        if isinstance(aliases, Sequence) and not isinstance(aliases, (str, bytes)):
+            names.extend(str(alias) for alias in aliases)
+        matched = any(name and name in question for name in names)
+        if matched or (generic_role_query and len(explicit) < limit):
+            explicit.append(
+                {
+                    "character_id": str(item.get("character_id") or ""),
+                    "canonical_name": str(item.get("canonical_name") or ""),
+                    "aliases": list(item.get("aliases") or [])[:3] if isinstance(item.get("aliases"), Sequence) and not isinstance(item.get("aliases"), (str, bytes)) else [],
+                    "role_hint": safe_excerpt(str(item.get("role_hint") or ""), 90),
+                    "status_hint": str(item.get("status_hint") or ""),
+                }
+            )
+        if len(explicit) >= limit:
+            break
+    return explicit
+
+
+def _seed_prompt_payload(seed: AnalyzerSeedPacket, *, evidence_history: Sequence[EvidenceBundle] = ()) -> dict[str, Any]:
+    has_locator_evidence = any(
+        bundle.request_type in {"text_search", "raw_excerpt", "chapter_summary", "story_detail", "related_documents"}
+        for bundle in evidence_history
+    )
+    doc_ids = _bundle_source_doc_ids(evidence_history)
+    if has_locator_evidence:
+        memory_roots = [
+            item
+            for item in seed.memory_page_roots
+            if doc_ids and _range_overlaps_doc_ids(item.get("source_range"), doc_ids)
+        ][:2]
+        story_overview_limit = 220
+        world_limit = 0
+    else:
+        memory_roots = seed.memory_page_roots[:4]
+        story_overview_limit = 700
+        world_limit = 4
+    payload = {
+        "book_id": seed.book_id,
+        "user_question": seed.user_question,
+        "analysis_type": seed.analysis_type,
+        "intent_gate": dict(seed.intent_gate),
+        "conversation_brief": safe_excerpt(seed.conversation_brief, 240),
+        "modeling_status": dict(seed.modeling_status),
+        "story_overview_hint": safe_excerpt(seed.story_overview, story_overview_limit),
+        "context_stage": "locator_or_evidence" if has_locator_evidence else "initial_map",
+        "outline_index": [_compact_mapping(item, text_limit=120) for item in seed.outline_index[:4]],
+        "source_arc_index": [_compact_mapping(item, text_limit=120) for item in seed.source_arc_index[:3]],
+        "character_index": _question_character_index(seed),
+        "world_concept_index": [
+            {
+                "term": safe_excerpt(str(item.get("term") or item.get("concept") or ""), 70),
+                "scope_hint": safe_excerpt(str(item.get("scope_hint") or item.get("summary") or ""), 100),
+            }
+            for item in seed.world_concept_index[:world_limit]
+        ],
+        "chapter_index": [_compact_mapping(item, text_limit=100) for item in seed.chapter_index[:4]],
+        "memory_page_roots": [
+            {
+                "page_id": str(item.get("page_id") or ""),
+                "source_range": str(item.get("source_range") or ""),
+                "summary": safe_excerpt(str(item.get("summary") or ""), 130),
+            }
+            for item in memory_roots
+        ],
+    }
     payload["sources"] = [
         {
             "source_type": str(item.get("source_type") or item.get("type") or ""),
             "label": str(item.get("label") or ""),
         }
-        for item in seed.sources[:6]
+        for item in seed.sources[:4]
     ]
     return payload
 
@@ -416,6 +578,8 @@ def _seed_final_payload(seed: AnalyzerSeedPacket) -> dict[str, Any]:
     return {
         "book_id": seed.book_id,
         "user_question": seed.user_question,
+        "analysis_type": seed.analysis_type,
+        "intent_gate": dict(seed.intent_gate),
         "conversation_brief": safe_excerpt(seed.conversation_brief, 240),
         "modeling_status": dict(seed.modeling_status),
         "story_overview_hint": safe_excerpt(seed.story_overview, 420),
@@ -434,6 +598,36 @@ def _seed_final_payload(seed: AnalyzerSeedPacket) -> dict[str, Any]:
             }
             for item in seed.memory_page_roots[:4]
         ],
+    }
+
+
+def _intent_gate_payload(seed: AnalyzerSeedPacket) -> dict[str, Any]:
+    root_summaries = [
+        {
+            "page_type": str(item.get("page_type") or ""),
+            "source_range": str(item.get("source_range") or ""),
+            "summary": safe_excerpt(str(item.get("summary") or ""), 260),
+        }
+        for item in seed.memory_page_roots[:3]
+    ]
+    root_summary = seed.story_overview or " ".join(item["summary"] for item in root_summaries)
+    return {
+        "user_question": seed.user_question,
+        "conversation_brief": seed.conversation_brief,
+        "root_summary": safe_excerpt(root_summary, 900),
+        "root_summaries": root_summaries,
+        "available_analysis_types": {
+            "outline_analysis": "用户主要想分析剧情大纲、主线支线、伏笔回收、结构节奏、因果或后续剧情走向。",
+            "relationship_analysis": "用户主要想分析人物关系、感情线、共同经历、关系转折、第三方约束或关系线后续设计。",
+        },
+        "output_schema": {
+            "analysis_type": "outline_analysis | relationship_analysis",
+            "confidence": 0.0,
+            "matched_signals": ["用户问题中支持该工作流的通用信号"],
+            "secondary_analysis_types": ["outline_analysis"],
+            "required_evidence_plan": ["极简说明后续 workflow 首先应取证的方向"],
+            "notes": "一句话说明分型依据和不确定性",
+        },
     }
 
 
@@ -766,8 +960,62 @@ class AnalyzerSeedBuilder:
         return dict(payload) if isinstance(payload, Mapping) else {}
 
 
-class OutlineAnalyzerService:
-    """Read-only model-driven outline analyzer.
+class AnalyzerIntentGate:
+    """Model seed prompt that chooses the Analyzer workflow."""
+
+    def build_prompt(self, *, seed: AnalyzerSeedPacket) -> tuple[str, str]:
+        system_prompt = (
+            "你是 AnalyzerIntentGate，也是 Analyzer 的 seed prompt。"
+            "你的任务是基于用户问题、会话摘要和本作 root summary 选择分析工作流，并提出极简 evidence direction。\n"
+            "你必须使用模型判断 analysis_type；不要给用户最终文学结论，不要生成剧情建议，不要写 Memory。\n"
+            "可选 AnalyzerAnalysisType 只有：outline_analysis、relationship_analysis。\n"
+            "如果问题同时涉及两类，选择最能决定取证路径的一类作为 analysis_type，并把另一类放入 secondary_analysis_types。\n"
+            "当置信度不足时，在 notes 和 required_evidence_plan 中说明后续 workflow 应先取证的消歧方向。\n"
+            "不要展开详细检索策略；详细取证顺序由后续 OutlineAnalyzer 或 RelationshipAnalyzer prompt 负责。\n"
+            "只返回 JSON 对象。不得包含任何作品专名默认规则或本地硬编码判断。"
+        )
+        return system_prompt, _json_prompt(_intent_gate_payload(seed))
+
+
+class OutlineAnalyzerPrompt:
+    """Prompt policy for outline-level analysis after intent gating."""
+
+    @staticmethod
+    def workflow_instruction() -> str:
+        return (
+            "本轮 analysis_type=outline_analysis，进入 OutlineAnalyzer prompt。取证顺序应围绕大纲结构："
+            "优先查询 outline roots、source arcs、open threads、factual/mystery/theme/narrative cards；"
+            "当 root 或 outline segment 命中时，应下钻或映射到 chapter_summary 来确认事件链、因果和篇章位置；"
+            "需要核对人物或世界设定时，再请求 character_profile / world_concept。"
+            "只有摘要不足以判断动机、措辞、在场人物、关系张力或伏笔原句时，才请求 raw_excerpt。"
+            "最终回答应覆盖与问题相关的结构、因果、节奏、伏笔回收、人物压力和世界观约束。"
+        )
+
+
+class RelationshipAnalyzerPrompt:
+    """Prompt policy for relationship analysis after intent gating."""
+
+    @staticmethod
+    def workflow_instruction() -> str:
+        return (
+            "本轮 analysis_type=relationship_analysis，进入 RelationshipAnalyzer prompt。取证顺序应像人物关系分析："
+            "先解析参与角色，再请求相关 character_profile，重点读取 profile 概述、当前状态、"
+            "relationships_json、recent_activity_json、story_events_json 中与本 query 相关的事件；"
+            "当人物关系判断依赖共同经历、付出、救助、冲突、承诺、背叛、身体/身份/目标变化或其他关系转折时，"
+            "不要只按人名读取一个人物档案摘要切片；必须对相关角色的 story_events_json 进行 offset 分页阅读，"
+            "用 character_profile request 的 metadata.story_events_offset 从 0 开始翻阅，"
+            "metadata.story_events_char_budget 不超过 4096，并根据返回的 story_events_page.next_offset 继续读下一页，"
+            "直到找到目标 experience、形成共同经历交集，或能说明证据缺口。"
+            "接着用 character_state_card_search / narrative_scene_card_search / chapter_summary / story_detail "
+            "寻找共同经历、直接互动、关系转折、第三方或社会约束。"
+            "若用户问题涉及已有伴侣、组织、家族、阵营或社会身份，必须把这些第三方约束纳入取证计划。"
+            "只有当摘要不足以判断语气、动机、在场细节、内心活动或关系张力时，才请求 raw_excerpt。"
+            "不要只凭全局 outline segment 推断人物关系走向；最终回答必须区分事实、共同经历推断、缺口和可选关系线。"
+        )
+
+
+class AnalyzerService:
+    """Read-only model-driven analyzer.
 
     The service owns no private retrieval path. It builds a seed packet, accepts
     model-issued Narrative Inquiry requests, sends them to the shared broker,
@@ -781,15 +1029,19 @@ class OutlineAnalyzerService:
         repo_root: Path,
         model_client: Any | None = None,
         seed_builder: AnalyzerSeedBuilder | None = None,
+        intent_gate: AnalyzerIntentGate | None = None,
         inquiry_broker: NarrativeInquiryBroker | None = None,
         budget: AnalyzerBudget | None = None,
+        prompt_trace_recorder: Callable[[dict[str, Any]], None] | None = None,
         **legacy_budget_kwargs: Any,
     ) -> None:
         self.repo_root = repo_root.expanduser().resolve()
         self.model_client = model_client
         self.seed_builder = seed_builder or AnalyzerSeedBuilder(repo_root=self.repo_root)
+        self.intent_gate = intent_gate or AnalyzerIntentGate()
         self.inquiry_broker = inquiry_broker or NarrativeInquiryBroker(repo_root=self.repo_root)
         self.budget = budget or AnalyzerBudget()
+        self.prompt_trace_recorder = prompt_trace_recorder
         # Kept for compatibility with older callers that configured prompt-slice
         # sizes. The new loop budgets live in AnalyzerBudget.
         self.legacy_budget_kwargs = dict(legacy_budget_kwargs)
@@ -826,7 +1078,20 @@ class OutlineAnalyzerService:
                 trace={"failure": "missing_model"},
             )
 
-        trace: dict[str, Any] = {"rounds": []}
+        try:
+            intent = self._call_intent_gate(book_id=book_id, seed=seed)
+        except RuntimeError as exc:
+            return AnalyzerChatResult(
+                status="failed",
+                answer=f"Analyzer intent gate 模型调用失败：{exc}",
+                sources=sources,
+                seed=seed,
+                notebook=AnalyzerNotebook(),
+                trace={"failure": str(exc), "stage": "intent_gate"},
+            )
+        seed = replace(seed, analysis_type=intent.analysis_type, intent_gate=intent.to_dict())
+
+        trace: dict[str, Any] = {"intent_gate": intent.to_dict(), "rounds": []}
         budget_state = {"total_requests_used": 0, "raw_requests_used": 0, "exhausted": False}
         evidence_history: list[EvidenceBundle] = []
         for round_index in range(1, self.budget.max_rounds + 1):
@@ -851,7 +1116,117 @@ class OutlineAnalyzerService:
             notebook.apply_delta(loop_output.notebook_delta)
             if loop_output.status == "ready_to_answer":
                 try:
-                    answer = loop_output.final_answer or self._call_final_answer_model(book_id=book_id, seed=seed, notebook=notebook, evidence_history=evidence_history)
+                    readiness = self._call_answer_readiness_model(
+                        book_id=book_id,
+                        round_index=round_index,
+                        seed=seed,
+                        notebook=notebook,
+                        evidence_history=evidence_history,
+                        proposed_answer=loop_output.final_answer,
+                        budget_state=budget_state,
+                    )
+                except RuntimeError as exc:
+                    return AnalyzerChatResult(
+                        status="failed",
+                        answer=f"Analyzer answer readiness 模型调用失败：{exc}",
+                        sources=sources,
+                        seed=seed,
+                        notebook=notebook,
+                        evidence_bundles=evidence_history,
+                        trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
+                    )
+                trace.setdefault("readiness_checks", []).append(
+                    {
+                        "round": round_index,
+                        "loop_output": loop_output.to_dict(),
+                        "readiness": readiness.to_dict(),
+                        "budget_state": dict(budget_state),
+                    }
+                )
+                self._apply_readiness_notes(notebook, readiness.notes)
+                if readiness.status == "need_more_info":
+                    requests = self._filter_requests(readiness.requests, budget_state=budget_state)
+                    if not requests:
+                        budget_state["exhausted"] = True
+                        return AnalyzerChatResult(
+                            status="budget_exhausted",
+                            answer=readiness.message or self._status_answer("budget_exhausted", notebook=notebook),
+                            sources=sources,
+                            seed=seed,
+                            notebook=notebook,
+                            evidence_bundles=evidence_history,
+                            trace={**trace, "final_budget_state": budget_state},
+                        )
+                    bundles, used = self.inquiry_broker.resolve_requests(
+                        conn,
+                        book_id=book_id,
+                        requests=requests,
+                        budget=self.budget,
+                        total_requests_used=int(budget_state["total_requests_used"]),
+                        raw_requests_used=int(budget_state["raw_requests_used"]),
+                    )
+                    budget_state.update(used)
+                    try:
+                        triage = self._call_triage_model(
+                            book_id=book_id,
+                            round_index=round_index,
+                            seed=seed,
+                            notebook=notebook,
+                            requests=requests,
+                            candidate_bundles=bundles,
+                            budget_state=budget_state,
+                        )
+                    except RuntimeError as exc:
+                        return AnalyzerChatResult(
+                            status="failed",
+                            answer=f"Analyzer evidence triage 模型调用失败：{exc}",
+                            sources=sources,
+                            seed=seed,
+                            notebook=notebook,
+                            evidence_bundles=evidence_history,
+                            trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
+                        )
+                    kept_ids = set(triage.kept_request_ids)
+                    kept_bundles = [
+                        bundle
+                        for bundle in bundles
+                        if bundle.request_id in kept_ids and _is_committable_evidence(bundle)
+                    ]
+                    notebook.add_evidence(kept_bundles)
+                    evidence_history.extend(kept_bundles)
+                    trace["rounds"].append(
+                        {
+                            "round": round_index,
+                            "source": "answer_readiness",
+                            "loop_output": loop_output.to_dict(),
+                            "readiness": readiness.to_dict(),
+                            "triage": triage.to_dict(),
+                            "candidate_evidence_digests": _compact_evidence_bundles(bundles),
+                            "committed_evidence_digests": _compact_evidence_bundles(kept_bundles),
+                            "budget_state": dict(budget_state),
+                        }
+                    )
+                    if int(budget_state["total_requests_used"]) >= self.budget.max_total_requests:
+                        budget_state["exhausted"] = True
+                        break
+                    continue
+                if readiness.status in {"insufficient_memory", "budget_exhausted"}:
+                    return AnalyzerChatResult(
+                        status=readiness.status,
+                        answer=readiness.message or self._status_answer(readiness.status, notebook=notebook),
+                        sources=sources,
+                        seed=seed,
+                        notebook=notebook,
+                        evidence_bundles=evidence_history,
+                        trace={**trace, "final_budget_state": budget_state},
+                    )
+                try:
+                    answer = loop_output.final_answer or self._call_final_answer_model(
+                        book_id=book_id,
+                        seed=seed,
+                        notebook=notebook,
+                        evidence_history=evidence_history,
+                    )
                 except RuntimeError as exc:
                     return AnalyzerChatResult(
                         status="failed",
@@ -925,7 +1300,11 @@ class OutlineAnalyzerService:
                     trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
                 )
             kept_ids = set(triage.kept_request_ids)
-            kept_bundles = [bundle for bundle in bundles if bundle.request_id in kept_ids]
+            kept_bundles = [
+                bundle
+                for bundle in bundles
+                if bundle.request_id in kept_ids and _is_committable_evidence(bundle)
+            ]
             notebook.add_evidence(kept_bundles)
             evidence_history.extend(kept_bundles)
             trace["rounds"].append(
@@ -964,6 +1343,45 @@ class OutlineAnalyzerService:
             trace={**trace, "final_budget_state": budget_state},
         )
 
+    def _call_intent_gate(self, *, book_id: str, seed: AnalyzerSeedPacket) -> AnalyzerIntent:
+        system_prompt, user_prompt = self.intent_gate.build_prompt(seed=seed)
+        last_error = ""
+        for attempt in range(self.budget.max_json_retries + 1):
+            system_prompt, user_prompt = self._fit_prompt_to_budget(
+                system_prompt,
+                user_prompt,
+                stage="intent_gate",
+                book_id=book_id,
+                round_index=None,
+            )
+            self._log_model_prompt_stats(
+                book_id=book_id,
+                stage="intent_gate",
+                round_index=None,
+                attempt_index=attempt + 1,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                evidence_bundle_count=0,
+            )
+            try:
+                raw = self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("intent_gate"),
+                    **self._prompt_model_kwargs("intent_gate"),
+                )
+                parsed = extract_json_blob(str(raw))
+                if not isinstance(parsed, Mapping):
+                    raise ValueError("Analyzer intent gate output must be a JSON object")
+                return AnalyzerIntent.from_mapping(parsed)
+            except Exception as exc:  # noqa: BLE001 - surfaced as explicit Analyzer failure.
+                last_error = str(exc)
+                system_prompt = (
+                    f"{system_prompt}\n\n上一次 AnalyzerIntentGate 输出无法解析为指定 JSON。请只返回 JSON 对象。"
+                    f"\n解析错误：{safe_excerpt(last_error, 300)}\n重试次数：{attempt + 1}"
+                )
+        raise RuntimeError(f"AnalyzerIntentGate JSON 输出解析失败：{last_error}")
+
     def _filter_requests(
         self,
         requests: Sequence[NarrativeInquiryRequest],
@@ -974,8 +1392,27 @@ class OutlineAnalyzerService:
         if remaining <= 0:
             return []
         priority_rank = {"high": 0, "medium": 1, "low": 2}
-        selected = sorted(requests, key=lambda item: priority_rank[item.priority])
+        selected = sorted((self._complete_raw_excerpt_read_plan(item) for item in requests), key=lambda item: priority_rank[item.priority])
         return selected[: min(self.budget.max_requests_per_round, remaining)]
+
+    def _complete_raw_excerpt_read_plan(self, request: NarrativeInquiryRequest) -> NarrativeInquiryRequest:
+        if request.request_type != "raw_excerpt":
+            return request
+        if request.read_reason and request.expected_confirmation and request.affects_analysis:
+            return request
+        reason = request.read_reason or request.purpose or request.query
+        expected = request.expected_confirmation or request.query or request.purpose
+        affects = request.affects_analysis or request.purpose or request.query
+        return replace(
+            request,
+            read_reason=reason,
+            expected_confirmation=expected,
+            affects_analysis=affects,
+            metadata={
+                **dict(request.metadata),
+                "read_plan_completed_by": "analyzer_service_schema_repair",
+            },
+        )
 
     def _call_loop_model(
         self,
@@ -1012,7 +1449,12 @@ class OutlineAnalyzerService:
                 evidence_bundle_count=len(evidence_history),
             )
             try:
-                raw = self.model_client.generate_text(system_prompt=system_prompt, user_prompt=user_prompt)
+                raw = self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("loop"),
+                    **self._prompt_model_kwargs("loop"),
+                )
                 parsed = extract_json_blob(str(raw))
                 if not isinstance(parsed, Mapping):
                     raise ValueError("Analyzer loop output must be a JSON object")
@@ -1024,6 +1466,61 @@ class OutlineAnalyzerService:
                     f"\n解析错误：{safe_excerpt(last_error, 300)}\n重试次数：{attempt + 1}"
                 )
         return AnalyzerLoopOutput(status="failed", message=f"Analyzer 模型 JSON 输出解析失败：{last_error}")
+
+    def _call_answer_readiness_model(
+        self,
+        *,
+        book_id: str,
+        round_index: int,
+        seed: AnalyzerSeedPacket,
+        notebook: AnalyzerNotebook,
+        evidence_history: Sequence[EvidenceBundle],
+        proposed_answer: str,
+        budget_state: Mapping[str, Any],
+    ) -> AnswerReadinessResult:
+        system_prompt, user_prompt = self.build_answer_readiness_prompt(
+            seed=seed,
+            notebook=notebook,
+            evidence_history=evidence_history,
+            proposed_answer=proposed_answer,
+            budget_state=budget_state,
+        )
+        last_error = ""
+        for attempt in range(self.budget.max_json_retries + 1):
+            system_prompt, user_prompt = self._fit_prompt_to_budget(
+                system_prompt,
+                user_prompt,
+                stage="readiness",
+                book_id=book_id,
+                round_index=round_index,
+            )
+            self._log_model_prompt_stats(
+                book_id=book_id,
+                stage="readiness",
+                round_index=round_index,
+                attempt_index=attempt + 1,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                evidence_bundle_count=len(evidence_history),
+            )
+            try:
+                raw = self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("readiness"),
+                    **self._prompt_model_kwargs("readiness"),
+                )
+                parsed = extract_json_blob(str(raw))
+                if not isinstance(parsed, Mapping):
+                    raise ValueError("Analyzer answer readiness output must be a JSON object")
+                return AnswerReadinessResult.from_mapping(parsed)
+            except Exception as exc:  # noqa: BLE001 - surfaced as explicit Analyzer failure.
+                last_error = str(exc)
+                system_prompt = (
+                    f"{system_prompt}\n\n上一次 answer readiness 输出无法解析为指定 JSON。请只返回 JSON 对象。"
+                    f"\n解析错误：{safe_excerpt(last_error, 300)}\n重试次数：{attempt + 1}"
+                )
+        raise RuntimeError(f"Analyzer answer readiness JSON 输出解析失败：{last_error}")
 
     def _call_triage_model(
         self,
@@ -1042,23 +1539,163 @@ class OutlineAnalyzerService:
         rejected: list[str] = []
         notes: list[str] = []
         request_by_id = {request.request_id: request for request in requests}
-        for bundle_index, bundle in enumerate(candidate_bundles, start=1):
-            request = request_by_id.get(bundle.request_id)
-            result = self._call_single_triage_model(
+        for page_index, page_bundles in enumerate(
+            self._triage_bundle_pages(
                 book_id=book_id,
                 round_index=round_index,
-                bundle_index=bundle_index,
                 seed=seed,
                 notebook=notebook,
-                request=request,
-                candidate_bundle=bundle,
+                requests=requests,
+                candidate_bundles=candidate_bundles,
                 budget_state=budget_state,
                 kept_request_ids=kept,
-            )
+            ),
+            start=1,
+        ):
+            page_requests = [request_by_id[bundle.request_id] for bundle in page_bundles if bundle.request_id in request_by_id]
+            try:
+                result = self._call_batch_triage_model(
+                    book_id=book_id,
+                    round_index=round_index,
+                    page_index=page_index,
+                    seed=seed,
+                    notebook=notebook,
+                    requests=page_requests,
+                    candidate_bundles=page_bundles,
+                    budget_state=budget_state,
+                    kept_request_ids=kept,
+                )
+            except RuntimeError:
+                for bundle_index, bundle in enumerate(page_bundles, start=page_index * 100):
+                    request = request_by_id.get(bundle.request_id)
+                    single_result = self._call_single_triage_model(
+                        book_id=book_id,
+                        round_index=round_index,
+                        bundle_index=bundle_index,
+                        seed=seed,
+                        notebook=notebook,
+                        request=request,
+                        candidate_bundle=bundle,
+                        budget_state=budget_state,
+                        kept_request_ids=kept,
+                    )
+                    single_result = self._drop_uncommittable_triage_ids(single_result, [bundle])
+                    kept.extend(item for item in single_result.kept_request_ids if item not in kept)
+                    rejected.extend(item for item in single_result.rejected_request_ids if item not in rejected and item not in kept)
+                    notes.extend(item for item in single_result.notes if item not in notes)
+                continue
+            result = self._drop_uncommittable_triage_ids(result, page_bundles)
             kept.extend(item for item in result.kept_request_ids if item not in kept)
             rejected.extend(item for item in result.rejected_request_ids if item not in rejected and item not in kept)
             notes.extend(item for item in result.notes if item not in notes)
         return EvidenceTriageResult(kept_request_ids=kept, rejected_request_ids=rejected, notes=notes)
+
+    def _triage_bundle_pages(
+        self,
+        *,
+        book_id: str,
+        round_index: int,
+        seed: AnalyzerSeedPacket,
+        notebook: AnalyzerNotebook,
+        requests: Sequence[NarrativeInquiryRequest],
+        candidate_bundles: Sequence[EvidenceBundle],
+        budget_state: Mapping[str, Any],
+        kept_request_ids: Sequence[str],
+    ) -> list[list[EvidenceBundle]]:
+        request_by_id = {request.request_id: request for request in requests}
+        pages: list[list[EvidenceBundle]] = []
+        current: list[EvidenceBundle] = []
+        for bundle in candidate_bundles:
+            candidate = [*current, bundle]
+            candidate_requests = [request_by_id[item.request_id] for item in candidate if item.request_id in request_by_id]
+            system_prompt, user_prompt = self.build_triage_prompt(
+                seed=seed,
+                notebook=notebook,
+                requests=candidate_requests,
+                candidate_bundles=candidate,
+                budget_state=budget_state,
+                kept_request_ids=kept_request_ids,
+            )
+            if current and _prompt_bytes(system_prompt, user_prompt) > self.budget.triage_page_bytes:
+                pages.append(current)
+                current = [bundle]
+                continue
+            current = candidate
+        if current:
+            pages.append(current)
+        return pages
+
+    def _drop_uncommittable_triage_ids(
+        self,
+        triage: EvidenceTriageResult,
+        candidate_bundles: Sequence[EvidenceBundle],
+    ) -> EvidenceTriageResult:
+        uncommittable = {bundle.request_id for bundle in candidate_bundles if not _is_committable_evidence(bundle)}
+        kept = [item for item in triage.kept_request_ids if item not in uncommittable]
+        rejected = list(triage.rejected_request_ids)
+        for request_id in uncommittable:
+            if request_id not in rejected:
+                rejected.append(request_id)
+        return EvidenceTriageResult(kept_request_ids=kept, rejected_request_ids=rejected, notes=list(triage.notes))
+
+    def _call_batch_triage_model(
+        self,
+        *,
+        book_id: str,
+        round_index: int,
+        page_index: int,
+        seed: AnalyzerSeedPacket,
+        notebook: AnalyzerNotebook,
+        requests: Sequence[NarrativeInquiryRequest],
+        candidate_bundles: Sequence[EvidenceBundle],
+        budget_state: Mapping[str, Any],
+        kept_request_ids: Sequence[str],
+    ) -> EvidenceTriageResult:
+        system_prompt, user_prompt = self.build_triage_prompt(
+            seed=seed,
+            notebook=notebook,
+            requests=requests,
+            candidate_bundles=candidate_bundles,
+            budget_state=budget_state,
+            kept_request_ids=kept_request_ids,
+        )
+        last_error = ""
+        candidate_ids = [bundle.request_id for bundle in candidate_bundles]
+        for attempt in range(self.budget.max_json_retries + 1):
+            system_prompt, user_prompt = self._fit_prompt_to_budget(
+                system_prompt,
+                user_prompt,
+                stage="triage",
+                book_id=book_id,
+                round_index=round_index,
+            )
+            self._log_model_prompt_stats(
+                book_id=book_id,
+                stage="triage",
+                round_index=round_index,
+                attempt_index=(page_index * 100) + attempt + 1,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                evidence_bundle_count=len(candidate_bundles),
+            )
+            try:
+                raw = self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("triage"),
+                    **self._prompt_model_kwargs("triage"),
+                )
+                parsed = extract_json_blob(str(raw))
+                if not isinstance(parsed, Mapping):
+                    raise ValueError("Analyzer triage output must be a JSON object")
+                return EvidenceTriageResult.from_mapping(parsed, candidate_request_ids=candidate_ids)
+            except Exception as exc:  # noqa: BLE001 - batch failure falls back to single triage.
+                last_error = str(exc)
+                system_prompt = (
+                    f"{system_prompt}\n\n上一次 triage 输出无法解析为指定 JSON。请只返回 JSON 对象。"
+                    f"\n解析错误：{safe_excerpt(last_error, 300)}\n重试次数：{attempt + 1}"
+                )
+        raise RuntimeError(f"Analyzer batch triage JSON 输出解析失败：{last_error}")
 
     def _call_single_triage_model(
         self,
@@ -1101,7 +1738,12 @@ class OutlineAnalyzerService:
                 evidence_bundle_count=1,
             )
             try:
-                raw = self.model_client.generate_text(system_prompt=system_prompt, user_prompt=user_prompt)
+                raw = self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("triage"),
+                    **self._prompt_model_kwargs("triage"),
+                )
                 parsed = extract_json_blob(str(raw))
                 if not isinstance(parsed, Mapping):
                     raise ValueError("Analyzer triage output must be a JSON object")
@@ -1147,11 +1789,18 @@ class OutlineAnalyzerService:
             budget_limited=budget_limited,
         )
         try:
-            answer = str(self.model_client.generate_text(system_prompt=system_prompt, user_prompt=user_prompt)).strip()
+            answer = str(
+                self.model_client.generate_text(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    timeout_seconds=self._prompt_timeout_seconds("final"),
+                    **self._prompt_model_kwargs("final"),
+                )
+            ).strip()
         except Exception as exc:  # noqa: BLE001 - no local semantic fallback.
-            raise RuntimeError(f"Outline Analyzer final answer model call failed: {exc}") from exc
+            raise RuntimeError(f"Analyzer final answer model call failed: {exc}") from exc
         if not answer:
-            raise RuntimeError("Outline Analyzer final answer model returned empty text")
+            raise RuntimeError("Analyzer final answer model returned empty text")
         return answer
 
     def _fit_prompt_to_budget(
@@ -1191,7 +1840,7 @@ class OutlineAnalyzerService:
             compact_payload = _shrink_prompt_lists(compact_payload, max_items=max_items)
             for text_limit in (900, 700, 520, 360, 240, 160, 100, 64):
                 candidate_payload = _clamp_json_strings(compact_payload, text_limit=text_limit)
-                candidate_prompt = json.dumps(candidate_payload, ensure_ascii=False, indent=2)
+                candidate_prompt = _json_prompt(candidate_payload)
                 if _prompt_bytes(system_prompt, candidate_prompt) <= max_prompt_bytes:
                     logger.warning(
                         "outline_analyzer.prompt_compacted book_id=%s stage=%s round=%s original_bytes=%s compacted_bytes=%s max_prompt_bytes=%s mode=json max_items=%s text_limit=%s",
@@ -1254,6 +1903,60 @@ class OutlineAnalyzerService:
             budget_limited,
             self._model_label(),
         )
+        if self.prompt_trace_recorder is not None:
+            try:
+                self.prompt_trace_recorder(
+                    {
+                        "book_id": book_id,
+                        "stage": stage,
+                        "round_index": round_index,
+                        "attempt_index": attempt_index,
+                        "model": self._model_label(),
+                        "system_chars": system_chars,
+                        "user_chars": user_chars,
+                        "total_chars": total_chars,
+                        "system_bytes": system_bytes,
+                        "user_bytes": user_bytes,
+                        "total_bytes": system_bytes + user_bytes,
+                        "evidence_bundle_count": evidence_bundle_count,
+                        "budget_limited": budget_limited,
+                        "timeout_seconds": self._prompt_timeout_seconds(stage),
+                        "model_kwargs": self._prompt_model_kwargs(stage),
+                        "system_prompt": system_prompt,
+                        "user_prompt": user_prompt,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - prompt tracing must not break Analyzer.
+                logger.warning("outline_analyzer.prompt_trace_record_failed book_id=%s stage=%s error=%s", book_id, stage, exc)
+
+    def _prompt_timeout_seconds(self, stage: str) -> int:
+        if stage == "intent_gate" and self.budget.gate_prompt_timeout_seconds is not None:
+            return self.budget.gate_prompt_timeout_seconds
+        if stage in {"loop", "readiness"} and self.budget.loop_prompt_timeout_seconds is not None:
+            return self.budget.loop_prompt_timeout_seconds
+        if stage == "triage" and self.budget.triage_prompt_timeout_seconds is not None:
+            return self.budget.triage_prompt_timeout_seconds
+        if stage == "final" and self.budget.final_prompt_timeout_seconds is not None:
+            return self.budget.final_prompt_timeout_seconds
+        return self.budget.prompt_timeout_seconds
+
+    def _prompt_model_kwargs(self, stage: str) -> dict[str, Any]:
+        if stage in {"intent_gate", "loop", "readiness", "triage"}:
+            return {
+                "thinking": "disabled",
+                "reasoning_effort": None,
+                "include_reasoning_content": False,
+            }
+        return {}
+
+    def _apply_readiness_notes(self, notebook: AnalyzerNotebook, notes: Sequence[str]) -> None:
+        for note in notes:
+            text = normalize_whitespace(str(note or ""))
+            if not text:
+                continue
+            gap = f"readiness evidence note: {safe_excerpt(text, 220)}"
+            if gap not in notebook.uncertain_gaps:
+                notebook.uncertain_gaps.append(gap)
 
     def _model_label(self) -> str:
         settings = getattr(self.model_client, "settings", None)
@@ -1264,6 +1967,16 @@ class OutlineAnalyzerService:
                     return str(value)
         return type(self.model_client).__name__
 
+    def _workflow_instruction(self, analysis_type: AnalyzerAnalysisType | None) -> str:
+        if analysis_type == "relationship_analysis":
+            return RelationshipAnalyzerPrompt.workflow_instruction()
+        if analysis_type == "outline_analysis":
+            return OutlineAnalyzerPrompt.workflow_instruction()
+        return (
+            "本轮 analysis_type 尚未确定。必须先说明 Gate 信息不足，并请求能够区分 outline_analysis "
+            "或 relationship_analysis 的 evidence；不得直接给最终语义结论。"
+        )
+
     def build_loop_prompt(
         self,
         *,
@@ -1273,13 +1986,41 @@ class OutlineAnalyzerService:
         budget_state: Mapping[str, Any],
     ) -> tuple[str, str]:
         system_prompt = (
-            "你是只读 Outline Analyzer。你只能分析和建议，不能写 Memory、Writer artifact 或推进 workflow。\n"
+            "你是只读 Analyzer。你只能分析和建议，不能写 Memory、Writer artifact 或推进 workflow。\n"
             "不要声称已经读完整本书；先使用 seed 判断信息需求，再请求补充 evidence。\n"
             "必须区分 confirmed fact、reasonable inference、uncertain gap、user preference、speculative option。\n"
             "如果需要读原文，必须说明为什么摘要不足、要确认什么、会影响哪个分析判断。\n"
+            "如果已提交证据或 triage note 暴露出事实冲突，尤其是人物、对象、次数、代价、因果、时间线、"
+            "在场者等可核验事实冲突，不得直接 ready_to_answer；应请求 bounded raw_excerpt 或更精确的 chapter_summary "
+            "来核验，并以原文/更直接事实证据为标准。\n"
+            "summary-derived annotation（例如 importance_reason、importance_facets、summary_sufficiency）只能作为线索，"
+            "不能在与其他证据冲突时升级为 confirmed fact。\n"
             "优先使用 Narrative Index compact cards，尤其是 narrative_scene_card_search 来定位关键场景、情绪转折、"
             "关系变化、设定揭示和后续影响；只有 compact cards 不足时，再请求 chapter_summary/story_detail/raw_excerpt。\n"
+            "当用户问题要求的回答粒度超过 summary/index/card 已覆盖的信息时，"
+            "这些 evidence 只能作为定位或候选事实，不能替代缺失的更直接事实证据；"
+            "若定位已收敛但仍无法完整回答，应请求更精确 evidence 或 bounded raw_excerpt，"
+            "并填写 chapter_refs、document_ids 或 source_doc_ids。"
+            "可以先请求 text_search 作为 grep-like 词面定位：把用户问题拆成少量通用关键词，"
+            "用 metadata.terms 和 metadata.match_mode='all' 表示交集查询，并在 metadata.scopes 中选择 "
+            "memory_roots、outline_segments、chapter_summaries、character_profiles、index_cards。"
+            "定位 query 的 terms 必须能共同缩小范围；角色名、常见动作词、泛称、语气词或单字词只能作为辅助线索，"
+            "不得单独造成候选命中。只有在明确需要召回多个同义词/译名/原文拼写时才使用 match_mode='any'，"
+            "且 terms 中每个词本身都必须足够具体。若 text_search 只命中角色名或宽词，应视为过宽定位，"
+            "不要把它写入 notebook；应重试更窄关键词、改用 documents/raw_documents grep，或说明无法定位。"
+            "如果 documents grep 已返回一页候选但 raw_excerpt 后仍未完整回答，不要重复读取同一批 source_doc_ids；"
+            "应改用不同的具体关键词、放宽被代词/别名替代的人名约束，或用 metadata.match_offset 翻到下一页命中文档。"
+            "documents/raw_documents grep 默认可返回最多 10 个按原文顺序排列的命中文档片段；"
+            "如果当前页没有覆盖答案但仍可能存在后续命中，应优先翻页或直接读取后续候选 doc，而不是基于第一页作不存在判断。"
+            "如果这些摘要/索引范围都无法定位，但你已经得到可执行的关键词且问题需要原文级措辞，"
+            "可以请求 text_search 的 documents/raw_documents scope，并显式设置 metadata.allow_document_scan=true；"
+            "这只会做词面 grep，作为候选片段，不等于语义结论。"
+            "text_search 的 missing 分支只是定位失败，不应写入 notebook 成为事实；找到候选 chapter/source_doc_ids 后再请求更精确证据。"
+            "如果角色档案、场景卡、chapter_summary、outline/root/segment、text_search 都无法把范围收敛到少数章节或文档，"
+            "不要从第一章开始全书阅读，也不要继续无限思考；应返回 insufficient_memory 或 ready_to_answer，"
+            "明确说当前无法定位具体剧情范围，请用户提供章节、幕名、前后事件或关键词。\n"
             "重大剧情转向保持保守，不替用户授权终局秘密、角色死亡或世界规则突破。\n"
+            f"{self._workflow_instruction(seed.analysis_type)}\n"
             f"{ANALYZER_ANALYSIS_QUESTION_POLICY}\n"
             "除非用户只是在询问当前索引/建模状态，第一轮不要直接 ready_to_answer；"
             "请先请求 1-3 条与用户问题直接相关的 evidence，让后续回答有可审计依据。\n"
@@ -1289,8 +2030,12 @@ class OutlineAnalyzerService:
             "每轮只返回 JSON：status、requests、notebook_delta、可选 final_answer/message。"
         )
         payload = {
-            "analyzer_seed_packet": _seed_prompt_payload(seed),
-            "analyzer_notebook": _notebook_prompt_payload(notebook),
+            "analyzer_seed_packet": _seed_prompt_payload(seed, evidence_history=evidence_history),
+            "analysis_workflow": {
+                "analysis_type": seed.analysis_type,
+                "intent_gate": dict(seed.intent_gate),
+            },
+            "analyzer_notebook": _active_notebook_prompt_payload(notebook),
             "committed_evidence_digests": _compact_evidence_bundles(evidence_history[-6:]),
             "remaining_budget": {
                 **self.budget.to_dict(),
@@ -1306,6 +2051,7 @@ class OutlineAnalyzerService:
                 "theme_signal_card_search",
                 "world_concept_card_search",
                 "creative_reference_card_search",
+                "text_search",
                 "story_detail",
                 "fact_check",
                 "related_documents",
@@ -1326,6 +2072,35 @@ class OutlineAnalyzerService:
                         "purpose": "为什么需要此类 scene card evidence",
                         "priority": "high | medium | low",
                         "expected_depth": "index_card_summary",
+                    },
+                    {
+                        "type": "text_search",
+                        "query": "词面定位查询，例如查找同时包含若干关键词的 outline segment / chapter summary / profile / card",
+                        "purpose": "先缩小章节或 source_doc_ids 范围，再决定是否请求 chapter_summary/raw_excerpt",
+                        "priority": "high | medium | low",
+                        "expected_depth": "locator",
+                        "metadata": {
+                            "terms": ["关键词A", "关键词B"],
+                            "match_mode": "all",
+                            "scopes": ["outline_segments", "chapter_summaries", "character_profiles", "index_cards"],
+                            "allow_document_scan": False,
+                            "term_quality": "只放入能共同缩小范围的具体词；不要把宽泛词、人名或单字词当作可单独命中的定位词",
+                        },
+                    },
+                    {
+                        "type": "text_search",
+                        "query": "使用模型已提出的关键词对原文 document 做 grep-like 定位",
+                        "purpose": "摘要/索引未能定位，但需要原文级措辞或具体事实；只返回候选片段，后续仍需判断证据充分性",
+                        "priority": "high | medium | low",
+                        "expected_depth": "raw_document_locator",
+                        "metadata": {
+                            "terms": ["关键词A"],
+                            "match_mode": "all",
+                            "scopes": ["documents"],
+                            "allow_document_scan": True,
+                            "match_offset": 0,
+                            "term_quality": "使用上一轮已经明确的具体词；若需要多个同义词才可改用 any",
+                        },
                     }
                 ],
                 "notebook_delta": {
@@ -1339,7 +2114,84 @@ class OutlineAnalyzerService:
                 "final_answer": "ready_to_answer 时可直接给用户可读回答",
             },
         }
-        return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
+        return system_prompt, _json_prompt(payload)
+
+    def build_answer_readiness_prompt(
+        self,
+        *,
+        seed: AnalyzerSeedPacket,
+        notebook: AnalyzerNotebook,
+        evidence_history: Sequence[EvidenceBundle],
+        proposed_answer: str,
+        budget_state: Mapping[str, Any],
+    ) -> tuple[str, str]:
+        system_prompt = (
+            "你是 Analyzer 的 answer readiness 子步骤，只判断当前 evidence 是否足以支撑下一步给用户回答。\n"
+            "不要写最终回答，不要补写剧情，不要用本地常识填补小说事实。\n"
+            "判断依据不是题面关键词，而是：用户问题要求的回答粒度、proposed_answer 中将要断言的事实、"
+            "以及 committed evidence 是否已经覆盖这些事实。\n"
+            "如果现有 evidence 只是 locator（只定位到候选章节、source_doc_ids、人物档案或摘要分支），"
+            "但没有包含回答所需的事实细节、因果、措辞、在场信息、动机、语气或关系张力，"
+            "返回 need_more_info，并由你生成 1-2 条最小可执行 request。\n"
+            "当摘要、人物档案、index card 或 text_search 已经把范围收敛到少量章节/document/source_doc_ids，"
+            "且仍需要更直接事实才能完整回答时，可以请求 bounded raw_excerpt；必须填写 read_reason、"
+            "expected_confirmation 和 affects_analysis，并绑定 chapter_refs、document_ids 或 source_doc_ids。\n"
+            "如果当前 evidence 足够支持一个有边界的暂定回答，返回 ready_to_answer。\n"
+            "如果无法定位到可执行范围，不要请求全书原文或无限扩大搜索；返回 insufficient_memory，并说明需要用户补充什么线索。\n"
+            "只返回 JSON：status、requests、notes、message。"
+        )
+        payload = {
+            "user_question": seed.user_question,
+            "analysis_type": seed.analysis_type,
+            "proposed_answer_from_loop": safe_excerpt(proposed_answer, 1200),
+            "analyzer_notebook": _active_notebook_prompt_payload(notebook),
+            "committed_evidence_digests": _compact_evidence_bundles(evidence_history[-8:]),
+            "remaining_budget": {
+                **self.budget.to_dict(),
+                "total_requests_used": int(budget_state.get("total_requests_used") or 0),
+                "raw_requests_used": int(budget_state.get("raw_requests_used") or 0),
+            },
+            "available_request_types": [
+                "text_search",
+                "story_detail",
+                "fact_check",
+                "related_documents",
+                "chapter_summary",
+                "character_profile",
+                "world_concept",
+                "source_arc",
+                "open_threads",
+                "raw_excerpt",
+                "index_card_search",
+                "factual_event_card_search",
+                "narrative_scene_card_search",
+                "character_state_card_search",
+                "mystery_card_search",
+                "theme_signal_card_search",
+                "world_concept_card_search",
+                "creative_reference_card_search",
+            ],
+            "output_schema": {
+                "status": "ready_to_answer | need_more_info | insufficient_memory | budget_exhausted",
+                "requests": [
+                    {
+                        "type": "raw_excerpt",
+                        "query": "仍需确认的具体事实或细节",
+                        "purpose": "说明为什么现有 locator/summary evidence 不能完整回答",
+                        "priority": "high | medium | low",
+                        "expected_depth": "bounded_raw_excerpt",
+                        "source_doc_ids": [1],
+                        "chapter_refs": ["chapter-1"],
+                        "read_reason": "为什么必须读更直接事实证据",
+                        "expected_confirmation": "希望从该 evidence 确认什么",
+                        "affects_analysis": "该确认会如何影响最终回答",
+                    }
+                ],
+                "notes": ["简短说明当前 evidence 是否充分"],
+                "message": "insufficient_memory 或 budget_exhausted 时给用户看的简短原因",
+            },
+        }
+        return system_prompt, _json_prompt(payload)
 
     def build_triage_prompt(
         self,
@@ -1349,9 +2201,10 @@ class OutlineAnalyzerService:
         requests: Sequence[NarrativeInquiryRequest],
         candidate_bundles: Sequence[EvidenceBundle],
         budget_state: Mapping[str, Any],
+        kept_request_ids: Sequence[str] = (),
     ) -> tuple[str, str]:
         system_prompt = (
-            "你是 Outline Analyzer 的 evidence triage 子步骤，只判断候选证据是否值得进入后续上下文。\n"
+            "你是 Analyzer 的 evidence triage 子步骤，只判断候选证据是否值得进入后续上下文。\n"
             "不要给用户最终建议，不要补写剧情。只根据用户问题、request purpose、当前 notebook 和候选 evidence digest 判断相关性。\n"
             "保留直接支撑回答、暴露关键缺口、或能防止错误推断的 evidence；剔除只因关键词偶然命中、过宽、重复或无法改变判断的 evidence。\n"
             "只返回 JSON：kept_request_ids、rejected_request_ids、notes。"
@@ -1359,9 +2212,10 @@ class OutlineAnalyzerService:
         payload = {
             "user_question": seed.user_question,
             "story_overview": seed.story_overview,
-            "analyzer_notebook": _notebook_prompt_payload(notebook),
+            "analyzer_notebook": _active_notebook_prompt_payload(notebook),
             "requests": [request.to_dict() for request in requests],
             "candidate_evidence_digests": _compact_evidence_bundles(candidate_bundles),
+            "already_kept_request_ids": list(kept_request_ids),
             "budget_state": {
                 "total_requests_used": int(budget_state.get("total_requests_used") or 0),
                 "raw_requests_used": int(budget_state.get("raw_requests_used") or 0),
@@ -1372,7 +2226,7 @@ class OutlineAnalyzerService:
                 "notes": ["简短说明保留/剔除依据"],
             },
         }
-        return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
+        return system_prompt, _json_prompt(payload)
 
     def build_single_triage_prompt(
         self,
@@ -1385,11 +2239,22 @@ class OutlineAnalyzerService:
         kept_request_ids: Sequence[str],
     ) -> tuple[str, str]:
         system_prompt = (
-            "你是 Outline Analyzer 的逐条 evidence triage 子步骤。\n"
+            "你是 Analyzer 的逐条 evidence triage 子步骤。\n"
             "本轮只评估一个候选 evidence 是否值得进入后续上下文；不要给用户最终建议，不要补写剧情。\n"
             "只保留能直接支撑回答、暴露关键缺口、或防止错误推断的 evidence。"
+            "对于 text_search locator：如果 evidence 只命中角色名、常见动作词、泛称、单字词或其他过宽词，"
+            "没有把范围缩小到与 request purpose 直接相关的少数章节/文档，必须拒收；"
+            "notes 应建议重试更窄 terms、使用 match_mode='all' 交集，或转向 documents/raw_documents grep。"
+            "只有 locator 同时命中能支撑定位的具体词组，或明确给出了少数相关 chapter_refs/source_doc_ids，才可保留。"
+            "summary-derived annotation（如 importance_reason、importance_facets、summary_sufficiency）只代表摘要/索引判断，"
+            "不是原文级事实；当它断言人物、对象、次数、代价、因果、时间线或在场者，并与 notebook 或已保留证据冲突时，"
+            "不要把它判为摘要充分。应在 notes 中明确写出冲突和需要 raw_excerpt/chapter_summary 核验的目标。"
+            "如果候选证据只定位到相关章节/场景，但还不能覆盖用户问题要求的事实粒度，"
+            "应作为定位证据保留；后续 readiness/loop 应基于 evidence sufficiency 判断是否继续请求更直接证据。"
+            "如果候选 raw_excerpt 的 source_doc_ids 已经在当前 notebook 或已保留证据中读过，且没有新的关键词、offset、"
+            "chapter_refs 或 source_doc_ids，就必须拒收为重复读取，并在 notes 中要求换关键词、翻下一页或停止。"
             "遇到 narrative_scene index card 时，重点看 scene_type、turning_point、outcome、relationship_movements、"
-            "future_consequence、summary_sufficiency 和 raw_read_reason；摘要充分则不要求回读原文。"
+            "future_consequence、summary_sufficiency 和 raw_read_reason；只有不存在上述事实冲突时，摘要充分才可不要求回读原文。"
             "关键词偶然命中、过宽、重复或无法改变判断的 evidence 必须剔除。\n"
             "只返回 JSON：kept_request_ids、rejected_request_ids、notes。"
         )
@@ -1399,7 +2264,11 @@ class OutlineAnalyzerService:
             "analyzer_notebook_brief": {
                 "confirmed_facts": [safe_excerpt(item, 120) for item in notebook.confirmed_facts[-4:]],
                 "reasonable_inferences": [safe_excerpt(item, 120) for item in notebook.reasonable_inferences[-4:]],
-                "uncertain_gaps": [safe_excerpt(item, 120) for item in notebook.uncertain_gaps[-4:]],
+                "uncertain_gaps": [
+                    safe_excerpt(item, 120)
+                    for item in notebook.uncertain_gaps[-4:]
+                    if not normalize_whitespace(item).startswith("triage evidence note:")
+                ],
             },
             "request": request.to_dict() if request is not None else {"request_id": candidate_bundle.request_id, "type": candidate_bundle.request_type, "query": candidate_bundle.query},
             "candidate_evidence_digest": _compact_evidence_bundle(candidate_bundle, item_text_limit=260),
@@ -1414,7 +2283,7 @@ class OutlineAnalyzerService:
                 "notes": ["一句话说明保留/剔除依据"],
             },
         }
-        return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
+        return system_prompt, _json_prompt(payload)
 
     def build_final_prompt(
         self,
@@ -1425,11 +2294,16 @@ class OutlineAnalyzerService:
         budget_limited: bool,
     ) -> tuple[str, str]:
         system_prompt = (
-            "你是只读 Outline Analyzer。请基于 seed、notebook 和 evidence 给出用户可读中文分析。\n"
+            "你是只读 Analyzer。请基于 seed、notebook 和 evidence 给出用户可读中文分析。\n"
             "先给结论，再说明文学分析、事实依据、风险、可选走向、建议回读章节和需要用户确认的问题。\n"
+            f"{self._workflow_instruction(seed.analysis_type)}\n"
             f"{ANALYZER_ANALYSIS_QUESTION_POLICY}\n"
             "如果 evidence 中包含 narrative_scene card，请把它当作场景级结构证据使用：说明对应场景如何支撑人物性格、"
             "关系推进、世界观揭示、主题表达或后续行动推测。"
+            "如果 committed evidence 只来自 summary-derived annotation，或 evidence/notebook 暴露事实冲突，"
+            "最终回答不得把冲突项写成 confirmed fact；应说明需要原文核验，或引用 raw_excerpt/更直接章节事实作为标准。"
+            "如果 committed evidence 没有覆盖用户问题要求的事实粒度，最终回答不得给出超出证据的具体断言；"
+            "只能说明已定位/未定位的范围、证据缺口，以及需要用户补充的章节、幕名、前后事件或关键词。"
             "如果证据只能支持暂定判断，请直接给暂定判断，并在同一份回答中列出证据缺口和非阻塞追问。\n"
             "不要输出 JSON。不得夸大证据覆盖范围，不得把推断写成已确认事实。"
         )
@@ -1450,7 +2324,7 @@ class OutlineAnalyzerService:
                 "Reader promise",
             ],
         }
-        return system_prompt, json.dumps(payload, ensure_ascii=False, indent=2)
+        return system_prompt, _json_prompt(payload)
 
     def _status_answer(self, status: str, *, notebook: AnalyzerNotebook) -> str:
         if status == "budget_exhausted":
@@ -1485,3 +2359,8 @@ class OutlineAnalyzerService:
             evidence_history=[],
             budget_state={"total_requests_used": 0, "raw_requests_used": 0},
         )
+
+
+# Compatibility alias for the historical module/class name. New callers should
+# import AnalyzerService; Web payloads and job type still use outline_analyzer.
+OutlineAnalyzerService = AnalyzerService

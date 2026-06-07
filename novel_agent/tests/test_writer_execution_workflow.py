@@ -235,6 +235,154 @@ def test_draft_research_loop_writes_seed_notebook_and_uses_outline_segments(tmp_
     assert "outline_segment" in json.dumps(trace, ensure_ascii=False)
 
 
+def test_draft_research_character_index_uses_recent_experience_not_first_six(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "draft-research-experience-index.db")
+    service = DraftResearchService(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    story_events = [
+        {"experience_id": f"exp-{index}", "label": f"早期经历{index}", "summary": f"沈青早期经历{index}。"}
+        for index in range(8)
+    ]
+    story_events.extend(
+        [
+            {
+                "experience_id": "exp-8",
+                "label": "后段关键经历",
+                "summary": "沈青在后段经历中确认只能与顾迟有限合作。",
+                "source_doc_ids": [8],
+                "source_doc_range": "8",
+            },
+            {
+                "experience_id": "exp-9",
+                "label": "最新经历",
+                "summary": "沈青最新行动后仍对顾迟保持警惕。",
+                "source_doc_ids": [9],
+                "source_doc_range": "9",
+            },
+        ]
+    )
+    with db.connect() as conn:
+        db.init_schema(conn)
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": "book-draft-experience-index",
+                "canonical_name": "沈青",
+                "aliases": [],
+                "profile_summary_md": "沈青持续追查旧案。",
+                "story_events": story_events,
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        [profile] = service._character_index(  # noqa: SLF001
+            conn,
+            book_id="book-draft-experience-index",
+            execution_input={"chapter_brief": {"goal": "沈青继续追查旧案。"}},
+        )
+
+    rendered = json.dumps(profile["key_experience_index"], ensure_ascii=False)
+    assert "后段关键经历" in rendered
+    assert profile["story_events_page"]["total"] == 10
+    assert profile["story_events_page"]["has_more"] is True
+
+
+def test_draft_research_character_experience_supports_offset_pagination(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "draft-research-experience-page.db")
+    service = DraftResearchService(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+    story_events = [{"label": f"经历{index}", "summary": f"沈青第{index}段经历。"} for index in range(10)]
+    story_events[8] = {
+        "label": "后段关键经历",
+        "summary": "沈青在后段经历中确认只能与顾迟有限合作。",
+        "source_doc_ids": [8],
+        "source_doc_range": "8",
+    }
+    with db.connect() as conn:
+        db.init_schema(conn)
+        CharacterProfilesRepo().upsert(
+            conn,
+            {
+                "book_id": "book-draft-experience-page",
+                "canonical_name": "沈青",
+                "aliases": [],
+                "profile_summary_md": "沈青持续追查旧案。",
+                "story_events": story_events,
+                "evidence_level": "confirmed",
+                "created_at": "now",
+                "updated_at": "now",
+            },
+        )
+        conn.commit()
+
+        result = service._execute_request(  # noqa: SLF001
+            conn,
+            book_id="book-draft-experience-page",
+            request={
+                "type": "character_experience",
+                "name": "沈青",
+                "query": "分页读取沈青经历",
+                "metadata": {"story_events_offset": 8, "story_events_char_budget": 4096},
+            },
+        )
+
+    assert result["status"] == "answered"
+    assert result["experiences"][0]["summary"].startswith("后段关键经历")
+    assert result["profile_pages"][0]["story_events_page"]["offset"] == 8
+
+
+def test_writer_prompt_character_profile_story_events_are_relevant_or_recent_not_first_six(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    story_events = [
+        {"experience_id": f"exp-{index}", "label": f"早期经历{index}", "summary": f"沈青早期经历{index}。"}
+        for index in range(8)
+    ]
+    story_events.append(
+        {
+            "experience_id": "exp-8",
+            "label": "后段关键经历",
+            "summary": "沈青在后段经历中确认只能与顾迟有限合作。",
+            "source_doc_ids": [8],
+        }
+    )
+    story_events.append(
+        {
+            "experience_id": "exp-9",
+            "label": "最新经历",
+            "summary": "沈青最新行动后仍对顾迟保持警惕。",
+            "source_doc_ids": [9],
+        }
+    )
+
+    profile = executor._prompt_character_profile(  # noqa: SLF001
+        {
+            "canonical_name": "沈青",
+            "aliases": [],
+            "profile_summary_md": "沈青持续追查旧案。",
+            "relationships": [],
+            "recent_activity": [],
+            "story_events": story_events,
+        },
+        matcher_text=json.dumps({"chapter_brief": {"goal": "沈青继续追查旧案。"}}, ensure_ascii=False),
+    )
+
+    rendered = json.dumps(profile["story_events"], ensure_ascii=False)
+    assert "后段关键经历" in rendered
+    assert profile["story_events_page"]["selection_policy"].startswith("not_first_n")
+    assert profile["story_events_page"]["total"] == 10
+
+
 def test_draft_research_chapter_excerpt_parses_query_doc_id_and_tail(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "draft-research-query.db")
     run_writer = RunWriter(RunLayout(tmp_path / "runs"))

@@ -1503,7 +1503,8 @@ class OutlineResearchContextBroker:
             if result.summary_size > max_chars:
                 memory_debug = self._memory_debug_from_result_items(result.results)
                 compact_item: dict[str, Any] = {
-                    "summary": _safe_excerpt(json.dumps(result.results, ensure_ascii=False), limit=max_chars)
+                    "summary": _safe_excerpt(json.dumps(result.results, ensure_ascii=False), limit=max_chars),
+                    "fact_status": result.fact_status,
                 }
                 compact_item.update(memory_debug)
                 result.results = [compact_item]
@@ -1543,6 +1544,8 @@ class OutlineResearchContextBroker:
         max_chars: int,
         selection_adapter: object | None = None,
     ) -> ResearchResult:
+        if request.request_type == "text_search":
+            return self._resolve_text_search(conn, book_id=book_id, request=request, max_chars=max_chars)
         if request.request_type == "story_detail":
             return self.story_detail_resolver.resolve(
                 conn,
@@ -1557,6 +1560,80 @@ class OutlineResearchContextBroker:
             return self._resolve_world_concept(conn, book_id=book_id, request=request, max_chars=max_chars)
         return self._resolve_structure_pattern(conn, request=request, max_chars=max_chars)
 
+    def _resolve_text_search(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        request: ResearchRequest,
+        max_chars: int,
+    ) -> ResearchResult:
+        inquiry_request = NarrativeInquiryRequest(
+            request_id=request.request_id,
+            request_type="text_search",
+            query=request.query,
+            purpose=request.purpose,
+            priority=request.priority,
+            expected_depth="locator",
+            metadata={
+                "consumer": "outline_research",
+                "terms": list(request.metadata.get("terms") or request.facets_needed),
+                "match_mode": request.metadata.get("match_mode") or "all",
+                "scopes": request.metadata.get("scopes") or [
+                    "memory_roots",
+                    "outline_segments",
+                    "chapter_summaries",
+                    "character_profiles",
+                    "index_cards",
+                ],
+                **{str(key): value for key, value in request.metadata.items() if key not in {"terms", "match_mode", "scopes"}},
+            },
+        )
+        broker = NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.story_detail_resolver.memory_query_service,
+            character_profiles_repo=self.character_profiles_repo,
+            fragment_cards_repo=self.fragment_cards_repo,
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id=book_id,
+            request=inquiry_request,
+            budget=AnalyzerBudget(
+                max_total_requests=1,
+                max_requests_per_round=1,
+                max_evidence_chars_per_request=max(700, max_chars),
+                max_raw_excerpt_chars_per_request=max_chars,
+            ),
+        )
+        return ResearchResult(
+            request_id=request.request_id,
+            request_type="text_search",
+            query=request.query,
+            results=[
+                {
+                    **dict(item),
+                    "source_scope": "lexical_locator",
+                    "source_doc_ids": item.get("source_doc_ids") or [],
+                    "chapter_refs": item.get("chapter_refs") or [],
+                }
+                for item in bundle.evidence_items[:6]
+            ],
+            fact_status="candidate" if bundle.status == "found" else "missing",
+            sources=[
+                TraceableSource(
+                    type=str(source.get("type") or "text_search"),
+                    path=str(source.get("path") or ""),
+                    evidence_level="locator",
+                    snippet=_safe_excerpt(str(source), limit=180),
+                )
+                for source in bundle.sources
+            ],
+            confidence=0.75 if bundle.status == "found" else 0.0,
+            covered_facets=["locator", "source_doc_ids"] if bundle.source_doc_ids else ["locator"],
+            missing_facets=[] if bundle.status == "found" else list(bundle.missing_facets or ["text_matches"]),
+        )
+
     def _resolve_character_profile(
         self,
         conn: sqlite3.Connection,
@@ -1565,52 +1642,65 @@ class OutlineResearchContextBroker:
         request: ResearchRequest,
         max_chars: int,
     ) -> ResearchResult:
-        target = request.name or request.query
-        try:
-            rows = self.character_profiles_repo.list_by_book(conn, book_id=book_id)
-        except sqlite3.OperationalError:
-            rows = []
+        metadata = dict(request.metadata)
+        if "story_events_char_budget" in metadata:
+            try:
+                metadata["story_events_char_budget"] = min(4096, max(160, int(metadata["story_events_char_budget"])))
+            except (TypeError, ValueError):
+                metadata["story_events_char_budget"] = 4096
+        inquiry_request = NarrativeInquiryRequest(
+            request_id=request.request_id,
+            request_type="character_profile",
+            query=request.query,
+            purpose=request.purpose,
+            priority=request.priority,
+            name=request.name,
+            expected_depth="profile_with_story_events_page" if "story_events_offset" in metadata else "profile",
+            metadata=metadata,
+        )
+        broker = NarrativeInquiryBroker(
+            repo_root=self.repo_root,
+            memory_query_service=self.story_detail_resolver.memory_query_service,
+            character_profiles_repo=self.character_profiles_repo,
+            fragment_cards_repo=self.fragment_cards_repo,
+        )
+        bundle = broker.resolve_one(
+            conn,
+            book_id=book_id,
+            request=inquiry_request,
+            budget=AnalyzerBudget(
+                max_total_requests=1,
+                max_requests_per_round=1,
+                max_evidence_chars_per_request=max(700, max_chars),
+            ),
+        )
         matches = []
-        for row in rows:
-            aliases = [str(item) for item in _json_list(row["aliases_json"])]
-            canonical = str(row["canonical_name"])
-            if target and target not in canonical and target not in aliases and canonical not in request.query:
-                continue
-            evidence_level = str(row["evidence_level"] or "inferred")
-            matches.append(
-                {
-                    "character_id": str(row["character_id"]),
-                    "canonical_name": canonical,
-                    "aliases": aliases,
-                    "current_status": _safe_excerpt(str(row["profile_summary_md"] or ""), limit=max_chars // 3),
-                    "ability_boundary": _json_list(row["abilities_json"]),
-                    "relationship_state": _json_list(row["relationships_json"]),
-                    "story_events": _json_list(row["story_events_json"]),
-                    "recent_changes": _json_list(row["recent_activity_json"]),
-                    "mentioned_doc_ids": _json_list(row["mentioned_doc_ids_json"]),
-                    "speaking_doc_ids": _json_list(row["speaking_doc_ids_json"]),
-                    "fact_status": "candidate" if evidence_level in {"inferred", "candidate"} else "confirmed",
-                }
-            )
+        for item in bundle.evidence_items[:3]:
+            profile = dict(item)
+            profile["current_status"] = profile.get("summary") or ""
+            profile["relationship_state"] = profile.get("relationships") or []
+            profile["recent_changes"] = profile.get("recent_activity") or []
+            profile["fact_status"] = "candidate" if profile.get("evidence_level") in {"inferred", "candidate"} else "confirmed"
+            matches.append(profile)
         status = "missing" if not matches else ("confirmed" if all(item["fact_status"] == "confirmed" for item in matches) else "candidate")
         return ResearchResult(
             request_id=request.request_id,
             request_type="character_profile",
             query=request.query or request.name,
-            results=matches[:3],
+            results=matches,
             fact_status=status,  # type: ignore[arg-type]
             sources=[
                 TraceableSource(
                     type="character_profile",
-                    path=f"sqlite:character_profiles:{item['character_id']}",
+                    path=f"sqlite:character_profiles:{item.get('character_id')}",
                     evidence_level="structured_state",
-                    snippet=str(item["canonical_name"]),
+                    snippet=str(item.get("canonical_name") or ""),
                 )
-                for item in matches[:3]
+                for item in matches
             ],
             confidence=0.9 if matches else 0.0,
             covered_facets=["identity", "ability_boundary", "relationship_state"] if matches else [],
-            missing_facets=[] if matches else ["character_profile"],
+            missing_facets=[] if matches else list(bundle.missing_facets or ["character_profile"]),
         )
 
     def _resolve_world_concept(
@@ -2036,7 +2126,12 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             stage="propose_research_requests",
             system_prompt=(
                 "你是大纲研究 Agent。只返回 JSON。基于轻量 seed、notebook 和上一轮结果，"
-                "提出下一轮 research requests。请求类型只能是 story_detail、character_profile、world_concept、structure_pattern。"
+                "提出下一轮 research requests。请求类型只能是 text_search、story_detail、character_profile、world_concept、structure_pattern。"
+                "当需要先定位历史剧情、人物共同经历、伏笔或关键词交集时，优先使用 text_search 做 grep-like 词面定位；"
+                "定位失败的分支不要当成事实写入 notebook。"
+                "当大纲规划依赖人物关系转折、共同经历、承诺、创伤、状态变化或连续性边界时，"
+                "可以对 character_profile 请求设置 metadata.story_events_offset 和 metadata.story_events_char_budget<=4096 分页读取经历，"
+                "并根据返回的 story_events_page.next_offset 继续下一页。"
                 "不要编造本地资料中不存在的事实。"
                 "如果 seed_packet.continuation_boundary 指出 completed_anchor_document_title_index，"
                 "该章节只是已完成的过去剧情锚点；本轮只能研究 next_document_title_index 及之后如何续写，"
@@ -2047,7 +2142,18 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                 "planning_notebook": notebook.to_dict(),
                 "prior_results": [item.to_dict() for item in prior_results],
                 "budget_state": dict(budget_state),
-                "output_schema": {"requests": [{"request_type": "story_detail", "query": "...", "purpose": "...", "priority": "high"}]},
+                "output_schema": {
+                    "requests": [
+                        {
+                            "request_type": "character_profile",
+                            "name": "角色A",
+                            "query": "...",
+                            "purpose": "...",
+                            "priority": "high",
+                            "metadata": {"story_events_offset": 0, "story_events_char_budget": 4096},
+                        }
+                    ]
+                },
             },
             fallback={"requests": fallback_requests},
         )

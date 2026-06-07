@@ -147,7 +147,7 @@ def test_json_model_client_retries_with_thinking_disabled_after_exhaustion(
     def fake_build_model(self: JsonModelClient, settings: ModelSettings | None = None):  # type: ignore[no-untyped-def]
         resolved = settings or self.settings
         built_thinking_modes.append(resolved.thinking)
-        if resolved.thinking == "disabled":
+        if resolved.thinking is None:
             assert resolved.reasoning_effort is None
             assert resolved.include_reasoning_content is False
             return DisabledThinkingModel()
@@ -169,7 +169,43 @@ def test_json_model_client_retries_with_thinking_disabled_after_exhaustion(
     )
 
     assert client.generate_text(system_prompt="system", user_prompt="user") == "ok-without-thinking"
-    assert built_thinking_modes == ["enabled", "disabled"]
+    assert built_thinking_modes == ["enabled", None]
+
+
+def test_json_model_client_can_disable_thinking_for_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingModel:
+        def __init__(self, label: str | None) -> None:
+            self.label = label
+
+        def generate(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(content=f"ok:{self.label}", raw=None)
+
+    built_thinking_modes: list[str | None] = []
+
+    def fake_build_model(self: JsonModelClient, settings: ModelSettings | None = None):  # type: ignore[no-untyped-def]
+        resolved = settings or self.settings
+        built_thinking_modes.append(resolved.thinking)
+        if resolved.thinking == "disabled":
+            assert resolved.reasoning_effort is None
+            assert resolved.include_reasoning_content is False
+        return RecordingModel(resolved.thinking)
+
+    monkeypatch.setattr(JsonModelClient, "_build_model", fake_build_model)
+    client = JsonModelClient(
+        ModelSettings(
+            model_type="OpenAIModel",
+            model_name="fake",
+            api_key="test-key",
+            request_retry_attempts=1,
+            thinking="enabled",
+            reasoning_effort="high",
+            include_reasoning_content=True,
+        )
+    )
+
+    assert client.generate_text(system_prompt="system", user_prompt="user", thinking="disabled") == "ok:None"
+    assert client.generate_text(system_prompt="system", user_prompt="user") == "ok:enabled"
+    assert built_thinking_modes == ["enabled", None]
 
 
 def test_openai_model_uses_client_timeout_and_disables_nested_retries(
@@ -195,3 +231,31 @@ def test_openai_model_uses_client_timeout_and_disables_nested_retries(
 
     assert captured["timeout"] == 42
     assert captured["client_kwargs"] == {"timeout": 42, "max_retries": 0}
+
+
+def test_openai_model_omits_disabled_thinking_extra_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIModel:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    import smolagents.models as smolagents_models
+
+    monkeypatch.setattr(smolagents_models, "OpenAIModel", FakeOpenAIModel)
+    JsonModelClient(
+        ModelSettings(
+            model_type="OpenAIModel",
+            model_name="deepseek-test",
+            api_key="test-key",
+            thinking="disabled",
+            reasoning_effort=None,
+            include_reasoning_content=False,
+        )
+    )
+
+    assert captured["extra_body"] is None
+    assert captured["reasoning_effort"] is None
+    assert captured["include_reasoning_content"] is False
