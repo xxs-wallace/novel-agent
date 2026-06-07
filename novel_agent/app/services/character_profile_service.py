@@ -123,9 +123,14 @@ class CharacterProfileService:
                 names=[incoming_name, *identity_aliases],
             )
             id_row = self._row_for_character_id(conn, book_id=book_id, character_id=update.get("character_id"))
-            if id_row is not None and all(self._row_identity(row) != self._row_identity(id_row) for row in matched_rows):
-                matched_rows.insert(0, id_row)
+            if id_row is not None:
                 known_name_map.update(self._known_name_map_for_rows([id_row]))
+            primary_row = self._select_profile_update_row(
+                matched_rows=matched_rows,
+                id_row=id_row,
+                incoming_name=incoming_name,
+            )
+            matched_rows = [primary_row] if primary_row is not None else []
             all_known_names = [incoming_name, *identity_aliases]
             for row in matched_rows:
                 all_known_names.append(self._normalize_name(row["canonical_name"]))
@@ -145,17 +150,29 @@ class CharacterProfileService:
                 ),
             )
             base_profile = self._merge_existing_rows(matched_rows)
+            target_canonical_name = (
+                self._normalize_name(primary_row["canonical_name"])
+                if primary_row is not None
+                else canonical_name
+            )
+            target_update_names = self._names_for_target_profile(
+                [incoming_name, *identity_aliases],
+                canonical_name=canonical_name,
+                target_canonical_name=target_canonical_name,
+                known_name_map=known_name_map,
+                exclude_canonical=False,
+            )
             mentioned_doc_ids_for_update = self._doc_ids_for_names(
                 mentioned_doc_ids_by_name or {},
-                [incoming_name, *identity_aliases],
+                target_update_names,
             )
             speaking_doc_ids_for_update = self._doc_ids_for_names(
                 speaking_doc_ids_by_name or {},
-                [incoming_name, *identity_aliases],
+                target_update_names,
             )
             story_events_for_update = self._events_for_names(
                 story_events_by_name or {},
-                [incoming_name, *identity_aliases],
+                target_update_names,
             )
             story_events_for_update.extend(self._as_list(update.get("key_experiences")))
             story_events_for_update.extend(self._as_list(update.get("recent_key_experiences")))
@@ -169,10 +186,16 @@ class CharacterProfileService:
                 base_profile["speaking_doc_ids"],
                 speaking_doc_ids_for_update,
             )
-            aliases = self._merge_aliases(
-                base_profile["aliases"],
-                [incoming_name, *identity_aliases],
+            aliases = self._names_for_target_profile(
+                self._merge_aliases(
+                    base_profile["aliases"],
+                    [incoming_name, *identity_aliases],
+                    canonical_name=canonical_name,
+                ),
                 canonical_name=canonical_name,
+                target_canonical_name=target_canonical_name,
+                known_name_map=known_name_map,
+                exclude_canonical=True,
             )
             personality = self._merge_attribute_items(
                 base_profile["personality"],
@@ -351,6 +374,44 @@ class CharacterProfileService:
                 known_name_map[item] = canonical_name
         return matched_rows, known_name_map
 
+    def _select_profile_update_row(
+        self,
+        *,
+        matched_rows: list[Any],
+        id_row: Any | None,
+        incoming_name: str,
+    ) -> Any | None:
+        if id_row is not None:
+            return id_row
+        for row in matched_rows:
+            if self._normalize_name(row["canonical_name"]) == incoming_name:
+                return row
+        if len(matched_rows) == 1:
+            return matched_rows[0]
+        return None
+
+    def _names_for_target_profile(
+        self,
+        names: list[Any],
+        *,
+        canonical_name: str,
+        target_canonical_name: str,
+        known_name_map: dict[str, str],
+        exclude_canonical: bool,
+    ) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw_name in names:
+            name = self._normalize_name(raw_name)
+            if not name or (exclude_canonical and name == canonical_name) or name in seen:
+                continue
+            known_canonical_name = self._normalize_name(known_name_map.get(name))
+            if known_canonical_name and known_canonical_name != target_canonical_name:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+
     def _row_for_character_id(self, conn, *, book_id: str, character_id: object) -> Any | None:
         try:
             normalized_id = int(character_id or 0)
@@ -359,12 +420,6 @@ class CharacterProfileService:
         if normalized_id <= 0:
             return None
         return self.profiles_repo.get_by_id(conn, book_id=book_id, character_id=normalized_id)
-
-    def _row_identity(self, row: Any) -> int:
-        try:
-            return int(row["character_id"])
-        except (KeyError, TypeError, ValueError):
-            return 0
 
     def _known_name_map_for_rows(self, rows: list[Any]) -> dict[str, str]:
         known_name_map: dict[str, str] = {}

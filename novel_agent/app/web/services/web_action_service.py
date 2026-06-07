@@ -1429,6 +1429,17 @@ class WebActionService:
             if action == "confirm_identity_merge":
                 merge_result = self._confirm_identity_merge(conn, task_id=task_id, candidate=candidate)
                 self._mark_identity_candidate(conn, candidate_id=candidate_id, status="merged", extra={"merge_result": merge_result})
+                CharacterIdentityMergeService(profiles_repo=CharacterProfilesRepo()).mark_related_candidates_resolved(
+                    conn,
+                    book_id=task_id,
+                    resolved_candidate_id=candidate_id,
+                    left_character_id=candidate.get("left_character_id"),
+                    right_character_id=candidate.get("right_character_id"),
+                    left_name=candidate.get("left_name"),
+                    right_name=candidate.get("right_name"),
+                    status="merged",
+                    resolution_reason="same identity pair resolved by confirmed merge",
+                )
                 self._resolve_identity_block(conn, task_id=task_id, candidate_id=candidate_id, resolution="merged")
                 survivor_text = f"，保留为「{survivor_name}」" if survivor_name else ""
                 message = f"已确认人物身份合并：「{candidate_label}」{survivor_text}。相关人物档案已写回，可以重新开始阅读继续处理。"

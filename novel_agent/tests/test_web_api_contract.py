@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -16,7 +17,7 @@ from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.run_interactive import run_writer_workflow_action
 from novel_agent.app.web.main import create_app
-from novel_agent.app.web.schemas import JobSummary, WebActionRequest
+from novel_agent.app.web.schemas import DecisionCard, JobSummary, WebActionRequest
 from novel_agent.app.web.services.artifact_ids import decode_artifact_id
 from novel_agent.app.web.services.artifact_view_service import ArtifactViewService
 from novel_agent.app.web.services.job_manager import JobManager
@@ -159,6 +160,66 @@ def test_web_outline_analyzer_message_creates_job_and_does_not_submit_writer_act
     assert "supplement_text" not in rendered
     assert "revision_feedback" not in rendered
     assert "answer_text" not in rendered
+
+
+def test_identity_merge_message_sync_retires_resolved_candidate_cards(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "book.db")
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO character_identity_merge_candidates(
+                candidate_id, book_id, status, gate_level, recommended_action,
+                same_person_score, confidence, left_name, right_name,
+                survivor_canonical_name, created_at, updated_at, resolved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "identity-merge-candidate:done",
+                "book",
+                "merged",
+                "none",
+                "merge_profiles",
+                100,
+                1.0,
+                "角色甲",
+                "角色乙",
+                "角色乙",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:01+00:00",
+                "2026-01-01T00:00:01+00:00",
+            ),
+        )
+        conn.commit()
+
+    class _FakeFacade:
+        def task_snapshot(self, *, book_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(book_id=book_id, db_path=db.db_path)
+
+        def db_path_for_book(self, book_id: str) -> Path:
+            return db.db_path
+
+    session = WebSessionService(repo_root=tmp_path, facade=_FakeFacade())  # type: ignore[arg-type]
+    session.append_message(
+        "book",
+        role="assistant",
+        content="阅读已暂停：发现高置信人物身份候选「角色甲 / 角色乙」。请确认后再继续阅读。",
+        payload={"channel": "identity_merge_review", "candidate_id": "identity-merge-candidate:done"},
+        decision_cards=[
+            DecisionCard(
+                card_id="book:identity-merge:identity-merge-candidate:done",
+                title="待确认人物身份合并：角色甲 / 角色乙",
+            )
+        ],
+    )
+
+    session.sync_identity_merge_messages("book")
+    message = session._messages["book"][0]  # noqa: SLF001 - inspect sync result.
+
+    assert message.decision_cards == []
+    assert message.payload["status"] == "merged"
+    assert message.payload["resolved"] is True
+    assert "已处理" in message.content
 
 
 def test_outline_analyzer_model_omits_reasoning_effort_when_thinking_disabled(tmp_path: Path, monkeypatch: Any) -> None:

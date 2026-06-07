@@ -23,6 +23,7 @@ from novel_agent.app.services.chapter_assembler_service import ChapterBatch
 from novel_agent.app.services.chapter_event_list_service import ChapterEventListService
 from novel_agent.app.services.chapter_event_summary_service import ChapterEventSummaryService
 from novel_agent.app.services.character_mention_service import CharacterMentionService
+from novel_agent.app.services.character_identity_merge_service import CharacterIdentityMergeService
 from novel_agent.app.services.character_profile_service import CharacterProfileService
 from novel_agent.app.services.context_assembly_service import ContextAssemblyService
 from novel_agent.app.services.outline_event_summary_service import OutlineEventSummaryService
@@ -701,6 +702,85 @@ def test_character_profile_merge_ignores_alias_roster_dump_for_identity_matching
     assert "角色乙" not in aliases_by_name["角色甲"]
 
 
+def test_character_profile_update_does_not_merge_existing_profile_from_alias(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile-existing-alias.db")
+    service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=1,
+            doc_ids=[1],
+            updates=[
+                {"canonical_name": "角色甲", "aliases": [], "relationships": []},
+                {"canonical_name": "角色乙", "aliases": [], "relationships": []},
+            ],
+        )
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=2,
+            doc_ids=[2],
+            updates=[
+                {
+                    "canonical_name": "角色甲",
+                    "aliases": ["角色乙"],
+                    "relationships": [],
+                }
+            ],
+        )
+        profiles = conn.execute(
+            "SELECT canonical_name, aliases_json FROM character_profiles WHERE book_id = ? ORDER BY canonical_name",
+            ("book",),
+        ).fetchall()
+
+    assert [row["canonical_name"] for row in profiles] == ["角色乙", "角色甲"]
+    aliases_by_name = {row["canonical_name"]: json.loads(row["aliases_json"]) for row in profiles}
+    assert "角色乙" not in aliases_by_name["角色甲"]
+
+
+def test_character_profile_update_by_id_does_not_merge_existing_profile_from_alias(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "profile-existing-alias-by-id.db")
+    service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=1,
+            doc_ids=[1],
+            updates=[
+                {"canonical_name": "角色甲", "aliases": [], "relationships": []},
+                {"canonical_name": "角色乙", "aliases": [], "relationships": []},
+            ],
+        )
+        row = CharacterProfilesRepo().get(conn, book_id="book", canonical_name="角色甲")
+        assert row is not None
+        service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=2,
+            doc_ids=[2],
+            updates=[
+                {
+                    "character_id": int(row["character_id"]),
+                    "canonical_name": "角色甲",
+                    "aliases": ["角色乙"],
+                    "relationships": [],
+                }
+            ],
+        )
+        profiles = conn.execute(
+            "SELECT canonical_name, aliases_json FROM character_profiles WHERE book_id = ? ORDER BY canonical_name",
+            ("book",),
+        ).fetchall()
+
+    assert [row["canonical_name"] for row in profiles] == ["角色乙", "角色甲"]
+    aliases_by_name = {row["canonical_name"]: json.loads(row["aliases_json"]) for row in profiles}
+    assert "角色乙" not in aliases_by_name["角色甲"]
+
+
 def test_character_profile_keeps_long_form_story_event_history(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "profile-long-history.db")
     service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
@@ -734,6 +814,153 @@ def test_character_profile_keeps_long_form_story_event_history(tmp_path: Path) -
     events = json.loads(row["story_events_json"])
     assert len(events) == 30
     assert events[0]["event_id"] == "event-1"
+
+
+def test_identity_merge_candidate_id_is_stable_across_evidence_wording(tmp_path: Path) -> None:
+    class _IdentityMergeModel:
+        settings = SimpleNamespace(dry_run=False)
+
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error=False):  # type: ignore[no-untyped-def]
+            return (
+                {
+                    "recommended_action": "merge_profiles",
+                    "same_person_score": 95,
+                    "confidence": 0.99,
+                    "survivor_canonical_name": "角色乙",
+                    "aliases_to_keep": ["角色甲"],
+                    "evidence_summary": "原文揭示角色甲是角色乙的伪装身份。",
+                    "evidence_strengths": ["直接身份揭示"],
+                    "evidence_gaps": [],
+                    "pairwise_scores": [{"left_name": "角色甲", "right_name": "角色乙", "score": 95, "reason": "同一人物"}],
+                    "reason": "同一人物。",
+                },
+                "{}",
+            )
+
+    db = NovelAgentDB(tmp_path / "identity-candidate.db")
+    profile_service = CharacterProfileService(profiles_repo=CharacterProfilesRepo())
+    merge_service = CharacterIdentityMergeService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        profile_service.merge_updates(
+            conn,
+            book_id="book",
+            chapter_index=1,
+            doc_ids=[1],
+            updates=[
+                {"canonical_name": "角色甲", "aliases": [], "relationships": []},
+                {"canonical_name": "角色乙", "aliases": [], "relationships": []},
+            ],
+        )
+        first = merge_service.review_revelations(
+            conn,
+            book_id="book",
+            model_client=_IdentityMergeModel(),  # type: ignore[arg-type]
+            revelations=[
+                {
+                    "relation": "same_person",
+                    "left_name": "角色甲",
+                    "right_name": "角色乙",
+                    "evidence_summary": "角色甲脱去伪装后被称为角色乙。",
+                    "source_doc_ids": [7],
+                    "confidence": 0.99,
+                }
+            ],
+        )[0]
+        second = merge_service.review_revelations(
+            conn,
+            book_id="book",
+            model_client=_IdentityMergeModel(),  # type: ignore[arg-type]
+            revelations=[
+                {
+                    "relation": "same_person",
+                    "left_name": "角色甲",
+                    "right_name": "角色乙",
+                    "evidence_summary": "后文明确说明角色乙曾以角色甲身份行动。",
+                    "source_doc_ids": [7],
+                    "confidence": 0.99,
+                }
+            ],
+        )[0]
+        rows = conn.execute("SELECT candidate_id FROM character_identity_merge_candidates WHERE book_id = ?", ("book",)).fetchall()
+
+    assert first.candidate_id == second.candidate_id
+    assert len(rows) == 1
+
+
+def test_identity_merge_confirm_resolves_legacy_sibling_candidates(tmp_path: Path) -> None:
+    db = NovelAgentDB(tmp_path / "identity-siblings.db")
+    service = CharacterIdentityMergeService(profiles_repo=CharacterProfilesRepo())
+    with db.connect() as conn:
+        db.init_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO character_identity_merge_candidates(
+                candidate_id, book_id, status, gate_level, recommended_action,
+                same_person_score, confidence, left_character_id, left_name,
+                right_character_id, right_name, survivor_canonical_name,
+                decision_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "identity-merge-candidate:confirmed",
+                    "book",
+                    "merged",
+                    "none",
+                    "merge_profiles",
+                    100,
+                    1.0,
+                    10,
+                    "角色甲",
+                    20,
+                    "角色乙",
+                    "角色乙",
+                    "{}",
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
+                (
+                    "identity-merge-candidate:legacy-pending",
+                    "book",
+                    "pending_user_confirmation",
+                    "high",
+                    "merge_profiles",
+                    95,
+                    0.99,
+                    10,
+                    "角色甲",
+                    20,
+                    "角色乙",
+                    "角色乙",
+                    "{}",
+                    "2026-01-01T00:00:01+00:00",
+                    "2026-01-01T00:00:01+00:00",
+                ),
+            ],
+        )
+        changed = service.mark_related_candidates_resolved(
+            conn,
+            book_id="book",
+            resolved_candidate_id="identity-merge-candidate:confirmed",
+            left_character_id=10,
+            right_character_id=20,
+            left_name="角色甲",
+            right_name="角色乙",
+            status="merged",
+            resolution_reason="same identity pair resolved by confirmed merge",
+        )
+        row = conn.execute(
+            "SELECT status, gate_level, resolved_at, decision_json FROM character_identity_merge_candidates WHERE candidate_id = ?",
+            ("identity-merge-candidate:legacy-pending",),
+        ).fetchone()
+
+    assert changed == 1
+    assert row["status"] == "merged"
+    assert row["gate_level"] == "none"
+    assert row["resolved_at"]
+    decision = json.loads(row["decision_json"])
+    assert decision["resolved_by_candidate_id"] == "identity-merge-candidate:confirmed"
 
 
 def test_outline_service_renders_timeline_event_source_indexes(tmp_path: Path) -> None:

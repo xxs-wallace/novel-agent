@@ -1033,7 +1033,12 @@ class WebSessionService:
         return self._has_writer_gate_message(task_id, run_id, active_stage=active_stage)
 
     def sync_identity_merge_messages(self, task_id: str) -> None:
-        for candidate in self.identity_merge_candidates(task_id, statuses=["pending_user_confirmation"]):
+        candidates = self.identity_merge_candidates(task_id)
+        pending_candidates = [candidate for candidate in candidates if candidate.get("status") == "pending_user_confirmation"]
+        candidates_by_id = {str(candidate.get("candidate_id") or ""): candidate for candidate in candidates}
+        pending_ids = {str(candidate.get("candidate_id") or "") for candidate in pending_candidates}
+        self._retire_resolved_identity_merge_messages(task_id, pending_ids=pending_ids, candidates_by_id=candidates_by_id)
+        for candidate in pending_candidates:
             candidate_id = str(candidate.get("candidate_id") or "")
             if not candidate_id:
                 continue
@@ -1060,6 +1065,32 @@ class WebSessionService:
                 payload=self._identity_merge_message_payload(candidate),
                 decision_cards=[card],
             )
+
+    def _retire_resolved_identity_merge_messages(
+        self,
+        task_id: str,
+        *,
+        pending_ids: set[str],
+        candidates_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        for message in self._messages.get(task_id, []):
+            if message.payload.get("channel") != "identity_merge_review":
+                continue
+            candidate_id = str(message.payload.get("candidate_id") or "")
+            if not candidate_id or candidate_id in pending_ids:
+                continue
+            candidate = candidates_by_id.get(candidate_id, {})
+            status = str(candidate.get("status") or message.payload.get("status") or "resolved")
+            if message.payload.get("status") == status and not message.decision_cards:
+                continue
+            label = self._identity_merge_candidate_label(candidate or message.payload)
+            message.content = f"人物身份候选「{label}」已处理，不再需要确认。"
+            message.decision_cards = []
+            message.payload = {
+                **message.payload,
+                "status": status,
+                "resolved": True,
+            }
 
     def identity_merge_candidates(self, task_id: str, *, statuses: list[str] | None = None) -> list[dict[str, Any]]:
         snapshot = self.facade.task_snapshot(book_id=task_id)

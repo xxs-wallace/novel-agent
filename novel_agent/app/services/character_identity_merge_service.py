@@ -382,6 +382,16 @@ class CharacterIdentityMergeService:
             right_name=right_name,
             evidence=evidence,
         )
+        existing_pair_candidate = self._existing_candidate_for_pair(
+            conn,
+            book_id=book_id,
+            left_id=left_id,
+            right_id=right_id,
+            left_name=left_name,
+            right_name=right_name,
+        )
+        if existing_pair_candidate is not None:
+            candidate_id = str(existing_pair_candidate["candidate_id"] or candidate_id)
         result = CharacterIdentityMergeCandidateResult(
             candidate_id=candidate_id,
             status=status,
@@ -417,6 +427,59 @@ class CharacterIdentityMergeService:
                 decision=decision,
             )
         return result
+
+    def mark_related_candidates_resolved(
+        self,
+        conn,
+        *,
+        book_id: str,
+        resolved_candidate_id: str,
+        left_character_id: object,
+        right_character_id: object,
+        left_name: object,
+        right_name: object,
+        status: str,
+        resolution_reason: str,
+    ) -> int:
+        if status not in self.TERMINAL_CANDIDATE_STATUSES:
+            raise ValueError("related identity candidates can only be resolved to a terminal status")
+        names = self._name_list([left_name, right_name])
+        ids = [item for item in [self._safe_int(left_character_id), self._safe_int(right_character_id)] if item > 0]
+        if len(ids) < 2 and len(names) < 2:
+            return 0
+        rows = self._candidate_rows_for_pair(
+            conn,
+            book_id=book_id,
+            left_id=ids[0] if len(ids) > 0 else 0,
+            right_id=ids[1] if len(ids) > 1 else 0,
+            left_name=names[0] if len(names) > 0 else "",
+            right_name=names[1] if len(names) > 1 else "",
+        )
+        changed = 0
+        now = _utc_now()
+        for row in rows:
+            candidate_id = str(row["candidate_id"] or "")
+            if not candidate_id or candidate_id == resolved_candidate_id:
+                continue
+            if str(row["status"] or "") in self.TERMINAL_CANDIDATE_STATUSES:
+                continue
+            decision = self._load_json_dict(row, "decision_json")
+            decision.update(
+                {
+                    "resolution_reason": resolution_reason,
+                    "resolved_by_candidate_id": resolved_candidate_id,
+                }
+            )
+            conn.execute(
+                """
+                UPDATE character_identity_merge_candidates
+                SET status = ?, gate_level = ?, decision_json = ?, resolved_at = ?, updated_at = ?
+                WHERE candidate_id = ?
+                """,
+                (status, "none", json.dumps(decision, ensure_ascii=False), now, now, candidate_id),
+            )
+            changed += 1
+        return changed
 
     def _gate_for_decision(self, *, score: int, recommended_action: str) -> tuple[str, str]:
         if recommended_action not in self.MERGE_RELATED_ACTIONS:
@@ -792,6 +855,70 @@ class CharacterIdentityMergeService:
             return "identity merge evidence lacks source refs"
         return ""
 
+    def _existing_candidate_for_pair(
+        self,
+        conn,
+        *,
+        book_id: str,
+        left_id: int,
+        right_id: int,
+        left_name: str,
+        right_name: str,
+    ) -> Any | None:
+        rows = self._candidate_rows_for_pair(
+            conn,
+            book_id=book_id,
+            left_id=left_id,
+            right_id=right_id,
+            left_name=left_name,
+            right_name=right_name,
+        )
+        if not rows:
+            return None
+        rows.sort(
+            key=lambda row: (
+                0 if str(row["status"] or "") in self.TERMINAL_CANDIDATE_STATUSES else 1,
+                str(row["updated_at"] or ""),
+            ),
+            reverse=False,
+        )
+        return rows[0]
+
+    def _candidate_rows_for_pair(
+        self,
+        conn,
+        *,
+        book_id: str,
+        left_id: int,
+        right_id: int,
+        left_name: str,
+        right_name: str,
+    ) -> list[Any]:
+        left_id = self._safe_int(left_id)
+        right_id = self._safe_int(right_id)
+        names = self._name_list([left_name, right_name])
+        clauses: list[str] = []
+        args: list[Any] = [book_id]
+        if left_id > 0 and right_id > 0:
+            clauses.append(
+                "((left_character_id = ? AND right_character_id = ?) OR (left_character_id = ? AND right_character_id = ?))"
+            )
+            args.extend([left_id, right_id, right_id, left_id])
+        if len(names) >= 2:
+            clauses.append("((left_name = ? AND right_name = ?) OR (left_name = ? AND right_name = ?))")
+            args.extend([names[0], names[1], names[1], names[0]])
+        if not clauses:
+            return []
+        return conn.execute(
+            f"""
+            SELECT *
+            FROM character_identity_merge_candidates
+            WHERE book_id = ? AND ({" OR ".join(clauses)})
+            ORDER BY updated_at DESC
+            """,
+            args,
+        ).fetchall()
+
     def _evidence_from_revelation(self, revelation: Mapping[str, Any]) -> CharacterIdentityMergeEvidence:
         return CharacterIdentityMergeEvidence(
             summary=str(revelation.get("evidence_summary") or revelation.get("summary") or "").strip(),
@@ -882,6 +1009,16 @@ class CharacterIdentityMergeService:
             return []
         return loaded if isinstance(loaded, list) else []
 
+    def _load_json_dict(self, row: Any, field_name: str) -> dict[str, Any]:
+        raw = row[field_name]
+        if not raw:
+            return {}
+        try:
+            loaded = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
     def _name_list(self, values: object) -> list[str]:
         if values is None:
             return []
@@ -931,6 +1068,13 @@ class CharacterIdentityMergeService:
             score = 0
         return max(0, min(100, score))
 
+    @staticmethod
+    def _safe_int(value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def _candidate_id(
         self,
         *,
@@ -943,8 +1087,5 @@ class CharacterIdentityMergeService:
     ) -> str:
         ordered_ids = sorted([left_id, right_id])
         ordered_names = sorted(self._name_list([left_name, right_name]))
-        source_key = ",".join(str(item) for item in evidence.source_doc_ids) or ",".join(evidence.outline_segment_ids)
-        digest = hashlib.sha1(
-            f"{book_id}:{ordered_ids}:{ordered_names}:{source_key}:{evidence.summary}".encode("utf-8")
-        ).hexdigest()[:16]
+        digest = hashlib.sha1(f"{book_id}:{ordered_ids}:{ordered_names}".encode("utf-8")).hexdigest()[:16]
         return f"identity-merge-candidate:{digest}"
