@@ -109,11 +109,14 @@ Draft Research Loop SHALL 落盘 `draft_context_notebook.json` 或等价 artifac
 - `user_supplement`：用户通过当前 artifact 时输入的原文补充，包括字数、风格、节奏、重点描写、必须保留项和禁止项。
 - `draft_context`：Draft Research Loop 摘取的当前草稿事实笔记、人物约束、场景索引和 unresolved risks。
 - `style`：风格参考片段、叙述距离、句法密度、对话节奏和表达偏好。
+- `reference_advice`：借鉴对象引导创作模式下，来自借鉴对象精读大纲、剧情设计、结构模式或 Creative KB 的方向建议；只能影响大纲建议、人物设定建议和正文表达策略，不能作为新任务 confirmed fact。
 - `forbidden`：不得提前揭露的秘密、禁止关系跃迁、未确认设定、不得消费的后续剧情。
 - `relation`：当前关系状态、允许推进幅度、所需桥接事件。
 - `character`：已通过的人物规划 / 登场计划。
 - `budget`：目标字数、最小/最大字数、重点章标记和 prompt token 预算。
 - `rewrite`：用户草稿反馈归类、保留项、修正项、删除项和重写模式。
+
+在借鉴对象引导创作模式中，`facts` 只能来自用户输入、用户确认后的 artifact、新任务 Memory 或新任务已 accepted 的 document。借鉴对象的大纲、剧情设计、人物配置和原作片段不得进入 `facts`；它们只能进入 `reference_advice` 或 `style`。若用户明确采纳某条建议，采纳后的内容以用户回答或 artifact 修改为来源进入 `facts`，而不是以借鉴对象原文为来源。
 
 `SourceArcMap` 只能作为源作品结构定位事实，用于理解当前结构阶段、未回收线索和人物线位置，不得被当作续写事件顺序。
 
@@ -278,6 +281,22 @@ accepted 后的写回至少包含：
 ### Requirement: 风格参考与事实约束分离
 
 系统 SHALL 将风格参考、范文模仿与事实型上下文分开存储、分开装配；当二者冲突时事实优先。
+
+### Requirement: 借鉴对象只读参考不得污染新任务事实
+
+系统 SHALL 在借鉴对象引导创作模式中，将借鉴对象的精读结果、剧情设计、结构模式和 Creative KB 片段作为只读参考处理。
+
+#### Scenario: 大纲阶段使用借鉴对象提出建议
+- **WHEN** Outline Research Loop 查询借鉴对象的大纲设计、结构节奏或人物配置
+- **THEN** 查询结果只能进入 `reference_advice`、`outline_guidance_notebook.json` 或 `planning_notebook` 的参考建议区
+- **AND** 不得写入新任务 confirmed facts
+- **AND** 用户采纳建议后，系统必须以用户回答或用户修改后的 artifact 作为事实来源
+
+#### Scenario: 正文阶段使用文风参考
+- **WHEN** Draft Research Loop 从借鉴对象 Creative KB 检索片段
+- **THEN** 片段只能进入 `style_reference_bundle` 或 `style_notes`
+- **AND** Draft Prose Executor 不得复制借鉴对象具体桥段、角色、设定或独特表达
+- **AND** 当 `style` 与 `facts` 冲突时，`facts` 优先
 
 ### Requirement: 用户确认点必须可恢复
 

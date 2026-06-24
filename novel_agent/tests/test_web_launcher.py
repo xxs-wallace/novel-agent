@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 
@@ -43,6 +44,22 @@ def test_web_launcher_builds_backend_and_frontend_commands(tmp_path: Path) -> No
     ]
     assert launcher.backend_environment()["NOVEL_AGENT_REPO_ROOT"] == str(tmp_path)
     assert launcher.frontend_environment()["VITE_API_PROXY_TARGET"] == "http://127.0.0.1:8100"
+    assert launcher.config.log_path == tmp_path / "runs" / "logs" / "web_launcher.log"
+
+
+def test_web_launcher_waits_for_ready_port(tmp_path: Path) -> None:
+    web_dir = tmp_path / "web"
+    web_dir.mkdir()
+    (web_dir / "package.json").write_text("{}", encoding="utf-8")
+    config = LauncherConfig(repo_root=tmp_path, open_browser=False)
+    launcher = WebWorkbenchLauncher(config)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        port = int(server.getsockname()[1])
+
+        assert launcher._wait_for_port("127.0.0.1", port, "测试", timeout_seconds=0.5)
 
 
 def test_dependency_inspector_reports_missing_node_and_npm(tmp_path: Path) -> None:

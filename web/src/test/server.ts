@@ -5,6 +5,7 @@ import type {
   ArtifactSurface,
   ArtifactTreeNode,
   ArtifactView,
+  AnalyzerSessionSummary,
   ConversationMessage,
   JobSummary,
   JobEventView,
@@ -25,23 +26,28 @@ export const calls: {
   messages: Array<{ taskId: string; body: unknown }>;
   commands: Array<{ taskId: string; body: unknown }>;
   deleteWriterRuns: Array<{ taskId: string; confirm: boolean }>;
+  analyzerRollbacks: Array<{ taskId: string; sessionId: string; confirm: boolean }>;
 } = {
   createTask: [],
   actions: [],
   artifactViews: [],
   messages: [],
   commands: [],
-  deleteWriterRuns: []
+  deleteWriterRuns: [],
+  analyzerRollbacks: []
 };
 
 let tasks: TaskSummary[] = [];
 let messagesByTask: Record<string, ConversationMessage[]> = {};
+let analyzerSessionsByTask: Record<string, AnalyzerSessionSummary[]> = {};
 let messageListCounts: Record<string, number> = {};
 let deferredMessagesByTask: Record<string, ConversationMessage> = {};
 let deferredMessageJobIds: Record<string, string> = {};
 let deferredMessagesReady: Record<string, boolean> = {};
 let messageResponseDelayMs = 0;
 let writerPreflightCanStart = true;
+let writerTreeIncludesGeneratedChapters = false;
+let taskListFailuresRemaining = 0;
 
 function progress(step = "freeze_d_review") {
   return {
@@ -88,12 +94,15 @@ export function resetMockState() {
   calls.messages = [];
   calls.commands = [];
   calls.deleteWriterRuns = [];
+  calls.analyzerRollbacks = [];
   messageListCounts = {};
   deferredMessagesByTask = {};
   deferredMessageJobIds = {};
   deferredMessagesReady = {};
   messageResponseDelayMs = 0;
   writerPreflightCanStart = true;
+  writerTreeIncludesGeneratedChapters = false;
+  taskListFailuresRemaining = 0;
   tasks = [makeTask("task-alpha", true), makeTask("task-beta")];
   messagesByTask = {
     "task-alpha": [
@@ -121,6 +130,24 @@ export function resetMockState() {
           }
         ],
         created_at: now
+      }
+    ],
+    "task-beta": []
+  };
+  analyzerSessionsByTask = {
+    "task-alpha": [
+      {
+        book_id: "task-alpha",
+        session_id: "analyzer-session-existing",
+        title: "旧案线索讨论",
+        source_task_id: "task-alpha",
+        status: "idle",
+        turn_count: 1,
+        latest_turn_id: "turn-existing",
+        latest_preview: "上一轮建议先回收旧案线索。",
+        conversation_brief: "围绕旧案线索推进顺序展开。",
+        created_at: now,
+        updated_at: now
       }
     ],
     "task-beta": []
@@ -203,6 +230,14 @@ export function setTaskActiveJob(taskId: string, jobId = "job-existing-start_clo
 
 export function setWriterPreflightBlocked() {
   writerPreflightCanStart = false;
+}
+
+export function setWriterTreeIncludesGeneratedChapters(enabled = true) {
+  writerTreeIncludesGeneratedChapters = enabled;
+}
+
+export function setTaskListFailures(count: number) {
+  taskListFailuresRemaining = Math.max(0, count);
 }
 
 export function setWriterQuestionMessage(taskId = "task-alpha") {
@@ -441,6 +476,28 @@ const writerTree: ArtifactTreeNode[] = [
   }
 ];
 
+function writerTreeForResponse(): ArtifactTreeNode[] {
+  if (!writerTreeIncludesGeneratedChapters) {
+    return writerTree;
+  }
+  return [
+    {
+      ...writerTree[0],
+      children: [
+        ...writerTree[0].children,
+        {
+          ...node("writer-generated-chapters", "已写回章节", "writer_stage", "writer", "2 章"),
+          children: [
+            node("writer-generated-chapter-1", "1. 尘与回声", "chapter", "writer", "已写回"),
+            node("writer-generated-chapter-2", "2. 血与信号", "chapter", "writer", "已写回")
+          ]
+        }
+      ]
+    },
+    ...writerTree.slice(1)
+  ];
+}
+
 function node(id: string, label: string, kind: string, surface: ArtifactSurface, badge = ""): ArtifactTreeNode {
   return {
     id,
@@ -588,7 +645,13 @@ function jobEvents(jobId: string): JobEventView[] {
 }
 
 export const handlers = [
-  http.get("/api/tasks", () => HttpResponse.json(tasks)),
+  http.get("/api/tasks", () => {
+    if (taskListFailuresRemaining > 0) {
+      taskListFailuresRemaining -= 1;
+      return HttpResponse.json({ code: "temporarily_unavailable", message: "backend warming up" }, { status: 503 });
+    }
+    return HttpResponse.json(tasks);
+  }),
   http.post("/api/tasks", async ({ request }) => {
     const body = (await request.json()) as { task_id: string; source_path?: string };
     calls.createTask.push(body);
@@ -641,12 +704,71 @@ export const handlers = [
       technical_details: {}
     })
   ),
-  http.get("/api/tasks/:taskId/messages", ({ params }) => {
+  http.get("/api/tasks/:taskId/messages", ({ params, request }) => {
     const taskId = String(params.taskId);
     messageListCounts[taskId] = (messageListCounts[taskId] ?? 0) + 1;
+    const analyzerSessionId = new URL(request.url).searchParams.get("analyzer_session_id") ?? "";
     const messages = messagesByTask[taskId] ?? [];
     const deferredMessage = deferredMessagesReady[taskId] && messageListCounts[taskId] > 1 ? deferredMessagesByTask[taskId] : null;
-    return HttpResponse.json(deferredMessage ? [...messages, deferredMessage] : messages);
+    const visibleMessages = deferredMessage ? [...messages, deferredMessage] : messages;
+    return HttpResponse.json(
+      analyzerSessionId
+        ? visibleMessages.filter(
+            (message) => message.payload?.channel === "outline_analyzer" && message.payload?.analyzer_session_id === analyzerSessionId
+          )
+        : visibleMessages
+    );
+  }),
+  http.get("/api/tasks/:taskId/analyzer-sessions", ({ params }) => {
+    return HttpResponse.json(analyzerSessionsByTask[String(params.taskId)] ?? []);
+  }),
+  http.post("/api/tasks/:taskId/analyzer-sessions", async ({ params, request }) => {
+    const body = (await request.json()) as { title?: string; initial_question?: string };
+    const taskId = String(params.taskId);
+    const session: AnalyzerSessionSummary = {
+      book_id: taskId,
+      session_id: `analyzer-session-${Object.values(analyzerSessionsByTask).flat().length + 1}`,
+      title: body.title || body.initial_question || "新的小说讨论",
+      source_task_id: taskId,
+      status: "idle",
+      turn_count: 0,
+      latest_turn_id: "",
+      latest_preview: "",
+      conversation_brief: "",
+      created_at: now,
+      updated_at: now
+    };
+    analyzerSessionsByTask[taskId] = [session, ...(analyzerSessionsByTask[taskId] ?? [])];
+    return HttpResponse.json(session);
+  }),
+  http.delete("/api/tasks/:taskId/analyzer-sessions/:sessionId/latest-turn", ({ params, request }) => {
+    const taskId = String(params.taskId);
+    const sessionId = String(params.sessionId);
+    const confirm = new URL(request.url).searchParams.get("confirm") === "true";
+    calls.analyzerRollbacks.push({ taskId, sessionId, confirm });
+    const sessions = analyzerSessionsByTask[taskId] ?? [];
+    const session = sessions.find((item) => item.session_id === sessionId);
+    const turnId = session?.latest_turn_id || "turn-existing";
+    if (confirm && session) {
+      session.turn_count = Math.max(0, session.turn_count - 1);
+      session.latest_turn_id = session.turn_count > 0 ? "turn-previous" : "";
+      session.latest_preview = session.turn_count > 0 ? "上一轮建议先回收旧案线索。" : "";
+      messagesByTask[taskId] = (messagesByTask[taskId] ?? []).filter((message) => message.payload?.turn_id !== turnId);
+    }
+    return HttpResponse.json({
+      book_id: taskId,
+      session_id: sessionId,
+      confirmed: confirm,
+      turn_id: turnId,
+      job_id: "job-existing",
+      previous_turn_id: "turn-previous",
+      candidate_paths: ["/tmp/turn.md", "/tmp/job"],
+      moved_paths: confirm ? ["/tmp/turn.md", "/tmp/job"] : [],
+      backup_path: confirm ? "/tmp/.backups/analyzer-rollback" : "",
+      errors: [],
+      removed_message_count: confirm ? 2 : 0,
+      message: confirm ? "已撤回最近一轮小说讨论，可以补充细节后重新发送。" : "将撤回最近一轮小说讨论，不影响更早的讨论上下文。"
+    });
   }),
   http.post("/api/tasks/:taskId/messages", async ({ params, request }) => {
     const body = await request.json();
@@ -654,17 +776,41 @@ export const handlers = [
       await delay(messageResponseDelayMs);
     }
     calls.messages.push({ taskId: String(params.taskId), body });
-    const payload = (body as { payload?: Record<string, unknown> }).payload ?? {};
+    const taskId = String(params.taskId);
+    const payload = { ...((body as { payload?: Record<string, unknown> }).payload ?? {}) };
+    if (payload.channel === "outline_analyzer") {
+      let sessionId = String(payload.analyzer_session_id ?? "");
+      if (!sessionId) {
+        sessionId = `analyzer-session-${Object.values(analyzerSessionsByTask).flat().length + 1}`;
+        analyzerSessionsByTask[taskId] = [
+          {
+            book_id: taskId,
+            session_id: sessionId,
+            title: String(payload.question || (body as { content?: string }).content || "小说讨论").slice(0, 28),
+            source_task_id: taskId,
+            status: "running",
+            turn_count: 1,
+            latest_turn_id: "turn-new",
+            latest_preview: "",
+            conversation_brief: "",
+            created_at: now,
+            updated_at: now
+          },
+          ...(analyzerSessionsByTask[taskId] ?? [])
+        ];
+      }
+      payload.analyzer_session_id = sessionId;
+    }
     const message: ConversationMessage = {
       message_id: `user-${calls.messages.length}`,
-      task_id: String(params.taskId),
+      task_id: taskId,
       role: "user",
       content: String((body as { content?: string }).content ?? ""),
       payload,
       decision_cards: [],
       created_at: now
     };
-    messagesByTask[String(params.taskId)] = [...(messagesByTask[String(params.taskId)] ?? []), message];
+    messagesByTask[taskId] = [...(messagesByTask[taskId] ?? []), message];
     return HttpResponse.json(message);
   }),
   http.post("/api/tasks/:taskId/commands", async ({ params, request }) => {
@@ -692,7 +838,7 @@ export const handlers = [
   http.get("/api/tasks/:taskId/artifact-tree", ({ request }) => {
     const surface = new URL(request.url).searchParams.get("surface");
     const query = new URL(request.url).searchParams.get("q")?.trim() ?? "";
-    return HttpResponse.json(surface === "writer" ? writerTree : filterCloseReadTree(query));
+    return HttpResponse.json(surface === "writer" ? writerTreeForResponse() : filterCloseReadTree(query));
   }),
   http.get("/api/artifacts/:artifactId/view", ({ params }) => {
     calls.artifactViews.push(String(params.artifactId));

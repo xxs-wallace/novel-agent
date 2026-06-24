@@ -8,11 +8,13 @@ import { WorkspaceShell } from "../components/layout/WorkspaceShell";
 import {
   calls,
   setMessageResponseDelay,
+  setTaskListFailures,
   setTaskActiveJob,
   setWriterPreflightBlocked,
   setWriterArtifactReviewAfterJobReplay,
   setWriterArtifactReviewMessage,
   setWriterDraftReviewMessage,
+  setWriterTreeIncludesGeneratedChapters,
   setWriterQuestionMessage
 } from "./server";
 
@@ -39,6 +41,14 @@ describe("Novel Agent Web workspace", () => {
     expect(screen.queryByText("freeze_d_review")).not.toBeInTheDocument();
     expect(screen.queryByText("wait_chapter_acceptance")).not.toBeInTheDocument();
     expect(screen.queryByText("我的反馈")).not.toBeInTheDocument();
+  });
+
+  it("recovers when the first task list request races a warming backend", async () => {
+    setTaskListFailures(1);
+    renderWorkspace();
+
+    expect(await screen.findByRole("button", { name: "task-alpha" })).toBeInTheDocument();
+    expect(screen.getByText("2 个任务")).toBeInTheDocument();
   });
 
   it("shows Creative KB build progress in the task rail", async () => {
@@ -69,6 +79,39 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() => expect(calls.createTask).toHaveLength(1));
     expect(calls.createTask[0]).toEqual({ task_id: "new-task", source_path: "/tmp/source.txt" });
     await waitFor(() => expect(calls.actions.some((call) => call.taskId === "new-task" && call.body.action === "start_read")).toBe(true));
+  });
+
+  it("uses a separate original writing wizard with reference task input", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "创建任务" }));
+    const createDialog = screen.getByRole("dialog", { name: "创建任务" });
+    await user.type(within(createDialog).getByLabelText("任务 ID"), "new-original");
+    await user.click(within(createDialog).getByLabelText("原创写作任务（无原文）"));
+    await user.click(within(createDialog).getByRole("button", { name: "创建任务" }));
+
+    expect(await screen.findByRole("button", { name: "开始原创写作" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "开始原创写作" }));
+    const writerDialog = await screen.findByRole("dialog", { name: "创建原创/仿写任务" });
+    await user.type(within(writerDialog).getByLabelText("原创大纲"), "废土穿越女主寻找回家方法。");
+    await user.type(within(writerDialog).getByLabelText("借鉴任务 ID"), "longzu-前三部");
+    await user.click(within(writerDialog).getByRole("button", { name: "创建原创/仿写任务" }));
+
+    await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(true));
+    const writerCall = calls.actions.find((call) => call.body.action === "start_writer");
+    expect(writerCall?.body.payload).toMatchObject({
+      continuation_goal: "废土穿越女主寻找回家方法。",
+      reference_task_id: "longzu-前三部",
+      reference_work: {
+        source_task_id: "longzu-前三部",
+        mode: "reference_guided_original_creation"
+      },
+      target_chapter_count: 5,
+      default_chapter_target_chars: 10000,
+      target_total_chars: 50000
+    });
   });
 
   it("asks for confirmation before switching selected task", async () => {
@@ -157,6 +200,18 @@ describe("Novel Agent Web workspace", () => {
     await waitFor(() => expect(calls.artifactViews.length).toBeGreaterThan(initialArtifactViewCalls));
   });
 
+  it("opens Writer results by default when a task has written-back chapters", async () => {
+    setWriterTreeIncludesGeneratedChapters();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    const writerTab = await screen.findByRole("tab", { name: /Writer/ });
+    await waitFor(() => expect(writerTab).toHaveAttribute("aria-selected", "true"));
+    expect(await screen.findByText("已写回章节")).toBeInTheDocument();
+    expect(await screen.findByText("1. 尘与回声")).toBeInTheDocument();
+    await waitFor(() => expect(calls.artifactViews).toContain("writer-generated-chapter-1"));
+  });
+
   it("reconnects to an already running task job after loading tasks", async () => {
     setTaskActiveJob("task-alpha");
     renderWorkspace();
@@ -196,9 +251,10 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
-    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
+    await user.click(await screen.findByRole("button", { name: "小说讨论" }));
+    expect(await screen.findByText("旧案线索讨论")).toBeInTheDocument();
     const input = await screen.findByLabelText("输入给 Agent 的自然语言");
-    expect(input).toHaveAttribute("placeholder", "向小说专家提问，例如：当前未解之谜哪条最适合下一阶段回收？");
+    expect(input).toHaveAttribute("placeholder", "继续这个小说讨论。你的回答会作为本 session 的背景。");
 
     await user.type(input, "当前旧案线索应该如何推进？");
     await user.click(screen.getByRole("button", { name: "发送" }));
@@ -208,10 +264,28 @@ describe("Novel Agent Web workspace", () => {
       content: "当前旧案线索应该如何推进？",
       payload: {
         channel: "outline_analyzer",
-        question: "当前旧案线索应该如何推进？"
+        question: "当前旧案线索应该如何推进？",
+        analyzer_session_id: "analyzer-session-existing"
       }
     });
     expect(calls.commands).toHaveLength(0);
+  });
+
+  it("previews and confirms rollback for the latest analyzer turn", async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await waitForInitialTask();
+
+    await user.click(await screen.findByRole("button", { name: "小说讨论" }));
+    await user.click(await screen.findByRole("button", { name: "撤回最新" }));
+
+    expect(await screen.findByText("撤回最近一轮讨论")).toBeInTheDocument();
+    expect(calls.analyzerRollbacks).toEqual([{ taskId: "task-alpha", sessionId: "analyzer-session-existing", confirm: false }]);
+
+    await user.click(screen.getByRole("button", { name: "确认撤回" }));
+
+    await waitFor(() => expect(calls.analyzerRollbacks).toHaveLength(2));
+    expect(calls.analyzerRollbacks[1]).toEqual({ taskId: "task-alpha", sessionId: "analyzer-session-existing", confirm: true });
   });
 
   it("shows a local analyzer pending message while the model call is running", async () => {
@@ -220,7 +294,7 @@ describe("Novel Agent Web workspace", () => {
     renderWorkspace();
     await waitForInitialTask();
 
-    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
+    await user.click(await screen.findByRole("button", { name: "小说讨论" }));
     const input = await screen.findByLabelText("输入给 Agent 的自然语言");
     await user.type(input, "强哥下一阶段是否应该回归？");
     await user.click(screen.getByRole("button", { name: "发送" }));
@@ -237,8 +311,8 @@ describe("Novel Agent Web workspace", () => {
     await waitForInitialTask();
 
     expect(await screen.findByText("顾迟是否为新增人物？")).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "小说专家意见" }));
-    expect(await screen.findByRole("button", { name: "退出专家意见" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "小说讨论" }));
+    expect(await screen.findByRole("button", { name: "退出小说讨论" })).toBeInTheDocument();
 
     const input = await screen.findByLabelText("输入给 Agent 的自然语言");
     await user.type(input, "/analyze 当前未解之谜哪条更适合回收？");
@@ -249,7 +323,8 @@ describe("Novel Agent Web workspace", () => {
       content: "/analyze 当前未解之谜哪条更适合回收？",
       payload: {
         channel: "outline_analyzer",
-        question: "/analyze 当前未解之谜哪条更适合回收？"
+        question: "/analyze 当前未解之谜哪条更适合回收？",
+        analyzer_session_id: "analyzer-session-existing"
       }
     });
     expect(calls.actions.some((call) => call.body.action === "submit_outline_research_answers")).toBe(false);
@@ -435,7 +510,8 @@ describe("Novel Agent Web workspace", () => {
     await user.type(input, "进入新地点并揭露线索。");
     await user.click(await screen.findByRole("button", { name: "开始续写" }));
     const dialog = await screen.findByRole("dialog", { name: "创建续写任务" });
-    expect(within(dialog).getByLabelText("User prompt")).toHaveValue("进入新地点并揭露线索。");
+    expect(within(dialog).getByLabelText("续写方向")).toHaveValue("进入新地点并揭露线索。");
+    expect(within(dialog).queryByLabelText("借鉴任务 ID")).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "创建续写任务" }));
 
     await waitFor(() => expect(calls.actions.some((call) => call.body.action === "start_writer")).toBe(true));
@@ -448,6 +524,8 @@ describe("Novel Agent Web workspace", () => {
       target_total_chars: 9000,
       story_scale: { target_chapter_count: 3, default_chapter_target_chars: 3000, target_total_chars: 9000 }
     });
+    expect(writerCall?.body.payload).not.toHaveProperty("reference_task_id");
+    expect(writerCall?.body.payload).not.toHaveProperty("reference_work");
     expect(calls.commands).toHaveLength(0);
   });
 
@@ -458,7 +536,7 @@ describe("Novel Agent Web workspace", () => {
 
     await user.click(await screen.findByRole("button", { name: "开始续写" }));
     const dialog = await screen.findByRole("dialog", { name: "创建续写任务" });
-    const prompt = within(dialog).getByLabelText("User prompt");
+    const prompt = within(dialog).getByLabelText("续写方向");
     await user.type(prompt, "写一场雨夜重逢。");
     await user.clear(within(dialog).getByLabelText("续写章节数"));
     await user.type(within(dialog).getByLabelText("续写章节数"), "2");

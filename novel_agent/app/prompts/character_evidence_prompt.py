@@ -19,15 +19,17 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         "7. relationship_evidence 描述当前 document 中可用于更新关系档案的互动、关系变化和对话称呼；如果出现“某人称呼某人为 X”，保留称呼方向。\n"
         "8. 如果输入提供 existing_character_roster，请结合正文判断当前称呼是否指向已有角色；能确认时 character_id 必须使用 roster 中的 character_id，canonical_name 使用 roster 中的 canonical_name，原文称呼可放入 aliases。\n"
         "9. 不要因为称谓、职业、关系词或叙述视角变化就创建新人；如果正文中的“老板/丈夫/我/她”等能和 roster 中已有角色对应，应输出既有 canonical_name。\n"
-        "10. 如果 character_roster_scope=recent_32 且 can_request_full_roster=true，当正文出现无法和最近 32 人确认对应的人物、疑似新人物或远期旧人物时，返回 request_full_roster=true；此时 characters 可为空或只保留已能确认的角色。\n"
-        "11. 如果 character_roster_scope=full 或 can_request_full_roster=false，必须在当前输入下给出最终 characters，不要继续请求名册。\n"
-        "12. 如果正文明确出现 roster 外的新人物名，再输出新 canonical_name，并将 character_id 置空、resolution_status 标为 new_or_unresolved；如果不确定，标 ambiguous 或不输出，不要硬猜。\n"
-        "13. candidate_type 使用 character / ambiguous / non_person / object / scene 等短标签；低置信或弱共现候选请标 ambiguous 或不输出。\n"
-        "14. 严禁把动词、物品、抽象名词、场景词当人物名，如“张开/高跟鞋/上下打量/学院”。\n"
-        "15. 每个人物必须返回 source_doc_ids 和 source_title_indexes，用于后续按故事顺序归纳；只需轻量来源引用，不要 offset。\n"
-        "16. 如果当前 document 明确揭示两个已有人物、代号、伪装身份或过去身份其实是同一人物，可在 identity_revelations 中输出；必须有明确文本证据和高置信度，不能基于猜测、相似或共现。\n"
-        "17. 不要输出 mention_offsets、speaking_offsets、原文连续子串、逐 doc_id 人物列表或 document_character_mentions。\n"
-        "18. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
+        "10. 如果 character_roster_scope=recent_32 且 can_request_full_roster=true，先判断候选是否具有强新人物信号：首次正式命名、外貌/身份/经历被集中介绍、独立发言或行动、与现有人物发生明确互动，且与最近 roster 的姓名/别名无明显匹配。强新人物应直接输出 character_id 为空、resolution_status=new_or_unresolved，不要为了确认新人而请求完整名册。\n"
+        "11. 只有当候选可能是远期旧人物、别名、关系称谓、伪装身份、身份揭示，或正文线索不足以判断新人/旧人时，才返回 request_full_roster=true；此时必须填写 roster_filter_hints，列出候选姓名、称谓/别名、关系线索、职业/阵营/上下文摘要和 source_doc_ids，供系统先粗筛完整名册。\n"
+        "12. 如果 character_roster_scope=full 或 filtered_full 或 can_request_full_roster=false，必须在当前输入下给出最终 characters，不要继续请求名册。\n"
+        "13. 如果 character_roster_scope=full_page，本轮只是完整名册分页匹配：只输出能确认匹配当前页 existing_character_roster 的既有人物；本页未命中时返回空 characters，不要创建新人、不要输出 ambiguous、不要请求更多名册。\n"
+        "14. 如果正文明确出现 roster 外的新人物名，再输出新 canonical_name，并将 character_id 置空、resolution_status 标为 new_or_unresolved；如果不确定，标 ambiguous 或不输出，不要硬猜。\n"
+        "15. candidate_type 使用 character / ambiguous / non_person / object / scene 等短标签；低置信或弱共现候选请标 ambiguous 或不输出。\n"
+        "16. 严禁把动词、物品、抽象名词、场景词当人物名，如“张开/高跟鞋/上下打量/学院”。\n"
+        "17. 每个人物必须返回 source_doc_ids 和 source_title_indexes，用于后续按故事顺序归纳；只需轻量来源引用，不要 offset。\n"
+        "18. 如果当前 document 明确揭示两个已有人物、代号、伪装身份或过去身份其实是同一人物，可在 identity_revelations 中输出；必须有明确文本证据和高置信度，不能基于猜测、相似或共现。\n"
+        "19. 不要输出 mention_offsets、speaking_offsets、原文连续子串、逐 doc_id 人物列表或 document_character_mentions。\n"
+        "20. 输出必须是单个 JSON 对象，不要附加解释、代码块或分析过程。\n"
     )
     user_prompt = (
         "请按以下 JSON schema 返回：\n"
@@ -36,6 +38,7 @@ def build_character_evidence_prompt(prompt_input: dict[str, Any]) -> tuple[str, 
         '  "document_title_index": 12,\n'
         '  "request_full_roster": false,\n'
         '  "request_full_roster_reason": "",\n'
+        '  "roster_filter_hints": {"candidate_names": [], "aliases_or_titles": [], "relationship_clues": [], "role_or_faction_clues": [], "context_summary": "", "source_doc_ids": [1]},\n'
         '  "identity_revelations": [\n'
         "    {\n"
         '      "relation": "same_person",\n'

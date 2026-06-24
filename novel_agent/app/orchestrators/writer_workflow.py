@@ -952,7 +952,10 @@ class WriterInteractiveWorkflow:
         updated_input["draft_feedback"] = rewrite_request
         updated_input["draft_rewrite_requests"] = rewrite_requests
         writer_rules = [str(item) for item in (updated_input.get("writer_rules") or []) if str(item).strip()]
-        writer_rules.append("重写正文时必须消费 draft_feedback.feedback_text，但不得改写已通过的 ChapterBrief 或正式写回 Memory。")
+        writer_rules.append(
+            "基于反馈修改正文时必须消费 draft_feedback.feedback_text，并以上一版 draft.md 为主要修订基底；"
+            "不得改写已通过的 ChapterBrief 或正式写回 Memory。"
+        )
         updated_input["writer_rules"] = [item for item in dict.fromkeys(writer_rules) if item]
         self.run_writer.write_json(run_id, "chapter_execution_input.json", updated_input)
         self.run_writer.write_json(run_id, "draft_rewrite_request.json", rewrite_request)
@@ -960,7 +963,7 @@ class WriterInteractiveWorkflow:
             run_id,
             FreezeRecord(
                 freeze_stage="freeze_d",
-                summary="基于用户草稿反馈重写正文；上游章节梗概未改变。",
+                summary="基于用户草稿反馈修订正文；上游章节梗概未改变。",
                 depends_on=["freeze_c"],
             ),
             artifact_payloads={

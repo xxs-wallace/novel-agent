@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from novel_agent.app.repos.assets_repo import AssetsRepo
@@ -14,12 +15,18 @@ from novel_agent.app.schemas.narrative_inquiry_schema import (
     AnalyzerBudget,
     AnalyzerLoopOutput,
     AnalyzerNotebook,
+    AnalyzerSeedPacket,
     EvidenceBundle,
     NarrativeInquiryRequest,
 )
 from novel_agent.app.services.narrative_inquiry_broker import NarrativeInquiryBroker
 from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
-from novel_agent.app.services.outline_analyzer_service import AnalyzerService, _compact_evidence_bundle, _compact_mapping
+from novel_agent.app.services.outline_analyzer_service import (
+    AnalyzerService,
+    _compact_evidence_bundle,
+    _compact_final_evidence_bundles,
+    _compact_mapping,
+)
 
 
 OutlineAnalyzerService = AnalyzerService
@@ -66,6 +73,41 @@ class ScriptedAnalyzerModel:
         if not self.outputs:
             return json.dumps({"status": "ready_to_answer", "final_answer": "结论：证据不足。"}, ensure_ascii=False)
         return self.outputs.pop(0)
+
+
+class ToolCallingAnalyzerModel(ScriptedAnalyzerModel):
+    def __init__(self, tool_outputs: list[Any], text_outputs: list[str] | None = None, *, auto_intent: bool = True) -> None:
+        super().__init__(text_outputs or [], auto_intent=auto_intent)
+        self.tool_outputs = list(tool_outputs)
+        self.tool_prompts: list[dict[str, Any]] = []
+
+    def generate_tool_calls(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[Any],
+        tool_choice: str | dict[str, Any] | None = "auto",
+        timeout_seconds: int | None = None,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        include_reasoning_content: bool | None = None,
+    ) -> Any:
+        self.tool_prompts.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "tool_names": [getattr(tool, "name", "") for tool in tools],
+                "tool_choice": tool_choice,
+                "timeout_seconds": timeout_seconds,
+                "thinking": thinking,
+                "reasoning_effort": reasoning_effort,
+                "include_reasoning_content": include_reasoning_content,
+            }
+        )
+        if not self.tool_outputs:
+            return SimpleNamespace(tool_calls=[], content=json.dumps({"status": "ready_to_answer"}, ensure_ascii=False))
+        return self.tool_outputs.pop(0)
 
 
 class SpyMemoryQueryService(NarrativeMemoryQueryService):
@@ -569,8 +611,17 @@ def test_analyzer_prompt_uses_evidence_sufficiency_for_direct_fact_depth(tmp_pat
     assert "evidence sufficiency" in triage_system
     assert "answer readiness" in readiness_system
     assert "判断依据不是题面关键词" in readiness_system
+    assert "内容/措辞是什么" in readiness_system
+    assert "动作或状态最终是否成立" in readiness_system
+    assert "user_question 中用于限定目标" in readiness_system
+    assert "高精度内容短语" in readiness_system
     assert "source_doc_ids" in readiness_user
+    assert "raw_document_locator" in readiness_user
+    assert "match_offset" in readiness_user
+    assert "已知内容原句或独特短语" in readiness_user
     assert "超出证据的具体断言" in final_system
+    assert "内容事实与事件生命周期事实" in final_system
+    assert "用户问题里的动作" in final_system
 
 
 def test_analyzer_prompt_exposes_text_search_locator(tmp_path: Path) -> None:
@@ -591,10 +642,18 @@ def test_analyzer_prompt_exposes_text_search_locator(tmp_path: Path) -> None:
     assert "grep-like" in loop_system
     assert "metadata.terms" in loop_system
     assert "allow_document_scan" in loop_system
-    assert "terms 必须能共同缩小范围" in loop_system
+    assert "AND / 交集" in loop_system
+    assert "OR / 并集" in loop_system
+    assert "紧凑匹配窗口" in loop_system
     assert "过宽定位" in loop_system
+    assert "内容是什么" in loop_system
+    assert "动作/状态是否最终成立" in loop_system
+    assert "metadata.match_offset" in loop_system
+    assert "用户问题中用于限定目标" in loop_system
+    assert "高精度内容短语" in loop_system
     assert "text_search" in loop_user
     assert "match_mode" in loop_user
+    assert "match_strategy" in loop_user
     assert "term_quality" in loop_user
     assert "match_offset" in loop_user
     assert "documents" in loop_user
@@ -736,6 +795,122 @@ def test_outline_analyzer_research_loop_need_more_info_to_ready(tmp_path: Path) 
     assert "read_only_context" not in model.prompts[0]["user_prompt"]
 
 
+def test_outline_analyzer_loop_accepts_native_tool_calls_for_text_search(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    model = ToolCallingAnalyzerModel(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    SimpleNamespace(
+                        id="tc-text",
+                        name="text_search",
+                        arguments={
+                            "query": "证据 原文",
+                            "purpose": "用关键词先定位候选章节",
+                            "terms": ["证据"],
+                            "match_mode": "all",
+                            "scopes": ["chapter_summaries"],
+                            "priority": "high",
+                        },
+                    )
+                ],
+                content="",
+            ),
+            SimpleNamespace(
+                tool_calls=[],
+                content=json.dumps(
+                    {
+                        "status": "ready_to_answer",
+                        "final_answer": "结论：已经通过关键词定位到证据线索。",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ],
+        text_outputs=[
+            _triage_keep("tc-text"),
+            json.dumps({"status": "ready_to_answer", "notes": ["locator 足以支持有边界回答"]}, ensure_ascii=False),
+        ],
+    )
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=model, use_tool_call_requests=True)
+
+    with db.connect() as conn:
+        result = service.chat(conn, book_id="book-one", question="证据线索在哪一章？")
+
+    assert result.status == "ok"
+    assert result.answer == "结论：已经通过关键词定位到证据线索。"
+    assert {bundle.request_type for bundle in result.evidence_bundles} == {"text_search"}
+    assert model.tool_prompts[0]["tool_choice"] == "auto"
+    assert model.tool_prompts[0]["tool_names"] == ["text_search", "raw_excerpt", "character_profile"]
+    request = result.trace["rounds"][0]["loop_output"]["requests"][0]
+    assert request["request_id"] == "tc-text"
+    assert request["metadata"]["tool_call"] == {"id": "tc-text", "name": "text_search"}
+    assert request["metadata"]["match_mode"] == "all"
+
+
+def test_outline_analyzer_loop_converts_character_profile_and_raw_excerpt_tool_calls(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    model = ToolCallingAnalyzerModel(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    SimpleNamespace(
+                        id="tc-profile",
+                        name="character_profile",
+                        arguments=json.dumps(
+                            {
+                                "name": "调查者",
+                                "query": "调查者当前状态",
+                                "purpose": "确认人物状态",
+                                "story_events_offset": 10,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                    SimpleNamespace(
+                        id="tc-raw",
+                        name="raw_excerpt",
+                        arguments={
+                            "query": "确认证据原文措辞",
+                            "purpose": "摘要不足以确认措辞",
+                            "read_reason": "需要直接原文",
+                            "expected_confirmation": "确认线索原文",
+                            "affects_analysis": "影响最终回答是否可引用具体措辞",
+                            "source_doc_ids": [1],
+                            "excerpt_focus": ["证据"],
+                        },
+                    ),
+                ],
+                content="",
+            )
+        ]
+    )
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=model, use_tool_call_requests=True)
+
+    with db.connect() as conn:
+        seed = service.seed_builder.build(
+            conn,
+            book_id="book-one",
+            question="调查者和证据原文分别是什么？",
+            conversation_history=[],
+        )
+    output = service._call_loop_model(  # noqa: SLF001 - validates tool-call conversion contract.
+        book_id="book-one",
+        round_index=1,
+        seed=seed,
+        notebook=AnalyzerNotebook(),
+        evidence_history=[],
+        budget_state={"total_requests_used": 0, "raw_requests_used": 0, "exhausted": False},
+    )
+
+    assert output.status == "need_more_info"
+    assert [request.request_type for request in output.requests] == ["character_profile", "raw_excerpt"]
+    assert output.requests[0].name == "调查者"
+    assert output.requests[0].metadata["story_events_offset"] == 10
+    assert output.requests[1].source_doc_ids == [1]
+    assert output.requests[1].read_reason == "需要直接原文"
+
+
 def test_answer_readiness_can_request_raw_excerpt_after_locator(tmp_path: Path) -> None:
     db = _seed_memory(tmp_path)
     model = ScriptedAnalyzerModel(
@@ -869,6 +1044,54 @@ def test_analyzer_triage_rejects_evidence_before_future_prompts(tmp_path: Path) 
     ]
     assert "谨慎，重视证据链" in triage_prompts[0]["user_prompt"]
     assert json.loads(followup_loop_prompts[-1]["user_prompt"])["committed_evidence_digests"] == []
+
+
+def test_analyzer_auto_commits_requested_raw_excerpt_even_if_triage_rejects(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    model = ScriptedAnalyzerModel(
+        [
+            json.dumps(
+                {
+                    "status": "need_more_info",
+                    "requests": [
+                        {
+                            "type": "raw_excerpt",
+                            "query": "直接原文证据",
+                            "purpose": "核对原文措辞",
+                            "priority": "high",
+                            "source_doc_ids": [1],
+                            "excerpt_focus": ["证据"],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "kept_request_ids": [],
+                    "rejected_request_ids": ["req-001"],
+                    "notes": ["模型误判为重复证据"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps({"status": "ready_to_answer", "final_answer": "结论：已基于原文核对。"}, ensure_ascii=False),
+        ]
+    )
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=model)
+
+    with db.connect() as conn:
+        result = service.chat(conn, book_id="book-one", question="原文证据是什么？")
+
+    assert result.status == "ok"
+    assert [bundle.request_type for bundle in result.evidence_bundles] == ["raw_excerpt"]
+    followup_loop_prompts = [
+        prompt
+        for prompt in model.prompts
+        if "committed_evidence_digests" in prompt["user_prompt"] and "candidate_evidence_digest" not in prompt["user_prompt"]
+    ]
+    committed = json.loads(followup_loop_prompts[-1]["user_prompt"])["committed_evidence_digests"]
+    assert committed[0]["request_type"] == "raw_excerpt"
+    assert committed[0]["excerpts"]
 
 
 def test_raw_excerpt_budget_and_whole_book_block(tmp_path: Path) -> None:
@@ -1647,6 +1870,316 @@ def test_text_search_documents_require_bounded_scope(tmp_path: Path) -> None:
     assert allowed_scan.evidence_items[0]["scope"] == "document"
 
 
+def test_text_search_document_snippet_prefers_compact_multi_term_window(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": (
+                    "同伴在第一段只是路过，没有留下可用信息。"
+                    + "背景铺垫。" * 80
+                    + "后来，同伴拿出一条彩信，里面唱着“祝你生日快乐，调查员”。"
+                ),
+                "document_title": "第二章",
+                "document_title_index": 2,
+                "character_keywords": ["同伴", "调查员"],
+                "content_tags": ["彩信", "生日"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="text-search-docs-compact-window",
+                request_type="text_search",
+                query="定位同伴的生日祝福",
+                purpose="返回能同时覆盖人物和关键短语的候选片段",
+                priority="high",
+                source_doc_ids=[2],
+                metadata={
+                    "terms": ["祝你生日快乐", "同伴"],
+                    "match_mode": "all",
+                    "scopes": ["documents"],
+                },
+            ),
+            budget=AnalyzerBudget(max_evidence_chars_per_request=180),
+        )
+
+    assert bundle.status == "found"
+    snippet = bundle.evidence_items[0]["snippet"]
+    assert "后来，同伴拿出一条彩信" in snippet
+    assert "祝你生日快乐" in snippet
+    assert "第一段只是路过" not in snippet
+    assert bundle.evidence_items[0]["snippet_policy"] == "compact_match_window"
+    assert bundle.evidence_items[0]["full_document_available_via"] == "raw_excerpt"
+
+
+def test_raw_excerpt_snippet_falls_back_to_context_terms(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": (
+                    "第一段是无关求婚短信和天气描写。"
+                    + "背景铺垫。" * 120
+                    + "后来她看见草稿箱里的彩信，里面是一首生日歌，需要确认完整歌词和发送状态。"
+                ),
+                "document_title": "第二章",
+                "document_title_index": 2,
+                "character_keywords": ["她"],
+                "content_tags": ["彩信", "生日歌"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="raw-context-fallback",
+                request_type="raw_excerpt",
+                query="她录的生日快乐歌完整歌词，以及彩信是否最终发出",
+                purpose="确认生日歌的完整歌词，以及这条彩信是否最终被发送出去",
+                read_reason="snippet 只显示了歌词前两句且被截断，需要完整歌词；同时需确认彩信是草稿还是已发出",
+                expected_confirmation="完整歌词文本 + 彩信发送状态的明确描写",
+                affects_analysis='直接决定最终答案的歌词内容和是否"发给"了对方',
+                priority="high",
+                source_doc_ids=[2],
+            ),
+            budget=AnalyzerBudget(max_raw_excerpt_chars_per_request=180),
+        )
+
+    assert bundle.status == "found"
+    assert "草稿箱里的彩信" in bundle.excerpts[0]["text"]
+    assert "完整歌词和发送状态" in bundle.excerpts[0]["text"]
+    assert "无关求婚短信" not in bundle.excerpts[0]["text"]
+
+
+def test_raw_excerpt_snippet_prefers_dense_context_over_early_broad_terms(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": (
+                    "她先读到一封很长的短信，里面提到生日、对方和一首歌，但这只是无关开场。"
+                    + "背景铺垫。" * 180
+                    + "后半段才出现真正目标：草稿箱里的彩信是一首生日歌，"
+                    + "对方后来点开后听到同一首歌，需要据此确认歌词和发送状态。"
+                ),
+                "document_title": "第三章",
+                "document_title_index": 3,
+                "character_keywords": ["她", "对方"],
+                "content_tags": ["彩信", "生日歌"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="raw-dense-context-window",
+                request_type="raw_excerpt",
+                query="她录的生日歌完整歌词 — doc-2 彩信草稿场景",
+                purpose="确认她为对方录的生日歌歌词的精确措辞",
+                read_reason="text_search snippet 已揭示核心歌词，但需要确认是否有更多段落或完整版本",
+                expected_confirmation="确认歌词全文及彩信是否发出",
+                affects_analysis="最终答案需要同时说明歌词内容和发送状态",
+                priority="high",
+                source_doc_ids=[2],
+            ),
+            budget=AnalyzerBudget(max_raw_excerpt_chars_per_request=180),
+        )
+
+    assert bundle.status == "found"
+    assert "草稿箱里的彩信是一首生日歌" in bundle.excerpts[0]["text"]
+    assert "确认歌词和发送状态" in bundle.excerpts[0]["text"]
+    assert "无关开场" not in bundle.excerpts[0]["text"]
+
+
+def test_raw_excerpt_expands_to_related_docs_for_precise_followup_terms(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": "她把一段特别口令录进草稿，准备以后发给对方。",
+                "document_title": "第二章",
+                "document_title_index": 2,
+                "character_keywords": ["她"],
+                "content_tags": ["草稿"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-3",
+                "content": "后来对方终于点开那条消息，里面再次出现特别口令，确认它已经被收到。",
+                "document_title": "第三章",
+                "document_title_index": 3,
+                "character_keywords": ["对方"],
+                "content_tags": ["收到"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="raw-related-followup",
+                request_type="raw_excerpt",
+                query="特别口令的内容和发送状态",
+                purpose="确认特别口令内容",
+                read_reason="需要直接原文确认草稿和后续状态",
+                expected_confirmation="确认特别口令是否被收到",
+                affects_analysis="最终答案需要同时说明内容和发送状态",
+                priority="high",
+                source_doc_ids=[2],
+                excerpt_focus=["特别口令"],
+            ),
+            budget=AnalyzerBudget(max_raw_excerpt_chars_per_request=220),
+        )
+
+    assert bundle.status == "found"
+    assert bundle.source_doc_ids[:2] == [2, 3]
+    assert any("已经被收到" in item["text"] for item in bundle.excerpts)
+    assert any(item.get("operation") == "raw_excerpt_related_doc_expansion" for item in bundle.trace)
+
+
+def test_text_search_document_match_mode_any_is_or_locator(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+    broker = NarrativeInquiryBroker(repo_root=tmp_path)
+    now = "2026-05-21T00:00:00Z"
+    with db.connect() as conn:
+        DocumentsRepo().insert_document(
+            conn,
+            {
+                "book_id": "book-one",
+                "path": "doc-2",
+                "content": "调查者只发现一条彩信，没有出现另一种说法。",
+                "document_title": "第二章",
+                "document_title_index": 2,
+                "character_keywords": ["调查者"],
+                "content_tags": ["彩信"],
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        conn.commit()
+
+        bundle = broker.resolve_one(
+            conn,
+            book_id="book-one",
+            request=NarrativeInquiryRequest(
+                request_id="text-search-docs-or",
+                request_type="text_search",
+                query="定位彩信或语音",
+                purpose="召回任一词面变体",
+                priority="high",
+                metadata={
+                    "terms": ["彩信", "语音"],
+                    "match_mode": "any",
+                    "scopes": ["documents"],
+                    "allow_document_scan": True,
+                },
+            ),
+            budget=AnalyzerBudget(max_evidence_chars_per_request=180),
+        )
+
+    assert bundle.status == "found"
+    assert bundle.evidence_items[0]["match_mode"] == "any"
+    assert bundle.evidence_items[0]["matched_terms"] == ["彩信"]
+    assert "彩信" in bundle.evidence_items[0]["snippet"]
+
+
+def test_final_evidence_digest_keeps_text_search_snippet() -> None:
+    bundle = EvidenceBundle(
+        request_id="text-search-1",
+        request_type="text_search",
+        query="定位生日祝福",
+        status="found",
+        fact_status="candidate",
+        evidence_items=[
+            {
+                "evidence_type": "text_search_match",
+                "scope": "document",
+                "id": "doc-2",
+                "label": "doc-2 第二章",
+                "snippet": "后来，同伴拿出一条彩信，里面唱着“祝你生日快乐，调查员”。",
+                "matched_terms": ["祝你生日快乐", "同伴"],
+                "match_mode": "all",
+                "source_doc_ids": [2],
+                "snippet_policy": "compact_match_window",
+            }
+        ],
+        source_doc_ids=[2],
+    )
+
+    digest = _compact_final_evidence_bundles([bundle])
+
+    assert digest[0]["evidence_items"]
+    assert "祝你生日快乐" in digest[0]["evidence_items"][0]["snippet"]
+
+
+def test_final_evidence_digest_keeps_raw_excerpt_match_window() -> None:
+    opening = "开头是无关短信和背景。" + "背景铺垫。" * 240
+    target = "后来对方点开录音，听到生日快乐歌里反复唱着调查员的名字，并确认发送状态。"
+    bundle = EvidenceBundle(
+        request_id="raw-1",
+        request_type="raw_excerpt",
+        query="生日快乐歌 调查员 发送状态",
+        status="found",
+        fact_status="candidate",
+        excerpts=[
+            {
+                "doc_id": 2,
+                "text": opening + target,
+            }
+        ],
+        source_doc_ids=[2],
+    )
+
+    digest = _compact_final_evidence_bundles([bundle])
+
+    assert digest[0]["excerpts"]
+    assert "调查员的名字" in digest[0]["excerpts"][0]["text"]
+    assert "发送状态" in digest[0]["excerpts"][0]["text"]
+    assert "无关短信" not in digest[0]["excerpts"][0]["text"]
+
+
 def test_text_search_documents_support_match_offset_pagination(tmp_path: Path) -> None:
     db = _seed_memory(tmp_path)
     now = "2026-05-21T00:00:00Z"
@@ -2084,6 +2617,33 @@ def test_outline_analyzer_smoke_uses_existing_memory_without_writer_side_effects
     assert outline_path.read_text(encoding="utf-8") == before_files["outline"]
     assert world_path.read_text(encoding="utf-8") == before_files["world"]
     assert not (tmp_path / "runs" / "writer").exists()
+
+
+def test_outline_analyzer_final_prompt_preserves_session_revision_context(tmp_path: Path) -> None:
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=ScriptedAnalyzerModel([]))
+    marker = "把诺诺从被保护目标升级为主动共谋者，承担诱饵、选择与背叛代价。"
+    seed = AnalyzerSeedPacket(
+        book_id="book-one",
+        user_question="那么基于上面的讨论，你为我重新生成一份故事大纲。",
+        analysis_type="outline_analysis",
+        conversation_brief=(
+            "system: 这是同一个 Analyzer 讨论 session 的公开对话背景。\n"
+            "user_proposed_outline: 楚子航被世界抹除，路明非与诺诺追查被抹除的痕迹。\n"
+            f"analyzer_public_answer: 前一轮建议：{marker}"
+        ),
+    )
+
+    system_prompt, user_prompt = service.build_final_prompt(
+        seed=seed,
+        notebook=AnalyzerNotebook(),
+        evidence_history=[],
+        budget_limited=False,
+    )
+    payload = json.loads(user_prompt)
+
+    assert "不禁止输出用户可读的大纲修改方案" in system_prompt
+    assert "不得因为提案尚未存在于 committed outline 中就拒绝生成" in system_prompt
+    assert marker in payload["seed_brief"]["conversation_brief"]
 
 
 def _table_counts(conn: Any, *table_names: str) -> dict[str, int]:

@@ -185,9 +185,13 @@
 
 ### 4.0 text_search
 
-用于 grep-like 词面定位。模型把问题拆为少量通用关键词，由本地 Context Broker 在 root summary / Memory root、人物档案、outline segment、chapter summary、index card 或受限 document scope 中执行交集 / 并集匹配，返回候选 chapter refs 与 source doc ids。
+用于 grep-like 词面定位。模型把问题拆为少量通用关键词，由本地 Context Broker 在 root summary / Memory root、人物档案、outline segment、chapter summary、index card 或受限 document scope 中执行交集 / 并集匹配，返回候选 chapter refs 与 source doc ids。`match_mode=all` 表示 AND / 交集，所有 terms 都必须出现；`match_mode=any` 表示 OR / 并集，任意 term 出现即可命中，适合同义词、译名、称呼或题面可能误写的词面变体。对 document scope，返回 snippet SHOULD 围绕共同命中窗口或最紧凑匹配窗口截取，避免只展示文档中较早出现的宽泛关键词；完整或更长上下文 SHOULD 通过后续 bounded raw excerpt / chapter excerpt 读取。
 
 `text_search` 是 locator，不是最终事实裁决。失败分支只进入 trace，不应写入 planning notebook；命中后 SHOULD 再请求 `story_detail`、`character_profile`、`chapter_excerpt` 或其他更直接证据。
+
+如果命中片段只证明对象、话语、线索、消息或道具的内容，而规划判断还依赖该对象是否被发送、收到、说出、兑现、使用、公开、撤回或造成后续影响，Outline Research Loop SHOULD 将内容事实与事件生命周期事实拆开核验。草稿、计划、犹豫、取消或早期状态证据不得直接升级为最终“从未发生”结论；模型 SHOULD 读取后续候选 source doc、翻页，或用已知内容词加动作/结果词发起更窄 `text_search`。
+
+用户输入中的动作、关系、对象、时间或结果限定属于证据要求，Loop 不得静默降级为更弱的准备/计划状态。若已获得高精度原句、标题、编号、独特称谓或内容短语，Loop SHOULD 用该短语继续做 document `text_search`，查找重复出现、后续兑现或结果场景。
 
 ```json
 {
@@ -295,6 +299,45 @@
 - `blocked`：建模基础不足，不能生成正式大纲。
 
 如果达到预算上限仍未 `enough`，系统必须输出 `SufficiencyDecision`，并在 `needs_user_input`、`proceed_with_assumptions` 和 `blocked` 之间选择；高风险剧情不得静默假设。
+
+### 5.1 Resume Context
+
+当 `SufficiencyDecision.status = needs_user_input` 时，系统 SHOULD 生成内部
+`OutlineResearchResumeContext`。该对象用于恢复 Agent Loop，而不是替代用户问题集 contract。
+
+推荐结构：
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "run-20260503-001",
+  "pause_type": "needs_user_input",
+  "previous_decision_id": "book-001-sufficiency",
+  "previous_status": "needs_user_input",
+  "known_enough": [],
+  "blocking_gaps": [],
+  "optional_gaps": [],
+  "remaining_risks": [],
+  "question_set_id": "outline-research-run-20260503-001-book-001-sufficiency",
+  "questions": [],
+  "resume_instruction": "用户回答后写入 planning_notebook.user_authorized，再运行一小轮 research / sufficiency gate。",
+  "answered_questions": [],
+  "user_authorized_facts_added": [],
+  "post_resume_status": ""
+}
+```
+
+规则：
+
+- `resume_context` 保存暂停原因的结构化结论，不保存完整 chain-of-thought。
+- `known_enough`、`blocking_gaps`、`remaining_risks` 来源于 `SufficiencyDecision`；
+  已确认事实和候选事实仍以 `planning_notebook` 为准。
+- 用户回答后，系统 MUST 将回答作为 `user_authorized` evidence 写入 notebook，
+  并 SHOULD 更新 `answered_questions`、`user_authorized_facts_added` 和 `post_resume_status`。
+- 若用户回答不能覆盖旧 blocking gap，下一次 `needs_user_input` MUST 明确说明是旧 gap 未解决
+  还是发现了新 gap。
+- `model_reasoning_debug`、prompt trace 和 memory decision log 只用于 debug / reviewer，
+  不得作为隐藏知识注入下一轮 prompt。
 
 ## 6. Research Budget
 

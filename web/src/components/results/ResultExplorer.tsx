@@ -18,6 +18,7 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
   const [surface, setSurface] = useState<ArtifactSurface>("close-read");
   const [selectedNode, setSelectedNode] = useState<ArtifactTreeNode | null>(null);
   const [personQuery, setPersonQuery] = useState("");
+  const [userSelectedSurface, setUserSelectedSurface] = useState(false);
   const treeSearchQuery = surface === "close-read" ? personQuery : "";
 
   const treeQuery = useQuery({
@@ -25,9 +26,29 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
     queryFn: () => getArtifactTree(selectedTaskId, surface, treeSearchQuery),
     enabled: Boolean(selectedTaskId)
   });
+  const writerTreeQuery = useQuery({
+    queryKey: ["artifact-tree", selectedTaskId, "writer", ""],
+    queryFn: () => getArtifactTree(selectedTaskId, "writer"),
+    enabled: Boolean(selectedTaskId)
+  });
 
   const nodes = treeQuery.data ?? [];
-  const firstNode = useMemo(() => firstSelectableNode(nodes), [nodes]);
+  const firstNode = useMemo(() => firstSelectableNode(nodes, surface), [nodes, surface]);
+
+  useEffect(() => {
+    setSelectedNode(null);
+    setUserSelectedSurface(false);
+    setSurface("close-read");
+  }, [selectedTaskId]);
+
+  useEffect(() => {
+    if (!selectedTaskId || userSelectedSurface || focusedArtifactId) {
+      return;
+    }
+    if (hasGeneratedWriterChapters(writerTreeQuery.data ?? [])) {
+      setSurface("writer");
+    }
+  }, [focusedArtifactId, selectedTaskId, userSelectedSurface, writerTreeQuery.data]);
 
   useEffect(() => {
     if (!selectedTaskId) {
@@ -76,7 +97,10 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
           role="tab"
           aria-selected={surface === "close-read"}
           className={surface === "close-read" ? "active" : ""}
-          onClick={() => setSurface("close-read")}
+          onClick={() => {
+            setUserSelectedSurface(true);
+            setSurface("close-read");
+          }}
         >
           <FileText size={16} aria-hidden="true" />
           阅读
@@ -86,7 +110,10 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
           role="tab"
           aria-selected={surface === "writer"}
           className={surface === "writer" ? "active" : ""}
-          onClick={() => setSurface("writer")}
+          onClick={() => {
+            setUserSelectedSurface(true);
+            setSurface("writer");
+          }}
         >
           <PenLine size={16} aria-hidden="true" />
           Writer
@@ -128,9 +155,42 @@ export function ResultExplorer({ selectedTaskId, focusedArtifactId = "", actionP
   );
 }
 
-function firstSelectableNode(nodes: ArtifactTreeNode[]): ArtifactTreeNode | null {
+function firstSelectableNode(nodes: ArtifactTreeNode[], surface: ArtifactSurface): ArtifactTreeNode | null {
+  if (surface === "writer") {
+    return findFirstGeneratedWriterChapter(nodes) ?? findFirstNodeByKind(nodes, "writer_stage") ?? nodes[0] ?? null;
+  }
   for (const node of nodes) {
     return node;
+  }
+  return null;
+}
+
+function hasGeneratedWriterChapters(nodes: ArtifactTreeNode[]): boolean {
+  return Boolean(findFirstGeneratedWriterChapter(nodes));
+}
+
+function findFirstNodeByKind(nodes: ArtifactTreeNode[], kind: string): ArtifactTreeNode | null {
+  for (const node of nodes) {
+    if (node.kind === kind) {
+      return node;
+    }
+    const child = findFirstNodeByKind(node.children, kind);
+    if (child) {
+      return child;
+    }
+  }
+  return null;
+}
+
+function findFirstGeneratedWriterChapter(nodes: ArtifactTreeNode[]): ArtifactTreeNode | null {
+  for (const node of nodes) {
+    if (node.surface === "writer" && node.kind === "chapter" && node.badge === "已写回") {
+      return node;
+    }
+    const child = findFirstGeneratedWriterChapter(node.children);
+    if (child) {
+      return child;
+    }
   }
   return null;
 }

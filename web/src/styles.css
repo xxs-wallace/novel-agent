@@ -598,6 +598,16 @@ textarea {
   gap: 12px;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
 .form-error {
   color: var(--danger);
 }
@@ -632,6 +642,111 @@ textarea {
   flex-direction: column;
   gap: 14px;
   padding-right: 4px;
+}
+
+.analyzer-session-strip {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.analyzer-session-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.analyzer-session-header span {
+  color: #3c4043;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.analyzer-session-header .secondary-button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.analyzer-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rollback-summary {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #3c4043;
+  font-size: 12px;
+}
+
+.analyzer-session-list {
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 2px;
+}
+
+.analyzer-session-item {
+  flex: 0 0 min(260px, 78vw);
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid #e4e4e4;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #2f3337;
+  text-align: left;
+}
+
+.analyzer-session-item:hover {
+  background: #f6faff;
+  border-color: #cfe4ff;
+}
+
+.analyzer-session-item.selected {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.analyzer-session-title,
+.analyzer-session-meta,
+.analyzer-session-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analyzer-session-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.analyzer-session-meta,
+.analyzer-session-preview,
+.analyzer-session-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.analyzer-session-empty {
+  width: 100%;
+  padding: 8px 2px;
 }
 
 .message-bubble {

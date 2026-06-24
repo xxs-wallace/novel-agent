@@ -131,12 +131,79 @@ def test_multi_chapter_summary_accepts_nested_chapter_summary_alias(tmp_path: Pa
     assert all(item["chapter_summary_md"] for item in normalized_items)
 
 
+def test_chapter_summary_repairs_json_object_that_only_contains_world_candidate(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    batch = _chapter_batch(content="路明非带绘梨衣赴家庭晚宴，酒德麻衣收到老板的新指令。" * 20)
+    calls: list[str] = []
+
+    class FakeModelClient:
+        def generate_json(self, *, system_prompt, user_prompt, fallback_factory, use_fallback_on_error):  # noqa: ANN001
+            calls.append(user_prompt)
+            if len(calls) == 1:
+                return (
+                    {
+                        "section": "势力格局",
+                        "summary": "Tokyo Love Story 项目按剧本推进。",
+                        "evidence_hint": "老板提到第七天举行婚礼。",
+                        "source_doc_ids": [1],
+                        "confidence": 0.85,
+                    },
+                    "{}",
+                )
+            return (
+                {
+                    "summary_quality": "plot_synopsis",
+                    "chapter_summary_md": _plot_synopsis_md(),
+                    "chapter_summary_short": "路明非在安排中继续照顾绘梨衣。",
+                    "importance_score": 70,
+                    "importance_reason": "关系线继续推进。",
+                    "related_chapters": [],
+                    "world_signal_score": 20,
+                    "world_evidence_candidates": [],
+                    "noise_documents": [],
+                },
+                "{}",
+            )
+
+    payload = runner._generate_chapter_summary_payload(  # noqa: SLF001
+        model_client=FakeModelClient(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book",
+            "current_title_index": 1,
+            "chapter_title": "第一章",
+            "source_total_chars": batch.total_chars,
+            "summary_target_chars_min": 120,
+            "documents": [
+                {
+                    "doc_id": 1,
+                    "document_title_index": 1,
+                    "document_title": "第一章",
+                    "content": batch.documents[0].content,
+                }
+            ],
+        },
+    )
+
+    assert len(calls) == 2
+    assert "不要只返回 world_evidence_candidates" in calls[1]
+    assert payload["chapter_summary_md"] == _plot_synopsis_md()
+
+
 def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
     service = MemoryCandidateService()
     reduce_inputs = service.build_character_reduce_inputs(
         prompt_input={
             "book_id": "book",
-            "character_profiles": [{"canonical_name": "林澈", "aliases": ["小林"], "profile_summary_md": "旧档案"}],
+            "character_profiles": [
+                {
+                    "canonical_name": "林澈",
+                    "aliases": ["小林"],
+                    "profile_summary_md": "旧档案",
+                    "profile_brief": {"current_state": "旧状态", "source_refs": [{"id": "old"}]},
+                    "story_events": [{"event_id": "old-event", "summary": "旧事件"}],
+                }
+            ],
         },
         summary_payload={"chapter_summary_short": "林澈连续经历两次事件。"},
         evidence_payload={
@@ -195,9 +262,18 @@ def test_character_reduce_inputs_group_same_character_in_doc_order() -> None:
     )
 
     assert [item["canonical_name"] for item in reduce_inputs] == ["林澈"]
+    assert list(reduce_inputs[0])[:4] == [
+        "book_id",
+        "chapter_summary",
+        "chapter_context_text",
+        "current_outline_segment",
+    ]
     evidence = reduce_inputs[0]["ordered_character_evidence"]
     assert [item["source_doc_ids"] for item in evidence] == [[1], [2]]
-    assert reduce_inputs[0]["existing_profile"]["profile_summary_md"] == "旧档案"
+    existing_profile = reduce_inputs[0]["existing_profile"]
+    assert existing_profile["profile_brief"] == {"current_state": "旧状态"}
+    assert "profile_summary_md" not in existing_profile
+    assert "story_events" not in existing_profile
     assert reduce_inputs[0]["current_outline_segment"]["outline_segment_id"] == "outline-segment:chapter-1:docs-1-2"
     assert reduce_inputs[0]["reduce_policy"]["key_experiences_must_be_target_character_scoped"] is True
 
@@ -841,6 +917,353 @@ def test_close_read_character_evidence_runs_once_per_document_in_batch(tmp_path:
     assert summary_starts[0]["doc_count"] == 3
     assert len(evidence_starts) == 3
     assert {event["doc_count"] for event in evidence_starts} == {1}
+
+
+def test_character_evidence_strong_new_character_does_not_request_full_roster(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    batch = _chapter_batch(content="银发少女苏棠第一次推门进来，向众人介绍自己来自北境。")
+    calls: list[str] = []
+
+    def fake_generate_agent_payload(**kwargs):  # noqa: ANN001
+        agent_name = kwargs["agent_name"]
+        calls.append(agent_name)
+        if agent_name != "character_evidence":
+            raise AssertionError(f"unexpected agent call: {agent_name}")
+        return {
+            "doc_id": 1,
+            "document_title_index": 1,
+            "request_full_roster": False,
+            "request_full_roster_reason": "",
+            "roster_filter_hints": {},
+            "characters": [
+                {
+                    "character_id": "",
+                    "canonical_name": "苏棠",
+                    "resolution_status": "new_or_unresolved",
+                    "aliases": [],
+                    "is_speaking_character": True,
+                    "speaking_evidence": "苏棠介绍自己来自北境。",
+                    "personhood_evidence": "首次正式命名并有集中身份介绍。",
+                    "activity_or_state_evidence": "第一次进入场景。",
+                    "relationship_evidence": "",
+                    "source_doc_ids": [1],
+                    "source_title_indexes": [1],
+                    "candidate_type": "character",
+                    "confidence": 0.92,
+                    "uncertainty_reason": "",
+                }
+            ],
+        }
+
+    runner._generate_agent_payload = fake_generate_agent_payload  # type: ignore[method-assign]  # noqa: SLF001
+    payload = runner._generate_character_evidence_payload(  # noqa: SLF001
+        model_client=object(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book",
+            "current_title_index": 1,
+            "chapter_title": "第一章",
+            "existing_character_roster": [{"character_id": "1", "canonical_name": "沈青", "aliases": []}],
+            "full_existing_character_roster": [{"character_id": "1", "canonical_name": "沈青", "aliases": []}],
+        },
+    )
+
+    assert calls == ["character_evidence"]
+    assert payload["request_full_roster"] is False
+    assert payload["characters"][0]["resolution_status"] == "new_or_unresolved"
+
+
+def test_character_evidence_full_roster_uses_prefiltered_candidates(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    runner.config.runtime.character_full_roster_paging_enabled = False
+    batch = _chapter_batch(content="男人被称作老唐，语气像久别重逢的旧友。")
+    full_roster = [
+        {
+            "character_id": str(index),
+            "canonical_name": f"人物{index}",
+            "aliases": [f"别名{index}"],
+            "last_seen_doc_id": index,
+            "last_seen_title_index": index,
+        }
+        for index in range(1, 101)
+    ]
+    full_roster[41]["canonical_name"] = "唐先生"
+    full_roster[41]["aliases"] = ["老唐"]
+    recent_roster = full_roster[:32]
+    calls: list[str] = []
+    full_roster_prompt_sizes: list[int] = []
+
+    def fake_generate_agent_payload(**kwargs):  # noqa: ANN001
+        agent_name = kwargs["agent_name"]
+        calls.append(agent_name)
+        prompt_input = kwargs["prompt_input"]
+        if agent_name == "character_evidence":
+            return {
+                "doc_id": 1,
+                "document_title_index": 1,
+                "request_full_roster": True,
+                "request_full_roster_reason": "老唐可能是远期旧人物或别名。",
+                "roster_filter_hints": {
+                    "candidate_names": ["老唐"],
+                    "aliases_or_titles": ["老唐"],
+                    "relationship_clues": ["久别重逢的旧友"],
+                    "role_or_faction_clues": [],
+                    "context_summary": "当前人物被称作老唐。",
+                    "source_doc_ids": [1],
+                },
+                "characters": [],
+            }
+        if agent_name == "character_full_roster_prefilter":
+            assert len(prompt_input["full_roster_index"]) == 100
+            return {
+                "fallback_to_full_roster": False,
+                "selected_character_ids": ["42"],
+                "selected_canonical_names": ["唐先生"],
+                "reason": "老唐命中唐先生别名。",
+                "confidence": 0.8,
+            }
+        if agent_name == "character_evidence_full_roster":
+            roster = prompt_input["character_evidence_batch"]["existing_character_roster"]
+            full_roster_prompt_sizes.append(len(roster))
+            assert len(roster) < len(full_roster)
+            assert any(item["character_id"] == "42" for item in roster)
+            return {
+                "doc_id": 1,
+                "document_title_index": 1,
+                "request_full_roster": False,
+                "characters": [
+                    {
+                        "character_id": "42",
+                        "canonical_name": "唐先生",
+                        "resolution_status": "resolved_existing",
+                        "aliases": ["老唐"],
+                        "is_speaking_character": False,
+                        "speaking_evidence": "",
+                        "personhood_evidence": "老唐被称呼并参与互动。",
+                        "activity_or_state_evidence": "",
+                        "relationship_evidence": "与当前人物像旧友重逢。",
+                        "source_doc_ids": [1],
+                        "source_title_indexes": [1],
+                        "candidate_type": "character",
+                        "confidence": 0.9,
+                        "uncertainty_reason": "",
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected agent call: {agent_name}")
+
+    runner._generate_agent_payload = fake_generate_agent_payload  # type: ignore[method-assign]  # noqa: SLF001
+    runner._full_roster_prefilter_model_client = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda model_client: model_client
+    )
+
+    payload = runner._generate_character_evidence_payload(  # noqa: SLF001
+        model_client=object(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book",
+            "current_title_index": 1,
+            "chapter_title": "第一章",
+            "existing_character_roster": recent_roster,
+            "full_existing_character_roster": full_roster,
+        },
+    )
+
+    assert calls == ["character_evidence", "character_full_roster_prefilter", "character_evidence_full_roster"]
+    assert full_roster_prompt_sizes and full_roster_prompt_sizes[0] < 100
+    assert payload["characters"][0]["character_id"] == "42"
+
+
+def test_character_evidence_full_roster_prefilter_limits_index_pool(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    runner.config.runtime.character_full_roster_paging_enabled = False
+    runner.config.runtime.character_full_roster_prefilter_index_max_candidates = 80
+    batch = _chapter_batch(content="男人被称作老唐，语气像久别重逢的旧友。")
+    full_roster = [
+        {
+            "character_id": str(index),
+            "canonical_name": f"人物{index}",
+            "aliases": [f"别名{index}"],
+            "last_seen_doc_id": index,
+            "last_seen_title_index": index,
+        }
+        for index in range(1, 226)
+    ]
+    full_roster[199]["canonical_name"] = "唐先生"
+    full_roster[199]["aliases"] = ["老唐"]
+    recent_roster = full_roster[:32]
+
+    def fake_generate_agent_payload(**kwargs):  # noqa: ANN001
+        agent_name = kwargs["agent_name"]
+        prompt_input = kwargs["prompt_input"]
+        if agent_name == "character_evidence":
+            return {
+                "doc_id": 1,
+                "document_title_index": 1,
+                "request_full_roster": True,
+                "request_full_roster_reason": "老唐可能是远期旧人物或别名。",
+                "roster_filter_hints": {
+                    "candidate_names": ["老唐"],
+                    "aliases_or_titles": ["老唐"],
+                    "context_summary": "当前人物被称作老唐。",
+                    "source_doc_ids": [1],
+                },
+                "characters": [],
+            }
+        if agent_name == "character_full_roster_prefilter":
+            index = prompt_input["full_roster_index"]
+            assert len(index) <= 80
+            assert any(item["character_id"] == "200" for item in index)
+            return {
+                "fallback_to_full_roster": False,
+                "selected_character_ids": ["200"],
+                "selected_canonical_names": ["唐先生"],
+                "reason": "老唐命中唐先生别名。",
+                "confidence": 0.8,
+            }
+        if agent_name == "character_evidence_full_roster":
+            roster = prompt_input["character_evidence_batch"]["existing_character_roster"]
+            assert len(roster) < len(full_roster)
+            assert any(item["character_id"] == "200" for item in roster)
+            return {
+                "doc_id": 1,
+                "document_title_index": 1,
+                "request_full_roster": False,
+                "characters": [
+                    {
+                        "character_id": "200",
+                        "canonical_name": "唐先生",
+                        "resolution_status": "resolved_existing",
+                        "aliases": ["老唐"],
+                        "source_doc_ids": [1],
+                        "source_title_indexes": [1],
+                        "candidate_type": "character",
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        raise AssertionError(f"unexpected agent call: {agent_name}")
+
+    runner._generate_agent_payload = fake_generate_agent_payload  # type: ignore[method-assign]  # noqa: SLF001
+    runner._full_roster_prefilter_model_client = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda model_client: model_client
+    )
+
+    payload = runner._generate_character_evidence_payload(  # noqa: SLF001
+        model_client=object(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book",
+            "current_title_index": 1,
+            "chapter_title": "第一章",
+            "existing_character_roster": recent_roster,
+            "full_existing_character_roster": full_roster,
+        },
+    )
+
+    assert payload["characters"][0]["character_id"] == "200"
+
+
+def test_character_evidence_full_roster_pages_history_without_prefilter(tmp_path: Path) -> None:
+    runner = _close_read_runner(tmp_path)
+    runner.config.runtime.character_full_roster_paging_enabled = True
+    runner.config.runtime.character_full_roster_page_chars = 900
+    batch = _chapter_batch(content="男人被称作老唐，语气像久别重逢的旧友。")
+    full_roster = [
+        {
+            "character_id": str(index),
+            "canonical_name": f"人物{index}",
+            "aliases": [f"别名{index}"],
+            "last_seen_doc_id": index,
+            "last_seen_title_index": index,
+        }
+        for index in range(1, 80)
+    ]
+    full_roster[41]["canonical_name"] = "唐先生"
+    full_roster[41]["aliases"] = ["老唐"]
+    recent_roster = full_roster[:32]
+    calls: list[str] = []
+    page_sizes: list[int] = []
+
+    def fake_generate_agent_payload(**kwargs):  # noqa: ANN001
+        agent_name = kwargs["agent_name"]
+        calls.append(agent_name)
+        prompt_input = kwargs["prompt_input"]
+        if agent_name == "character_evidence":
+            return {
+                "doc_id": 1,
+                "document_title_index": 1,
+                "request_full_roster": True,
+                "request_full_roster_reason": "老唐可能是远期旧人物或别名。",
+                "roster_filter_hints": {
+                    "candidate_names": ["老唐"],
+                    "aliases_or_titles": ["老唐"],
+                    "context_summary": "当前人物被称作老唐。",
+                    "source_doc_ids": [1],
+                },
+                "characters": [
+                    {
+                        "character_id": "",
+                        "canonical_name": "老唐",
+                        "resolution_status": "new_or_unresolved",
+                        "aliases": [],
+                        "source_doc_ids": [1],
+                        "source_title_indexes": [1],
+                        "candidate_type": "character",
+                        "confidence": 0.6,
+                    }
+                ],
+            }
+        if agent_name == "character_full_roster_prefilter":
+            raise AssertionError("paged full roster should not call prefilter")
+        if agent_name == "character_evidence_full_roster":
+            roster = prompt_input["character_evidence_batch"]["existing_character_roster"]
+            assert prompt_input["character_evidence_batch"]["character_roster_scope"] == "full_page"
+            page_sizes.append(len(roster))
+            if any(item["character_id"] == "42" for item in roster):
+                return {
+                    "doc_id": 1,
+                    "document_title_index": 1,
+                    "request_full_roster": False,
+                    "characters": [
+                        {
+                            "character_id": "",
+                            "canonical_name": "老唐",
+                            "resolution_status": "resolved_existing",
+                            "aliases": ["老唐"],
+                            "source_doc_ids": [1],
+                            "source_title_indexes": [1],
+                            "candidate_type": "character",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            return {"doc_id": 1, "document_title_index": 1, "request_full_roster": False, "characters": []}
+        raise AssertionError(f"unexpected agent call: {agent_name}")
+
+    runner._generate_agent_payload = fake_generate_agent_payload  # type: ignore[method-assign]  # noqa: SLF001
+    runner._full_roster_page_model_client = (  # type: ignore[method-assign]  # noqa: SLF001
+        lambda model_client: model_client
+    )
+
+    payload = runner._generate_character_evidence_payload(  # noqa: SLF001
+        model_client=object(),  # type: ignore[arg-type]
+        batch=batch,
+        prompt_input={
+            "book_id": "book",
+            "current_title_index": 1,
+            "chapter_title": "第一章",
+            "existing_character_roster": recent_roster,
+            "full_existing_character_roster": full_roster,
+        },
+    )
+
+    assert "character_full_roster_prefilter" not in calls
+    assert calls.count("character_evidence_full_roster") > 1
+    assert page_sizes and max(page_sizes) < len(full_roster)
+    assert payload["request_full_roster"] is False
+    assert payload["characters"][0]["character_id"] == "42"
+    assert payload["characters"][0]["canonical_name"] == "唐先生"
 
 
 class _FakeDoc:

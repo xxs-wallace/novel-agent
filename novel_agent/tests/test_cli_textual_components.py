@@ -1097,8 +1097,8 @@ def test_decision_panel_widget_chapter_acceptance_options() -> None:
     rendered = widget.render_panel()
 
     assert "提交本章正文 -> 提交正文并更新续写记忆" in rendered
-    assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
-    assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
+    assert "基于反馈修改正文 -> 正在修改正文草稿" in rendered
+    assert "重新生成章节梗概 -> 返回章节梗概审阅" in rendered
     assert "action=show_chapter_acceptance_form" in rendered
 
 
@@ -1117,15 +1117,10 @@ def test_chapter_acceptance_form_maps_rework_choices_to_contract_payloads() -> N
         )
     )
     length_payload = length_form.to_workflow_payload()
-    assert length_payload["status"] == "revise_length"
-    assert length_payload["length_plan_update"] == {
-        "target_chars": 5200,
-        "min_chars": 4800,
-        "max_chars": 5600,
-        "reason_code": "length_or_pacing_revision_requested",
-        "feedback_text": "当前章需要更充分的追逐段落",
-        "preserve_story_direction": True,
-    }
+    assert length_payload["status"] == "rewrite_requested"
+    assert length_payload["target_chars"] == 5200
+    assert length_payload["min_chars"] == 4800
+    assert length_payload["max_chars"] == 5600
 
     replan_form = ChapterAcceptanceForm.from_template_text(
         "\n".join(
@@ -1141,9 +1136,9 @@ def test_chapter_acceptance_form_maps_rework_choices_to_contract_payloads() -> N
         )
     )
     replan_payload = replan_form.to_workflow_payload()
-    assert replan_payload["status"] == "replan_chapter"
-    assert replan_payload["chapter_replan_request"]["must_change"] == ["把冲突集中到证人失踪"]
-    assert replan_payload["chapter_replan_request"]["forbidden_carryover"] == ["过早和解"]
+    assert replan_payload["status"] == "replan_requested"
+    assert replan_payload["must_change"] == ["把冲突集中到证人失踪"]
+    assert replan_payload["forbidden_carryover"] == ["过早和解"]
 
 
 def test_textual_chapter_acceptance_form_submits_review_contract(tmp_path: Path) -> None:
@@ -1179,7 +1174,7 @@ def test_textual_chapter_acceptance_form_submits_review_contract(tmp_path: Path)
             form = screen.query_one("#chapter-acceptance-form", ChapterAcceptanceFormWidget)
             form.value = "\n".join(
                 [
-                    "决策: revise_length",
+                    "决策: rewrite_requested",
                     "原因代码: length_or_pacing_revision_requested",
                     "反馈: 当前章需要更充分的追逐段落",
                     "目标字数: 5200",
@@ -1194,8 +1189,8 @@ def test_textual_chapter_acceptance_form_submits_review_contract(tmp_path: Path)
             facade = app.session.facade
             writer_action = facade.writer_action_runs[-1]  # type: ignore[attr-defined]
             assert writer_action["action"] == "continue_after_chapter_acceptance"
-            assert writer_action["payload"]["status"] == "revise_length"  # type: ignore[index]
-            assert writer_action["payload"]["length_plan_update"]["target_chars"] == 5200  # type: ignore[index]
+            assert writer_action["payload"]["status"] == "rewrite_requested"  # type: ignore[index]
+            assert writer_action["payload"]["target_chars"] == 5200  # type: ignore[index]
 
     _run(scenario())
 

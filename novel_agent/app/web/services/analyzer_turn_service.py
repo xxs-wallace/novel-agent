@@ -56,6 +56,8 @@ class AnalyzerTurn:
     status: str
     user_question: str
     user_message_id: str
+    session_id: str = ""
+    parent_turn_id: str = ""
     job_id: str = ""
     assistant_message_id: str = ""
     error_message_id: str = ""
@@ -83,6 +85,8 @@ class AnalyzerTurn:
             "turn_id": self.turn_id,
             "job_id": self.job_id,
             "status": self.status,
+            "session_id": self.session_id,
+            "parent_turn_id": self.parent_turn_id,
             "user_message_id": self.user_message_id,
             "assistant_message_id": self.assistant_message_id,
             "error_message_id": self.error_message_id,
@@ -102,6 +106,8 @@ class AnalyzerTurn:
             "status": self.status,
             "user_question": self.user_question,
             "user_message_id": self.user_message_id,
+            "session_id": self.session_id,
+            "parent_turn_id": self.parent_turn_id,
             "assistant_message_id": self.assistant_message_id,
             "error_message_id": self.error_message_id,
             "prompt_trace_path": self.prompt_trace_path,
@@ -122,6 +128,8 @@ class AnalyzerTurn:
             status=str(payload.get("status") or "queued"),
             user_question=str(payload.get("user_question") or ""),
             user_message_id=str(payload.get("user_message_id") or ""),
+            session_id=str(payload.get("session_id") or ""),
+            parent_turn_id=str(payload.get("parent_turn_id") or ""),
             job_id=str(payload.get("job_id") or ""),
             assistant_message_id=str(payload.get("assistant_message_id") or ""),
             error_message_id=str(payload.get("error_message_id") or ""),
@@ -152,6 +160,8 @@ class AnalyzerTurnService:
         question: str,
         user_message_id: str,
         requested_turn_id: str = "",
+        session_id: str = "",
+        parent_turn_id: str = "",
     ) -> AnalyzerTurn:
         requested_turn_id = requested_turn_id.strip()
         active = self.load_turn(book_id, requested_turn_id) if requested_turn_id else self.active_turn(book_id)
@@ -173,6 +183,8 @@ class AnalyzerTurnService:
             status="queued",
             user_question=question,
             user_message_id=user_message_id,
+            session_id=session_id,
+            parent_turn_id=parent_turn_id,
         )
         self._save_turn(turn)
         return turn
@@ -303,6 +315,7 @@ class AnalyzerTurnService:
                     "status": "cancelled",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
                     "error_type": "CancelledError",
                     **trace_paths,
                 },
@@ -333,6 +346,7 @@ class AnalyzerTurnService:
                     "status": "failed",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
                     "error_type": "model_timeout",
                     **trace_paths,
                 },
@@ -363,6 +377,7 @@ class AnalyzerTurnService:
                     "status": "failed",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
                     "error_type": exc.__class__.__name__,
                     **trace_paths,
                 },
@@ -387,6 +402,7 @@ class AnalyzerTurnService:
                     "status": "need_user_input",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
                     "sources": result.get("sources") or [],
                     **trace_paths,
                 },
@@ -409,6 +425,7 @@ class AnalyzerTurnService:
                     "status": status or "failed",
                     "job_id": context.job_id,
                     "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
                     "sources": result.get("sources") or [],
                     **trace_paths,
                 },
@@ -432,6 +449,7 @@ class AnalyzerTurnService:
                 "status": status or "ok",
                 "job_id": context.job_id,
                 "turn_id": turn.turn_id,
+                "analyzer_session_id": turn.session_id,
                 "sources": result.get("sources") or [],
                 **trace_paths,
             },
@@ -498,8 +516,14 @@ class AnalyzerTurnService:
         return f"{turn.user_question}\n\n用户补充：\n{supplements}"
 
     def conversation_history_for_model(self, turn: AnalyzerTurn, *, session_service: Any) -> list[dict[str, str]]:
+        session_history_method = getattr(getattr(session_service, "analyzer_session_service", None), "conversation_history_for_model", None)
+        if turn.session_id and callable(session_history_method):
+            history = session_history_method(book_id=turn.book_id, session_id=turn.session_id, exclude_turn_id=turn.turn_id)
+        else:
+            history = []
         history_method = getattr(session_service, "_conversation_history_for_analyzer", None)
-        history = history_method(turn.book_id) if callable(history_method) else []
+        if not history and callable(history_method):
+            history = history_method(turn.book_id)
         turn_context = self._turn_context_for_model(turn)
         if turn_context:
             history.append({"role": "system", "content": turn_context})
@@ -507,29 +531,135 @@ class AnalyzerTurnService:
 
     def sync_messages(self, *, book_id: str, session_service: Any) -> None:
         for turn in self.turns(book_id):
-            if turn.status == "need_user_input" and turn.assistant_message_id:
+            self._sync_user_message(turn, session_service=session_service)
+            if turn.status in {"succeeded", "need_user_input"}:
+                self._sync_result_message(turn, session_service=session_service)
                 continue
-            if turn.status == "succeeded" and turn.assistant_message_id:
-                continue
-            if turn.status not in self.FAILURE_STATUSES or turn.error_message_id:
-                continue
-            content = "上一次小说专家分析被中断，请重新发送问题或补充上下文后再试。"
-            if turn.status == "failed" and turn.error.get("error"):
-                content = f"小说专家上一次分析失败：{turn.error['error']}"
-            message = session_service.append_message(
-                book_id,
-                role="error",
-                content=content,
-                payload={
-                    "channel": "outline_analyzer",
-                    "status": turn.status,
-                    "job_id": turn.job_id,
-                    "turn_id": turn.turn_id,
-                },
-            )
+            if turn.status in self.FAILURE_STATUSES:
+                self._sync_error_message(turn, session_service=session_service)
+
+    def _sync_user_message(self, turn: AnalyzerTurn, *, session_service: Any) -> None:
+        if not turn.user_question or self._has_synced_message(
+            turn.book_id,
+            session_service=session_service,
+            turn_id=turn.turn_id,
+            role="user",
+        ):
+            return
+        self._append_recovered_message(
+            session_service,
+            turn.book_id,
+            role="user",
+            content=turn.user_question,
+            payload={
+                "channel": "outline_analyzer",
+                "job_id": turn.job_id,
+                "turn_id": turn.turn_id,
+                "analyzer_session_id": turn.session_id,
+                "recovered_from": turn.state_path,
+                "original_message_id": turn.user_message_id,
+            },
+            created_at=turn.created_at,
+        )
+
+    def _sync_result_message(self, turn: AnalyzerTurn, *, session_service: Any) -> None:
+        if self._has_synced_message(
+            turn.book_id,
+            session_service=session_service,
+            turn_id=turn.turn_id,
+            role="assistant",
+        ):
+            return
+        answer = str(turn.result.get("answer") or "").strip()
+        if not answer:
+            return
+        status = "need_user_input" if turn.status == "need_user_input" else str(turn.result.get("status") or "ok")
+        message = self._append_recovered_message(
+            session_service,
+            turn.book_id,
+            role="assistant",
+            content=answer,
+            payload={
+                "channel": "outline_analyzer",
+                "status": status,
+                "job_id": turn.job_id,
+                "turn_id": turn.turn_id,
+                "analyzer_session_id": turn.session_id,
+                "sources": turn.result.get("sources") or [],
+                "recovered_from": turn.state_path,
+                "original_message_id": turn.assistant_message_id,
+                **self._trace_paths_payload(turn.book_id, turn.turn_id),
+            },
+            created_at=turn.updated_at,
+        )
+        if not turn.assistant_message_id:
+            turn.assistant_message_id = message.message_id
+            turn.updated_at = _timestamp()
+            self._save_turn(turn)
+
+    def _sync_error_message(self, turn: AnalyzerTurn, *, session_service: Any) -> None:
+        if self._has_synced_message(
+            turn.book_id,
+            session_service=session_service,
+            turn_id=turn.turn_id,
+            role="error",
+        ):
+            return
+        content = "上一次小说专家分析被中断，请重新发送问题或补充上下文后再试。"
+        if turn.status == "failed" and turn.error.get("error"):
+            content = f"小说专家上一次分析失败：{turn.error['error']}"
+        message = self._append_recovered_message(
+            session_service,
+            turn.book_id,
+            role="error",
+            content=content,
+            payload={
+                "channel": "outline_analyzer",
+                "status": turn.status,
+                "job_id": turn.job_id,
+                "turn_id": turn.turn_id,
+                "analyzer_session_id": turn.session_id,
+                "recovered_from": turn.state_path,
+                "original_message_id": turn.error_message_id,
+                **self._trace_paths_payload(turn.book_id, turn.turn_id),
+            },
+            created_at=turn.updated_at,
+        )
+        if not turn.error_message_id:
             turn.error_message_id = message.message_id
             turn.updated_at = _timestamp()
             self._save_turn(turn)
+
+    def _has_synced_message(self, book_id: str, *, session_service: Any, turn_id: str, role: str) -> bool:
+        messages = getattr(session_service, "_messages", {}).get(book_id, [])
+        for message in messages:
+            if message.role != role:
+                continue
+            if message.payload.get("channel") == "outline_analyzer" and message.payload.get("turn_id") == turn_id:
+                return True
+        return False
+
+    def _append_recovered_message(
+        self,
+        session_service: Any,
+        book_id: str,
+        *,
+        role: str,
+        content: str,
+        payload: Mapping[str, Any],
+        created_at: str,
+    ) -> Any:
+        message = session_service.append_message(book_id, role=role, content=content, payload=payload)
+        message.created_at = self._parse_timestamp(created_at)
+        return message
+
+    def _parse_timestamp(self, value: str) -> datetime:
+        if not value:
+            return _utc_now()
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return _utc_now()
 
     def active_turn(self, book_id: str) -> AnalyzerTurn | None:
         state = self._state(book_id)
@@ -620,12 +750,31 @@ class AnalyzerTurnService:
         if not turn.result and not turn.supplements:
             return ""
         result_status = str(turn.result.get("status") or "")
-        pending = str(turn.result.get("answer") or "")
-        supplements = "; ".join(str(item.get("content") or "") for item in turn.supplements)
-        return (
-            "这是同一个未完成 Analyzer turn 的续问上下文；不要把它当作正式小说 Memory。"
-            f" turn_id={turn.turn_id}; previous_status={result_status}; pending_question={pending}; supplements={supplements}"
-        )
+        trace = turn.result.get("trace") if isinstance(turn.result.get("trace"), Mapping) else {}
+        notebook = turn.result.get("notebook") if isinstance(turn.result.get("notebook"), Mapping) else {}
+        pause_context = trace.get("pause_context") if isinstance(trace, Mapping) else {}
+        resume_context = {
+            "kind": "analyzer_resume_context",
+            "turn_id": turn.turn_id,
+            "previous_status": result_status,
+            "previous_answer_or_prompt": str(turn.result.get("answer") or "")[:1200],
+            "pause_context": dict(pause_context) if isinstance(pause_context, Mapping) else {},
+            "active_notebook": {
+                "confirmed_facts": list(notebook.get("confirmed_facts") or [])[-6:],
+                "reasonable_inferences": list(notebook.get("reasonable_inferences") or [])[-6:],
+                "uncertain_gaps": list(notebook.get("uncertain_gaps") or [])[-6:],
+                "candidate_directions": list(notebook.get("candidate_directions") or [])[-4:],
+                "blocked_directions": list(notebook.get("blocked_directions") or [])[-4:],
+                "user_preferences": list(notebook.get("user_preferences") or [])[-4:],
+            },
+            "user_supplements": list(turn.supplements),
+            "resume_rules": [
+                "这是同一个未完成 Analyzer turn 的恢复上下文，不是正式小说 Memory。",
+                "只消费 pause_context、active_notebook、committed evidence 摘要和用户补充；不要把 debug trace 或未提交猜测当成事实。",
+                "用户补充应作为 user preference / authorization candidate 处理，并重新判断是否可回答或是否需要补充 evidence。",
+            ],
+        }
+        return json.dumps({"resume_context": resume_context}, ensure_ascii=False, indent=2)
 
     def _render_turn_markdown(self, turn: AnalyzerTurn) -> str:
         payload = json.dumps(turn.to_trace_payload(), ensure_ascii=False, indent=2)
@@ -639,6 +788,8 @@ class AnalyzerTurnService:
             f"- turn_id: {turn.turn_id}\n"
             f"- job_id: {turn.job_id}\n"
             f"- status: {turn.status}\n"
+            f"- session_id: {turn.session_id}\n"
+            f"- parent_turn_id: {turn.parent_turn_id}\n"
             f"- user_message_id: {turn.user_message_id}\n"
             f"- assistant_message_id: {turn.assistant_message_id}\n"
             f"- error_message_id: {turn.error_message_id}\n"

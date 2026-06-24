@@ -913,6 +913,59 @@
   - [ ] 旧固定 prompt 入口如保留，仅可用于 legacy migration / smoke compatibility，并必须显式标记 legacy
   - [ ] 测试覆盖新 runs 不走旧固定 prompt 主路径
 
+## Group N: 借鉴对象引导创作
+
+- [ ] Task 79: 定义借鉴对象引导创作任务 schema 与入口
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md)
+  - `依赖`: Task 47, Task 52, Creative KB 已构建
+  - `建议只关注代码文件`: `novel_agent/app/schemas/orchestration_schema.py`, `novel_agent/runs/writer.py`, `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] 定义 `ReferenceWorkSelection` / `OriginalCreationTaskManifest` 或等价内部 schema
+  - [ ] 创建新写作任务时记录借鉴对象精读任务 id、Creative KB id、source book id 和风格参考策略
+  - [ ] 新任务不得默认继承借鉴对象人物档案、世界观、时间线、伏笔、document 或正式 Memory
+  - [ ] 落盘 `original_creation_task_manifest.json`
+  - [ ] 测试覆盖 Creative KB 缺失时不能伪装为完整仿写任务
+
+- [ ] Task 80: 将借鉴对象大纲与剧情设计接入 Outline Research Loop
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [design.md](.trae/specs/writer-agent-layered-generation/design.md), [outline-research-loop.design.md](.trae/specs/writer-agent-layered-generation/designs/outline-research-loop.design.md)
+  - `依赖`: Task 52, Task 53, Task 79
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/services/outline_research_service.py`, `novel_agent/app/services/creative_kb_facade.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] 在 `OutlineSeedPacket` 中加入只读的借鉴对象结构索引和 `reference_outline_design` 资源目录
+  - [ ] 实现 `reference_outline_design` resolver，返回大纲设计、高潮布局、人物功能配置、铺垫回收和篇章节奏摘要
+  - [ ] resolver 返回内容必须标记为 `reference_advice`，不得标记为 confirmed fact
+  - [ ] 模型可基于参考摘要提出大纲调整、人物设定补强、冲突升级、篇幅配置或伏笔安排建议
+  - [ ] 落盘 `reference_outline_design_digest.json` 和 `outline_guidance_notebook.json`
+  - [ ] 测试覆盖借鉴对象具体角色、设定和事件不会进入新任务 facts
+
+- [ ] Task 81: 将 Agent 建议和用户回答纳入既有 Outline Research Loop
+  - `来源`: [spec.md](.trae/specs/writer-agent-layered-generation/spec.md), [contracts.md](.trae/specs/writer-agent-layered-generation/contracts.md)
+  - `依赖`: Task 60, Task 61, Task 80
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_workflow.py`, `novel_agent/app/orchestrators/writer_layered_generation.py`, `novel_agent/app/web/services/web_action_service.py`, `novel_agent/tests/test_writer_outline_research.py`
+  - [ ] Agent 对用户大纲的方向建议可以表现为结构化问题集或可审阅 artifact
+  - [ ] 用户回答必须绑定 `question_set_id`、review action 或等价结构化入口
+  - [ ] 用户采纳后的建议以 `user_authorized` 来源进入 `planning_notebook`
+  - [ ] 未回答、未采纳或被用户拒绝的建议不得成为正式规划事实
+  - [ ] 测试覆盖普通聊天消息不会自动采纳 Agent 建议
+
+- [ ] Task 82: 限制仿写只在正文阶段作为风格参考生效
+  - `来源`: [runtime-boundaries.spec.md](.trae/specs/writer-agent-layered-generation/specs/runtime-boundaries.spec.md), [../creative-knowledge-base/spec.md](.trae/specs/creative-knowledge-base/spec.md)
+  - `依赖`: Task 66, Task 75, Task 76, Task 78, Task 79
+  - `建议只关注代码文件`: `novel_agent/app/orchestrators/writer_execution.py`, `novel_agent/app/services/creative_kb_facade.py`, `novel_agent/app/services/continuation_generation_service.py`, `novel_agent/tests/test_writer_execution_workflow.py`
+  - [ ] Draft Research Loop 根据已通过 `ChapterBrief -> SceneBrief` 检索借鉴对象 Creative KB
+  - [ ] 检索结果只进入 `style_reference_bundle`、`style_notes` 或 `reference_advice`
+  - [ ] `chapter_execution_input.json` 中将 `facts`、`reference_advice` 和 `style` 分开装配
+  - [ ] Draft Prose Executor prompt 明确禁止复制借鉴对象具体桥段、角色、设定和独特表达
+  - [ ] 测试覆盖 style 与 facts 冲突时 facts 优先
+
+- [ ] Task 83: 借鉴对象引导创作端到端验收
+  - `来源`: Group N
+  - `依赖`: Task 79, Task 80, Task 81, Task 82
+  - `建议只关注代码文件`: `novel_agent/tests/test_writer_outline_research.py`, `novel_agent/tests/test_writer_execution_workflow.py`, `novel_agent/tests/test_web_action_service.py`
+  - [ ] 测试从已构建 Creative KB 的作品创建新原创写作任务
+  - [ ] 测试用户大纲进入 Outline Research Loop 并收到基于借鉴对象结构经验的建议
+  - [ ] 测试用户回答进入 `planning_notebook` 后驱动正式大纲生成
+  - [ ] 测试正文阶段检索风格参考但不继承借鉴对象事实
+  - [ ] 测试 accepted 后只写回新任务 document 和新任务 Character Memory
+
 - Task 64 depends on Task 7A, Task 60, Task 61
 - Task 65 depends on Task 64
 - Task 66 depends on Task 7A, Task 65, Task 75, Task 76
@@ -928,3 +981,8 @@
 - Task 76 depends on Task 55, Task 56, Task 75
 - Task 77 depends on Task 75, Task 76
 - Task 78 depends on Task 66, Task 75, Task 76, Task 77
+- Task 79 depends on Task 47, Task 52 and Creative KB availability
+- Task 80 depends on Task 52, Task 53, Task 79
+- Task 81 depends on Task 60, Task 61, Task 80
+- Task 82 depends on Task 66, Task 75, Task 76, Task 78, Task 79
+- Task 83 depends on Task 79, Task 80, Task 81, Task 82

@@ -11,6 +11,8 @@
 
 Writer 层负责把已经建模的原作事实、世界观、人物档案、故事大纲、创作知识库和用户续写意图转化为可审阅、可修改、可恢复的续写产物。
 
+Writer 层还负责一种新的“借鉴对象引导创作”模式：用户可在已完成精读和 Creative KB 构建的作品上发起一个新的原创写作任务。该模式的核心不是复制或续写借鉴对象，而是让 Agent 在既有 Outline Research Loop（即大纲 prompt loop / outline-researcher 流程）中参考借鉴对象的大纲、剧情设计、结构节奏和人物配置经验，帮助用户打磨自己的大纲与人物设定；真正的文风仿写仅限于最后正文产出阶段的风格参考输入。
+
 本 spec 不重复定义：
 
 - 原文导入与 `documents` 基线，见 [`../novel-continuation-mvp/spec.md`](../novel-continuation-mvp/spec.md)
@@ -129,6 +131,41 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 对 `missing` 人物，系统 SHALL 询问用户是否新增人物；只有用户确认新增后，才进入最小人物档案补充
 - 用户拒绝新增的人名不得进入 `CharacterCastPlan`，除非后续剧情结构缺位流程重新提出受约束角色需求
 
+### Layer 0A.8: 借鉴对象引导创作层
+
+目标：
+
+- 在已完成精读与 Creative KB 构建的作品上，创建一个新的原创写作任务
+- 让 Agent 基于借鉴对象的大纲、剧情设计、结构节奏和人物配置经验，对用户自己的大纲与人物设定提出方向建议
+- 将 Agent 建议、用户回答和用户确认后的取舍纳入既有 Outline Research Loop
+- 将“仿写文风”限制在最后正文产出阶段，不让借鉴对象的人物、设定、事件或具体桥段污染新任务事实
+
+典型输入：
+
+- `ReferenceWorkSelection`
+- `UserOriginalStoryOutline`
+- `ReferenceOutlineDesignDigest`
+- `ReferenceStructureAdvice`
+- `StyleImitationPolicy`
+
+典型输出：
+
+- `original_creation_task_manifest.json`
+- `outline_guidance_notebook.json`
+- `outline_advice_question_set.json`
+- `outline_advice_answer_submission.json`
+- `style_imitation_policy.json`
+
+要求：
+
+- 系统 SHALL 在新任务中记录借鉴对象来源，但不得默认继承借鉴对象的正式 Memory、人物档案、世界观、时间线、伏笔状态或 document
+- 借鉴对象的精读结果、源作品大纲、`SourceArcMap`、`NarrativeStructurePattern` / `ArcPatternCard` 和 Creative KB 可作为“创作建议参考”进入 Outline Research Loop
+- Outline Research Loop 可以围绕用户大纲主动提出建议，例如冲突是否足够、人物动机是否清晰、人物配置是否缺位、高潮位置是否匹配篇幅、伏笔铺设是否过早或过晚、关系弧线是否需要桥接
+- Agent 提出的方向建议 SHALL 作为可审阅 artifact 或结构化问题集展示给用户；用户回答 SHALL 绑定问题集或 review action，并以 `user_authorized` 来源进入 `planning_notebook`
+- 用户未确认的建议不得升级为新任务事实，不得写入新任务 Character Memory 或世界观设定
+- 借鉴对象中的人物名、专有设定、具体事件、具体桥段和独特表达不得进入新任务的事实输入；若用户明确要求引用，也必须作为新的用户输入重新确认，而不是从借鉴对象自动继承
+- 文风仿写只在 Draft Research Loop / Draft Prose Executor 阶段通过 `style_reference_bundle`、`style_notes` 或等价风格输入生效，不得影响上游大纲事实的来源判定
+
 ### Layer 0B: 大纲研究循环层
 
 目标：
@@ -136,6 +173,7 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 在生成 `BookContinuationPlan`、`BatchPlan` 或高密度 `ChapterPackage` 前，让模型先基于轻量索引主动调查所需信息
 - 避免由编排器一次性把大量 Memory 和 SQLite 内容拼进 prompt
 - 让模型在多轮 tool call 后自行判断信息是否足够；不足时继续查询或向用户提出关键问题
+- 本层就是正式的“大纲 prompt loop”；`outline-researcher`、`outline prompt loop` 和 `Outline Research Loop` 在本文中指同一条流程，不应实现为多套并行循环
 
 典型输入：
 
@@ -157,7 +195,9 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 语义请求至少 SHOULD 支持 `text_search`、`story_detail`、`character_profile`、`world_concept`
 - 本地 Agent SHALL 将语义请求转换为 SQLite / Markdown / Memory / KB 可理解的查询，并返回带来源的 evidence
 - 对 `story_detail`，本地 Agent SHOULD 优先调用 Memory 层提供的 BTree descent / page query 接口，而不是由 Writer 直接读取 SQLite、扫描 Markdown 或拼接原文
-- 对细节定位、人物共同经历、伏笔回收或关键词交集问题，本地 Agent SHOULD 支持共享 `text_search` 请求作为 grep-like locator；模型可指定关键词、交集 / 并集模式和检索范围，失败分支只进入 trace，不应写入 planning notebook 作为事实。
+- 对细节定位、人物共同经历、伏笔回收或关键词交集问题，本地 Agent SHOULD 支持共享 `text_search` 请求作为 grep-like locator；模型可指定关键词、交集 / 并集模式和检索范围，其中 `all` 表示 AND / 交集，`any` 表示 OR / 并集。document scope 返回围绕共同命中窗口或最紧凑匹配窗口的 snippet 与 source doc ids，不默认返回完整 document；失败分支只进入 trace，不应写入 planning notebook 作为事实。
+- 当 `text_search` snippet 只证明对象、话语、线索、消息或道具的内容，而写作决策还依赖其是否被发送、收到、说出、兑现、使用、公开、撤回或造成后续影响时，Loop MUST 将内容事实与事件生命周期事实分开核验。草稿、计划、犹豫、取消或早期状态证据不得直接升级为最终“从未发生”结论；应读取后续候选 source doc、翻页，或用已知内容词加动作/结果词再检索。
+- 用户输入中的动作、关系、对象、时间或结果限定属于 evidence requirement，不得被静默降级为更弱的“准备 / 计划 / 尚未完成”目标。若已定位到高精度原句、标题、编号、独特称谓或内容短语，Loop SHOULD 用该短语继续做 document `text_search`，查找重复出现、后续兑现或结果场景，而不是继续使用宽泛主题词。
 - 对 `character_profile`，本地 Agent SHOULD 支持 `metadata.story_events_offset` 和 `metadata.story_events_char_budget` 分页读取 `story_events_json`；单页生产路径不得超过 4096 字符，并应返回 `story_events_page`，包含 `offset`、`next_offset`、`total`、`has_more` 和 `chars_returned`。
 - Writer 模型 SHALL 负责在每层 Memory candidates 中选择需要继续展开的节点，并返回 `selected_ids`、`query_suffix`、`reason`、`confidence`；Memory 层 SHALL 负责确定性展开 selected ids 到下一层 Page 或 document
 - Writer 层不得重定义 Memory Page schema、outline segment / segment group 压缩规则、chapter summary 回源规则或 document excerpt 裁剪规则
@@ -170,6 +210,9 @@ Writer 的主流程 SHALL 是模型主导的 Agent Loop，而不是流程编排�
 - 系统 SHALL 仅在收到 `continue_after_outline_research_input` 或等价结构化 action 后继续 workflow；普通聊天消息不得自动绕过 `needs_user_input`
 - 用户回答 SHALL 以原始 `answer_text` 保留，并在可行时映射为逐题 `user_answers[]`；系统不得伪造用户未回答的内容
 - 用户确认后的回答进入 `planning_notebook` 时来源类型 SHALL 标记为 `user_authorized`
+- 在借鉴对象引导创作模式下，Outline Research Loop SHALL 同时接收用户原创大纲和借鉴对象的结构化参考摘要，但必须把参考摘要标记为 `reference_advice`，不得标记为 `confirmed` 或 `user_authorized`
+- 在借鉴对象引导创作模式下，模型 MAY 基于借鉴对象的大纲设计提出创作建议和追问；这些建议和用户回答 SHALL 留在同一 prompt loop 与 `planning_notebook` 中，成为后续 `BookContinuationPlan` 或等价新创作规划 artifact、人物补充和批次规划输入
+- 在借鉴对象引导创作模式下，`story_detail` / `character_profile` / `world_concept` 查询默认只面向新任务或用户确认后的新故事材料；查询借鉴对象时必须走只读的 `reference_outline_design` / `structure_pattern` / `style_reference` 语义，不得把返回内容升级为新故事事实
 
 #### Memory / Writer 分工
 
@@ -476,6 +519,38 @@ Draft Research Loop SHALL 将查询结果摘取为 `draft_context_notebook.json`
 - **AND** `OutlineSeedPacket` 包含已对齐的重点人物、可查询人物索引、世界观精炼梗概、世界观概念名词索引和历史故事精炼总览
 - **AND** 不应把完整人物档案、完整世界观文档或完整历史时间线一次性塞入初始 prompt
 
+### Requirement: 借鉴对象引导创作必须接入既有 Outline Research Loop
+
+系统 SHALL 支持用户基于一个已完成精读与 Creative KB 构建的借鉴对象创建新的原创写作任务。该任务的大纲生成阶段应由 Agent 参考借鉴对象的结构与剧情设计经验，向用户提出方向建议、缺口追问和人物设定调整建议。
+
+#### Scenario: 创建新的借鉴写作任务
+- **WHEN** 用户在已完成 Creative KB 的作品上选择“仿写此小说”或等价入口
+- **THEN** 系统创建一个新的写作任务
+- **AND** 新任务记录借鉴对象 id、Creative KB id、精读任务 id 和风格参考策略
+- **AND** 新任务不得默认继承借鉴对象的正式人物、世界观、时间线、伏笔或 document
+
+#### Scenario: Agent 基于借鉴对象给出大纲建议
+- **WHEN** 用户提交原创故事大纲、人物设定或创作目标
+- **THEN** Outline Research Loop MAY 查询借鉴对象的大纲设计、源作品结构位置、结构模式和剧情推进节奏
+- **AND** Agent 应把这些资料转化为方向建议，例如调整高潮位置、强化人物动机、补足对照角色、增加铺垫或压缩支线
+- **AND** 这些建议必须标记为 `reference_advice`
+- **AND** 不得把借鉴对象的具体事件、角色命运或专有设定写入新故事大纲
+
+#### Scenario: 建议和用户回答进入同一个 prompt loop
+- **WHEN** Agent 认为用户大纲缺少关键边界或存在可改进方向
+- **THEN** 系统输出结构化问题集或可审阅建议 artifact
+- **AND** 用户回答通过 `continue_after_outline_research_input`、artifact review action 或等价结构化 action 提交
+- **AND** 用户回答原文进入 `planning_notebook`
+- **AND** 被用户采纳的建议来源标记为 `user_authorized`
+- **AND** 未被用户采纳或未回答的建议不得成为后续正式规划事实
+
+#### Scenario: 仿写只影响正文表达
+- **WHEN** 系统进入章节正文生成阶段
+- **THEN** Draft Research Loop MAY 从借鉴对象 Creative KB 中检索风格、情绪机制、节奏和表达参考
+- **AND** Draft Prose Executor MAY 消费 `style_reference_bundle`
+- **AND** 上游大纲、人物设定、世界观设定和章节事实仍必须来自用户输入、用户确认后的 artifact 或新任务 Memory
+- **AND** 风格参考不得覆盖事实约束，不得复制借鉴对象具体桥段
+
 ### Requirement: 系统必须自动抽取用户概述中的人物提及
 
 系统 SHALL 从用户故事概述中自动抽取人物姓名和称谓，并交给本地 Agent 对齐 Character Memory；只有未匹配人物才进入新增人物确认。
@@ -776,6 +851,10 @@ Writer 层主要产物：
 - `historical_outline_event_index.json`（来自 Memory / 大纲索引层，可选引用）
 - `source_arc_map.json`（来自 Memory 层，可选引用）
 - `narrative_structure_patterns.json` / `arc_pattern_cards.json`（来自 KB 层，可选引用）
+- `original_creation_task_manifest.json`（借鉴对象引导创作模式）
+- `reference_outline_design_digest.json`（借鉴对象大纲与剧情设计摘要，只作建议参考）
+- `outline_guidance_notebook.json`（大纲建议、用户取舍和来源记录）
+- `style_imitation_policy.json`（正文阶段风格参考边界）
 - `book_continuation_plan.json`
 - `world_expansion_pack.json`
 - `character_requirement_report.json`

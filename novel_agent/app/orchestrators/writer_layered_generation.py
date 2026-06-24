@@ -375,6 +375,9 @@ class WriterLayeredGenerationOrchestrator:
             notes=str(payload.get("notes") or ""),
             story_scale=story_scale,
             climax_plan=climax_plan,
+            reference_work=dict(payload.get("reference_work") or {})
+            if isinstance(payload.get("reference_work"), Mapping)
+            else {},
             sources=[
                 TraceableSource(
                     type="user_input",
@@ -573,9 +576,28 @@ class WriterLayeredGenerationOrchestrator:
     ) -> dict[str, Any]:
         modeling_status = self.check_modeling_status(conn, book_id=book_id)
         self.run_writer.write_json(run_id, "modeling_status.json", modeling_status)
-        if not modeling_status.ready_for_continuation:
+        reference_work_payload = (
+            dict(intent_payload.get("reference_work") or {})
+            if isinstance(intent_payload.get("reference_work"), Mapping)
+            else {}
+        )
+        reference_source_task_id = str(reference_work_payload.get("source_task_id") or "").strip()
+        original_creation_mode = bool(reference_source_task_id)
+        if not modeling_status.ready_for_continuation and not original_creation_mode:
             raise ValueError(
                 "建模状态未满足续写要求: " + ", ".join(modeling_status.missing_modeling_steps)
+            )
+        if original_creation_mode:
+            self.run_writer.write_json(
+                run_id,
+                "original_creation_task_manifest.json",
+                {
+                    "mode": "reference_guided_original_creation",
+                    "book_id": book_id,
+                    "reference_work": reference_work_payload,
+                    "current_modeling_ready": bool(modeling_status.ready_for_continuation),
+                    "missing_modeling_steps": list(modeling_status.missing_modeling_steps),
+                },
             )
 
         intent = self.build_continuation_intent(intent_payload)
@@ -596,6 +618,8 @@ class WriterLayeredGenerationOrchestrator:
         if research.sufficiency_decision.status in {"needs_user_input", "blocked"}:
             return self._outline_research_wait_payload(run_id=run_id, research=research)
 
+        intent = self._intent_with_authorized_character_names(intent, research.planning_notebook)
+        self.run_writer.write_json(run_id, "continuation_intent.json", intent)
         book_plan = self._plan_book_continuation_after_research(
             conn,
             book_id=book_id,
@@ -786,10 +810,26 @@ class WriterLayeredGenerationOrchestrator:
     ) -> dict[str, Any]:
         modeling_status = self.check_modeling_status(conn, book_id=book_id)
         self.run_writer.write_json(run_id, "modeling_status.json", modeling_status)
-        if not modeling_status.ready_for_continuation:
+        reference_source_task_id = str(intent.reference_work.get("source_task_id") or "").strip()
+        original_creation_mode = bool(reference_source_task_id)
+        if not modeling_status.ready_for_continuation and not original_creation_mode:
             raise ValueError(
                 "建模状态未满足续写要求: " + ", ".join(modeling_status.missing_modeling_steps)
             )
+        if original_creation_mode:
+            self.run_writer.write_json(
+                run_id,
+                "original_creation_task_manifest.json",
+                {
+                    "mode": "reference_guided_original_creation",
+                    "book_id": book_id,
+                    "reference_work": dict(intent.reference_work),
+                    "current_modeling_ready": bool(modeling_status.ready_for_continuation),
+                    "missing_modeling_steps": list(modeling_status.missing_modeling_steps),
+                },
+            )
+        intent = self._intent_with_authorized_character_names(intent, research.planning_notebook)
+        self.run_writer.write_json(run_id, "continuation_intent.json", intent)
         book_plan = self._plan_book_continuation_after_research(
             conn,
             book_id=book_id,
@@ -872,6 +912,34 @@ class WriterLayeredGenerationOrchestrator:
             self.confirm_freeze_a(run_id=run_id)
         return self._freeze_a_bundle_to_dict(bundle)
 
+    def _intent_with_authorized_character_names(
+        self,
+        intent: ContinuationIntent,
+        planning_notebook: PlanningNotebook,
+    ) -> ContinuationIntent:
+        names = list(intent.major_characters)
+        for fact in planning_notebook.confirmed_facts:
+            if fact.fact_status != "user_authorized":
+                continue
+            for name in self._explicit_numbered_character_names(fact.claim):
+                if name not in names:
+                    names.append(name)
+        cleaned = self.mention_service.clean_names(names)
+        if cleaned == list(intent.major_characters):
+            return intent
+        payload = intent.to_dict()
+        payload["major_characters"] = cleaned
+        return ContinuationIntent.from_dict(payload)
+
+    @staticmethod
+    def _explicit_numbered_character_names(text: str) -> list[str]:
+        names: list[str] = []
+        for match in re.finditer(r"(?:^|\n)\s*(?:\d+|[一二三四五六七八九十]+)[.、]\s*([^，,。:：；;\s（）()]{1,16})", text):
+            name = _normalize_text(match.group(1))
+            if name and name not in names:
+                names.append(name)
+        return names
+
     def _plan_book_continuation_after_research(
         self,
         conn: sqlite3.Connection,
@@ -936,6 +1004,29 @@ class WriterLayeredGenerationOrchestrator:
         self.run_writer.write_json(run_id, "planning_notebook.json", result.planning_notebook)
         self.run_writer.write_json(run_id, "sufficiency_decision.json", result.sufficiency_decision)
         self.run_writer.write_json(run_id, "generated_outline.json", dict(result.generated_outline))
+        if result.seed_packet.reference_work or result.seed_packet.reference_outline_design_index:
+            self.run_writer.write_json(
+                run_id,
+                "reference_outline_design_digest.json",
+                {
+                    "reference_work": dict(result.seed_packet.reference_work),
+                    "reference_outline_design_index": [
+                        dict(item) for item in result.seed_packet.reference_outline_design_index
+                    ],
+                    "reference_advice": [
+                        item.to_dict()
+                        for item in result.planning_notebook.candidate_facts
+                        if item.fact_status == "reference_advice"
+                    ],
+                    "user_authorized_answers": [
+                        item.to_dict()
+                        for item in result.planning_notebook.confirmed_facts
+                        if item.fact_status == "user_authorized"
+                    ],
+                },
+            )
+        if result.resume_context:
+            self.run_writer.write_json(run_id, "outline_research_resume_context.json", result.resume_context)
 
     def _outline_research_wait_payload(self, *, run_id: str, research: OutlineResearchRunResult) -> dict[str, Any]:
         run_dir = self.run_writer.layout.run_dir(run_id)
@@ -964,7 +1055,13 @@ class WriterLayeredGenerationOrchestrator:
         if stage == "outline_research_user_input":
             question_set = self._build_outline_research_question_set(run_id=run_id, research=research)
             self.run_writer.write_outline_research_question_set(run_id, question_set)
+            resume_context = self._outline_research_resume_context(
+                research=research,
+                question_set=question_set,
+            )
+            self.run_writer.write_json(run_id, "outline_research_resume_context.json", resume_context)
             payload["question_set"] = question_set.to_dict()
+            payload["resume_context"] = resume_context
         return payload
 
     def _build_outline_research_question_set(
@@ -980,6 +1077,24 @@ class WriterLayeredGenerationOrchestrator:
             source_artifact_id=f"writer:{run_id}:sufficiency-decision",
             artifact_path=str(run_dir / "outline_research_question_set.json"),
         )
+
+    def _outline_research_resume_context(
+        self,
+        *,
+        research: OutlineResearchRunResult,
+        question_set: OutlineResearchQuestionSet,
+    ) -> dict[str, Any]:
+        context = dict(research.resume_context)
+        context.setdefault("schema_version", "1.0")
+        context.setdefault("pause_type", research.sufficiency_decision.status)
+        context.setdefault("previous_decision_id", research.sufficiency_decision.decision_id)
+        context["question_set_id"] = question_set.question_set_id
+        context["questions"] = [item.to_dict() for item in question_set.questions]
+        context.setdefault(
+            "resume_instruction",
+            "用户回答后写入 planning_notebook.user_authorized，再运行一小轮 research / sufficiency gate。",
+        )
+        return context
 
     def confirm_freeze_a(self, *, run_id: str, artifact_overrides: Mapping[str, str] | None = None) -> dict[str, str]:
         artifact_names = [
@@ -1221,19 +1336,34 @@ class WriterLayeredGenerationOrchestrator:
         planning_notebook: PlanningNotebook | None = None,
         sufficiency_decision: SufficiencyDecision | None = None,
     ) -> BookContinuationPlan:
-        outline_path = self._get_required_asset_path(conn, book_id=book_id, field_name="outline_markdown_path")
-        world_summary_path = self._get_required_asset_path(conn, book_id=book_id, field_name="world_summary_path")
+        original_creation_mode = bool(str(intent.reference_work.get("source_task_id") or "").strip())
+        outline_path = self._get_optional_asset_path(conn, book_id=book_id, field_name="outline_markdown_path")
+        world_summary_path = self._get_optional_asset_path(conn, book_id=book_id, field_name="world_summary_path")
+        if planning_notebook is None and sufficiency_decision is None:
+            if outline_path is None or not outline_path.exists():
+                raise ValueError("缺少资产文件: outline_markdown_path")
+            if world_summary_path is None or not world_summary_path.exists():
+                raise ValueError("缺少资产文件: world_summary_path")
         if planning_notebook is not None and sufficiency_decision is not None:
             outline_markdown = json.dumps(
                 {
                     "planning_notebook": planning_notebook.to_dict(),
                     "sufficiency_decision": sufficiency_decision.to_dict(),
+                    "reference_work": dict(intent.reference_work),
                 },
                 ensure_ascii=False,
                 indent=2,
             )
-            world_summary_markdown = "World details were accessed through Outline Research Loop evidence only."
+            world_summary_markdown = (
+                "Original creation mode: build all world details from user-provided outline, "
+                "authorized prompt-loop answers, and outline research evidence. Reference-work facts "
+                "are advice only and must not become story canon."
+                if original_creation_mode
+                else "World details were accessed through Outline Research Loop evidence only."
+            )
         else:
+            assert outline_path is not None
+            assert world_summary_path is not None
             outline_markdown = outline_path.read_text(encoding="utf-8", errors="replace")
             world_summary_markdown = world_summary_path.read_text(encoding="utf-8", errors="replace")
         system_prompt, user_prompt = build_book_continuation_plan_prompt(
@@ -1291,8 +1421,27 @@ class WriterLayeredGenerationOrchestrator:
         book_plan: BookContinuationPlan,
         user_world_notes: str,
     ) -> WorldExpansionPack:
-        world_summary_path = self._get_required_asset_path(conn, book_id=book_id, field_name="world_summary_path")
-        world_summary_markdown = world_summary_path.read_text(encoding="utf-8", errors="replace")
+        original_creation_mode = bool(str(intent.reference_work.get("source_task_id") or "").strip())
+        world_summary_path = self._get_optional_asset_path(conn, book_id=book_id, field_name="world_summary_path")
+        if world_summary_path is not None and world_summary_path.exists():
+            world_summary_markdown = world_summary_path.read_text(encoding="utf-8", errors="replace")
+        elif original_creation_mode:
+            world_summary_markdown = json.dumps(
+                {
+                    "mode": "reference_guided_original_creation",
+                    "user_world_notes": user_world_notes,
+                    "continuation_intent": intent.to_dict(),
+                    "book_continuation_plan": book_plan.to_dict(),
+                    "reference_policy": {
+                        "truth_policy": "reference_advice_only",
+                        "style_policy": "reference fragments may only guide final prose style",
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        else:
+            raise ValueError("缺少资产文件: world_summary_path")
         system_prompt, user_prompt = build_world_expansion_prompt(
             book_id=book_id,
             continuation_intent=intent.to_dict(),
@@ -1725,8 +1874,8 @@ class WriterLayeredGenerationOrchestrator:
         *,
         book_id: str,
         intent: ContinuationIntent,
-        outline_path: Path,
-        world_summary_path: Path,
+        outline_path: Path | None,
+        world_summary_path: Path | None,
     ) -> dict[str, Any]:
         highlights = intent.desired_actions[:3] or ["承接现有主线并推进一个阶段冲突"]
         story_scale = dict(intent.story_scale)
@@ -1734,6 +1883,36 @@ class WriterLayeredGenerationOrchestrator:
         target_chapter_count = int(story_scale.get("target_chapter_count") or 3)
         default_chars = int(story_scale.get("default_chapter_target_chars") or 4000)
         target_total = int(story_scale.get("target_total_chars") or target_chapter_count * default_chars)
+        source_paths = [str(path) for path in (outline_path, world_summary_path) if path is not None]
+        source_items = [
+            {
+                "type": "outline",
+                "path": str(outline_path),
+                "evidence_level": "structured_state",
+                "snippet": "",
+                "note": "",
+            }
+        ] if outline_path is not None else []
+        if world_summary_path is not None:
+            source_items.append(
+                {
+                    "type": "world_summary",
+                    "path": str(world_summary_path),
+                    "evidence_level": "structured_state",
+                    "snippet": "",
+                    "note": "",
+                }
+            )
+        if not source_items:
+            source_items.append(
+                {
+                    "type": "outline_research",
+                    "path": "planning_notebook.json",
+                    "evidence_level": "structured_state",
+                    "snippet": "",
+                    "note": "Original creation mode without current-source outline assets.",
+                }
+            )
         return {
             "plan_id": f"{book_id}-book-plan",
             "book_id": book_id,
@@ -1758,28 +1937,13 @@ class WriterLayeredGenerationOrchestrator:
             "open_questions": [] if intent.notes else ["部分细节证据不足，需在后续批次前继续检索。"],
             "evidence": [
                 {
-                    "claim": "续写必须承接现有大纲与世界观。",
+                    "claim": "规划必须承接用户授权的大纲方向与世界观边界。",
                     "evidence_level": "structured_state",
-                    "source_paths": [str(outline_path), str(world_summary_path)],
+                    "source_paths": source_paths or ["planning_notebook.json"],
                     "note": "",
                 }
             ],
-            "sources": [
-                {
-                    "type": "outline",
-                    "path": str(outline_path),
-                    "evidence_level": "structured_state",
-                    "snippet": "",
-                    "note": "",
-                },
-                {
-                    "type": "world_summary",
-                    "path": str(world_summary_path),
-                    "evidence_level": "structured_state",
-                    "snippet": "",
-                    "note": "",
-                },
-            ],
+            "sources": source_items,
         }
 
     def _fallback_world_expansion(
@@ -1789,10 +1953,11 @@ class WriterLayeredGenerationOrchestrator:
         intent: ContinuationIntent,
         book_plan: BookContinuationPlan,
         user_world_notes: str,
-        world_summary_path: Path,
+        world_summary_path: Path | None,
     ) -> dict[str, Any]:
         required_for_plot = intent.desired_actions[:2] or [book_plan.continuation_goal]
         extra_open_items = [user_world_notes] if user_world_notes.strip() else []
+        source_paths = [str(world_summary_path)] if world_summary_path is not None else ["continuation_intent.json"]
         return {
             "pack_id": f"{book_id}-world-pack",
             "book_id": book_id,
@@ -1809,16 +1974,16 @@ class WriterLayeredGenerationOrchestrator:
             "open_items": extra_open_items,
             "evidence": [
                 {
-                    "claim": "世界观补全必须服从现有摘要。",
+                    "claim": "世界观补全必须服从已确认的用户方向与规划边界。",
                     "evidence_level": "structured_state",
-                    "source_paths": [str(world_summary_path)],
+                    "source_paths": source_paths,
                     "note": "",
                 }
             ],
             "sources": [
                 {
-                    "type": "world_summary",
-                    "path": str(world_summary_path),
+                    "type": "world_summary" if world_summary_path is not None else "continuation_intent",
+                    "path": str(world_summary_path) if world_summary_path is not None else "continuation_intent.json",
                     "evidence_level": "structured_state",
                     "snippet": "",
                     "note": "",
@@ -2079,7 +2244,7 @@ class WriterLayeredGenerationOrchestrator:
         }
 
     def _words_to_chars(self, word_count: int) -> int:
-        return max(1, int(word_count or 1200) * 2)
+        return max(1, int(word_count or 1200))
 
     def _chars_to_words(self, char_count: int) -> int:
         return max(1, int(round(max(1, int(char_count or 1)) / 2)))
@@ -2151,11 +2316,17 @@ class WriterLayeredGenerationOrchestrator:
         return path
 
     def _get_required_asset_path(self, conn: sqlite3.Connection, *, book_id: str, field_name: str) -> Path:
-        assets = self.assets_repo.get(conn, book_id=book_id)
-        path = self._resolve_asset_path(assets, field_name)
+        path = self._get_optional_asset_path(conn, book_id=book_id, field_name=field_name)
         if path is None or not path.exists():
             raise ValueError(f"缺少资产文件: {field_name}")
         return path
+
+    def _get_optional_asset_path(self, conn: sqlite3.Connection, *, book_id: str, field_name: str) -> Path | None:
+        try:
+            assets = self.assets_repo.get(conn, book_id=book_id)
+        except sqlite3.OperationalError:
+            return None
+        return self._resolve_asset_path(assets, field_name)
 
     def _creative_kb_ready(self, conn: sqlite3.Connection) -> bool:
         try:
@@ -2291,6 +2462,7 @@ class WriterLayeredGenerationOrchestrator:
             notes=str(data.get("notes") or ""),
             story_scale=dict(data.get("story_scale") or {}),
             climax_plan=dict(data.get("climax_plan") or {}),
+            reference_work=dict(data.get("reference_work") or {}),
             sources=[
                 self._traceable_source_from_dict(item)
                 for item in (data.get("sources") or [])

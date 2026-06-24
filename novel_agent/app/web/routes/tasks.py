@@ -125,6 +125,10 @@ def _progress_with_active_job(progress: TaskProgress, *, active_job: JobSummary 
 def _progress_with_failed_job(progress: TaskProgress, *, failed_job: JobSummary | None) -> TaskProgress:
     if failed_job is None:
         return progress
+    if failed_job.type == "close_read" and _close_read_progress_done(progress):
+        if not progress.message:
+            progress.message = "阅读已完成；最近一次后台整理遇到问题，缺失建模项可单独重试。"
+        return progress
     override = _FAILED_JOB_PROGRESS.get(failed_job.type)
     if override is None:
         return progress
@@ -140,6 +144,12 @@ def _most_relevant_active_job(active_jobs: list[JobSummary]) -> JobSummary | Non
         return None
     priority = {"outline_analyzer": 5, "writer": 4, "writer_resume": 4, "kb": 3, "close_read": 2, "read": 1}
     return sorted(active_jobs, key=lambda job: (priority.get(job.type, 0), job.created_at))[-1]
+
+
+def _close_read_progress_done(progress: TaskProgress) -> bool:
+    completed = int(progress.close_read_progress.get("completed") or 0)
+    total = int(progress.close_read_progress.get("total") or 0)
+    return total > 0 and completed >= total
 
 
 def _most_relevant_failed_job(failed_jobs: list[JobSummary]) -> JobSummary | None:

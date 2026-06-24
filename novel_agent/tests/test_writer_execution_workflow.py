@@ -117,6 +117,34 @@ def test_draft_research_contracts_are_available_from_runtime_exports() -> None:
     assert rewrite_plan.to_dict()["feedback_text"] == "修正早期设定冲突。"
 
 
+def test_draft_research_rewrite_plan_defaults_to_targeted_revision(tmp_path: Path) -> None:
+    service = DraftResearchService(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+        model_client=FakeWriterModelClient(),  # type: ignore[arg-type]
+    )
+
+    plan = service._model_rewrite_plan(  # noqa: SLF001
+        run_id="run-rewrite",
+        execution_input={
+            "chapter_id": "chapter-001",
+            "chapter_brief": {"title": "第一章", "goal": "保留现有剧情，只优化文笔。"},
+        },
+        notebook={},
+        rewrite_feedback={
+            "decision_id": "decision-001",
+            "draft_id": "draft-001",
+            "feedback_text": "剧情方向正确，但文笔需要更克制，参考新增范文。",
+        },
+        previous_draft_md="旧稿第一段。\n\n旧稿第二段。",
+    )
+
+    assert plan.rewrite_mode == "targeted_rewrite"
+    assert plan.feedback_classification == "prose_only"
+    assert "上一版草稿" in "\n".join(plan.preserve)
+    assert "不得默认丢弃上一版草稿" in "\n".join(plan.must_not_change)
+
+
 def test_draft_research_loop_writes_seed_notebook_and_uses_outline_segments(tmp_path: Path) -> None:
     db = NovelAgentDB(tmp_path / "draft-research.db")
     run_writer = RunWriter(RunLayout(tmp_path / "runs"))
@@ -914,6 +942,42 @@ def test_restricted_writer_executor_prompts_for_merged_reference_document_synops
     assert "reference_document_synopses" in prompt["user_prompt"]
     assert "coverage_plot_beats" in prompt["user_prompt"]
     assert "必须按 order 顺序" in prompt["user_prompt"]
+
+
+def test_restricted_writer_executor_includes_previous_draft_revision_base(tmp_path: Path) -> None:
+    executor = RestrictedWriterExecutor(
+        repo_root=tmp_path,
+        run_writer=RunWriter(RunLayout(tmp_path / "runs")),
+    )
+    prompt = executor.build_draft_prompt(
+        {
+            "chapter_title": "修订测试",
+            "chapter_brief": {
+                "title": "修订测试",
+                "goal": "保留旧稿剧情，只优化表达。",
+            },
+            "length_budget": {"target_chars": 1200, "min_chars": 1000, "max_chars": 1400},
+            "previous_draft_for_revision": {
+                "role": "primary_edit_base",
+                "text": "旧稿第一段保留剧情。\n\n旧稿第二段需要文风优化。",
+                "truncated": False,
+            },
+            "draft_rewrite_plan": {
+                "rewrite_mode": "targeted_rewrite",
+                "preserve": ["保留旧稿剧情"],
+                "remove_or_change": ["文风更克制"],
+                "must_not_change": ["不要重构剧情"],
+            },
+            "draft_feedback": {"feedback_text": "文风更克制。"},
+            "writer_rules": [],
+        }
+    )
+    payload = json.loads(prompt["user_prompt"])
+
+    assert "上一版草稿作为主要修订基底" in prompt["system_prompt"]
+    assert payload["previous_draft_for_revision"]["role"] == "primary_edit_base"
+    assert "旧稿第一段保留剧情" in payload["previous_draft_for_revision"]["text"]
+    assert payload["draft_rewrite_plan"]["rewrite_mode"] == "targeted_rewrite"
 
 
 def test_restricted_writer_executor_applies_external_length_budget(tmp_path: Path) -> None:
@@ -2436,6 +2500,8 @@ def test_legacy_revise_length_rewrite_request_injects_draft_feedback_without_wri
     assert rewrite_result["draft_path"].endswith("draft.md")
     assert rewrite_request["feedback_text"] == "字数偏短，先回到长度审阅。"
     assert rewritten_input["draft_feedback"]["feedback_text"] == "字数偏短，先回到长度审阅。"
+    assert rewritten_input["previous_draft_for_revision"]["role"] == "primary_edit_base"
+    assert rewritten_input["previous_draft_for_revision"]["text"].strip()
     assert "draft_feedback.feedback_text" in "\n".join(rewritten_input["writer_rules"])
     assert not (run_dir / "memory_writeback.json").exists()
     assert workflow.run_writer.get_freeze_record("run-1", "freeze_e") is None

@@ -439,6 +439,8 @@ class OutlineSeedPacketBuilder:
             user_intent=intent.to_dict(),
             story_scale=dict(intent.story_scale),
             climax_input=dict(intent.climax_plan),
+            reference_work=dict(intent.reference_work),
+            reference_outline_design_index=self._reference_outline_design_index(intent.reference_work),
             extracted_character_mentions=mentions.mentions,
             character_resolutions=resolutions,
             character_index=self._character_index(conn, book_id=book_id),
@@ -479,6 +481,17 @@ class OutlineSeedPacketBuilder:
                         )
                     ]
                     if outline_segments_path.exists()
+                    else []
+                ),
+                *(
+                    [
+                        TraceableSource(
+                            type="reference_work",
+                            path=str(intent.reference_work.get("source_task_id") or ""),
+                            evidence_level="structured_state",
+                        )
+                    ]
+                    if intent.reference_work.get("source_task_id")
                     else []
                 ),
             ],
@@ -724,6 +737,86 @@ class OutlineSeedPacketBuilder:
                     }
                 )
         return items[:8]
+
+    def _reference_outline_design_index(self, reference_work: Mapping[str, Any]) -> list[dict[str, Any]]:
+        source_task_id = _normalize_text(
+            reference_work.get("source_task_id")
+            or reference_work.get("task_id")
+            or reference_work.get("book_id")
+        )
+        if not source_task_id:
+            return []
+        return self._load_reference_outline_design_index(source_task_id)
+
+    def _load_reference_outline_design_index(self, source_task_id: str) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        outline_path = self.repo_root / ".memory" / "outlines" / f"{source_task_id}.outline_segments.json"
+        outline_payload = self._load_json_payload(outline_path)
+        roots = outline_payload.get("roots") or []
+        for root in roots if isinstance(roots, list) else []:
+            if not isinstance(root, Mapping):
+                continue
+            summary = _normalize_text(root.get("summary"))
+            if not summary:
+                continue
+            items.append(
+                {
+                    "reference_item_id": f"{source_task_id}:outline_root:{len(items) + 1:02d}",
+                    "source_task_id": source_task_id,
+                    "source_kind": "outline_root",
+                    "source_path": str(outline_path),
+                    "summary": _safe_excerpt(summary, limit=620),
+                    "advice_scope": "剧情阶段、冲突升级、章节群节奏",
+                    "fact_status": "reference_advice",
+                }
+            )
+        arc_path = self.repo_root / ".memory" / "arcs" / f"{source_task_id}.source_arc_map.json"
+        arc_payload = self._load_json_payload(arc_path)
+        arcs = arc_payload.get("arcs") or arc_payload.get("source_arcs") or []
+        for arc in arcs if isinstance(arcs, list) else []:
+            if not isinstance(arc, Mapping):
+                continue
+            title = _normalize_text(arc.get("source_arc_title") or arc.get("title"))
+            role = _normalize_text(arc.get("source_arc_role") or arc.get("role"))
+            if not title and not role:
+                continue
+            items.append(
+                {
+                    "reference_item_id": f"{source_task_id}:arc:{len(items) + 1:02d}",
+                    "source_task_id": source_task_id,
+                    "source_kind": "source_arc",
+                    "source_path": str(arc_path),
+                    "summary": _safe_excerpt(" / ".join(part for part in (title, role) if part), limit=420),
+                    "advice_scope": "阶段功能、主线转折、人物承担的叙事职责",
+                    "fact_status": "reference_advice",
+                }
+            )
+        pattern_paths = [
+            self.repo_root / ".memory" / "structure_patterns" / f"{source_task_id}.narrative_structure_patterns.json",
+            self.repo_root / ".memory" / "structure_patterns" / f"{source_task_id}.arc_pattern_cards.json",
+        ]
+        for path in pattern_paths:
+            payload = self._load_json_payload(path)
+            patterns = payload.get("patterns") or payload.get("arc_pattern_cards") or payload.get("cards") or []
+            for pattern in patterns if isinstance(patterns, list) else []:
+                if not isinstance(pattern, Mapping):
+                    continue
+                title = _normalize_text(pattern.get("title") or pattern.get("name"))
+                function_hint = _normalize_text(pattern.get("narrative_function") or pattern.get("role"))
+                if not title and not function_hint:
+                    continue
+                items.append(
+                    {
+                        "reference_item_id": f"{source_task_id}:pattern:{len(items) + 1:02d}",
+                        "source_task_id": source_task_id,
+                        "source_kind": "structure_pattern",
+                        "source_path": str(path),
+                        "summary": _safe_excerpt(" / ".join(part for part in (title, function_hint) if part), limit=420),
+                        "advice_scope": "结构节奏、情绪推进、伏笔与回收方式",
+                        "fact_status": "reference_advice",
+                    }
+                )
+        return items[:10]
 
     def _load_json_payload(self, path: Path) -> dict[str, Any]:
         if not path.exists():
@@ -1558,6 +1651,8 @@ class OutlineResearchContextBroker:
             return self._resolve_character_profile(conn, book_id=book_id, request=request, max_chars=max_chars)
         if request.request_type == "world_concept":
             return self._resolve_world_concept(conn, book_id=book_id, request=request, max_chars=max_chars)
+        if request.request_type == "reference_outline_design":
+            return self._resolve_reference_outline_design(request=request, max_chars=max_chars)
         return self._resolve_structure_pattern(conn, request=request, max_chars=max_chars)
 
     def _resolve_text_search(
@@ -1848,6 +1943,66 @@ class OutlineResearchContextBroker:
             missing_facets=[] if results else ["structure_pattern"],
         )
 
+    def _resolve_reference_outline_design(self, *, request: ResearchRequest, max_chars: int) -> ResearchResult:
+        metadata = dict(request.metadata)
+        indexed_items = [
+            dict(item)
+            for item in (metadata.get("reference_outline_design_index") or [])
+            if isinstance(item, Mapping)
+        ]
+        reference_work = metadata.get("reference_work") if isinstance(metadata.get("reference_work"), Mapping) else {}
+        source_task_id = _normalize_text(
+            metadata.get("source_task_id")
+            or metadata.get("reference_task_id")
+            or reference_work.get("source_task_id")
+        )
+        if not indexed_items and source_task_id:
+            indexed_items = OutlineSeedPacketBuilder(repo_root=self.repo_root)._load_reference_outline_design_index(source_task_id)
+        query_tokens = _tokenize_query(request.query)
+        scored: list[tuple[dict[str, Any], float]] = []
+        for order, item in enumerate(indexed_items):
+            haystack = json.dumps(item, ensure_ascii=False)
+            score = sum(1.0 for token in query_tokens if token in haystack)
+            score += max(0.0, 1.0 - order * 0.05)
+            scored.append((item, score))
+        ranked_items = [item for item, _ in sorted(scored, key=lambda pair: pair[1], reverse=True)]
+        results = []
+        for item in ranked_items[:5]:
+            summary = _normalize_text(item.get("summary"))
+            if not summary:
+                continue
+            results.append(
+                {
+                    "reference_item_id": str(item.get("reference_item_id") or ""),
+                    "source_task_id": str(item.get("source_task_id") or source_task_id),
+                    "source_kind": str(item.get("source_kind") or "reference_outline_design"),
+                    "source_path": str(item.get("source_path") or ""),
+                    "reference_summary": _safe_excerpt(summary, limit=max(160, max_chars // 2)),
+                    "advice_scope": str(item.get("advice_scope") or "大纲方向建议"),
+                    "usage_policy": "只作为用户原创大纲的方向建议；不得作为新书事实、人物或桥段直接继承。",
+                    "fact_status": "reference_advice",
+                }
+            )
+        return ResearchResult(
+            request_id=request.request_id,
+            request_type="reference_outline_design",
+            query=request.query,
+            results=results,
+            fact_status="reference_advice" if results else "missing",
+            sources=[
+                TraceableSource(
+                    type="reference_outline_design",
+                    path=str(item.get("source_path") or ""),
+                    evidence_level="reasonable_inference",
+                    snippet=_safe_excerpt(str(item.get("reference_summary") or ""), limit=180),
+                )
+                for item in results
+            ],
+            confidence=0.72 if results else 0.0,
+            covered_facets=["outline_direction", "plot_design_advice"] if results else [],
+            missing_facets=[] if results else ["reference_outline_design"],
+        )
+
 
 class OutlineResearchModelAdapter(Protocol):
     def propose_research_requests(
@@ -1937,6 +2092,24 @@ class HeuristicOutlineResearchModelAdapter:
                     query="需要了解规则、限制、代价、例外和禁止突破点。",
                     purpose="避免大纲突破既有世界观。",
                     priority="medium",
+                )
+            )
+        if seed_packet.reference_outline_design_index:
+            requests.append(
+                ResearchRequest(
+                    request_id="research-reference-outline-01",
+                    request_type="reference_outline_design",
+                    query=(
+                        "根据用户原创大纲，参考借鉴对象的阶段设计、冲突升级、人物功能和节奏安排，"
+                        "提出可选择的方向建议。"
+                    ),
+                    purpose="在既有大纲 prompt loop 中给用户提供方向建议，不继承原作事实。",
+                    priority="high",
+                    metadata={
+                        "source_task_id": str(seed_packet.reference_work.get("source_task_id") or ""),
+                        "reference_work": dict(seed_packet.reference_work),
+                        "reference_outline_design_index": [dict(item) for item in seed_packet.reference_outline_design_index[:10]],
+                    },
                 )
             )
         requests.append(
@@ -2126,8 +2299,14 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             stage="propose_research_requests",
             system_prompt=(
                 "你是大纲研究 Agent。只返回 JSON。基于轻量 seed、notebook 和上一轮结果，"
-                "提出下一轮 research requests。请求类型只能是 text_search、story_detail、character_profile、world_concept、structure_pattern。"
+                "提出下一轮 research requests。请求类型只能是 text_search、story_detail、character_profile、world_concept、structure_pattern、reference_outline_design。"
                 "当需要先定位历史剧情、人物共同经历、伏笔或关键词交集时，优先使用 text_search 做 grep-like 词面定位；"
+                "当 seed_packet.reference_outline_design_index 非空，且需要借鉴对象的大纲/剧情设计给用户原创大纲提供方向建议时，"
+                "使用 reference_outline_design；该结果只能作为 reference_advice，不能当作新作品事实或原作桥段继承。"
+                "text_search.metadata.match_mode 必须表达布尔匹配策略：'all' 表示 AND / 交集，所有 terms 都出现才命中；"
+                "'any' 表示 OR / 并集，任意 term 出现即可命中，适合同义词、译名、称呼、原文拼写或题面可能误写的词面变体。"
+                "document scope 的 text_search 只返回围绕共同命中窗口或最紧凑匹配窗口的 snippet；"
+                "若需要更长上下文，应基于 source_doc_ids 再请求受预算的原文证据，而不是要求 text_search 返回整篇 document。"
                 "定位失败的分支不要当成事实写入 notebook。"
                 "当大纲规划依赖人物关系转折、共同经历、承诺、创伤、状态变化或连续性边界时，"
                 "可以对 character_profile 请求设置 metadata.story_events_offset 和 metadata.story_events_char_budget<=4096 分页读取经历，"
@@ -2145,12 +2324,35 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                 "output_schema": {
                     "requests": [
                         {
+                            "request_type": "text_search",
+                            "query": "...",
+                            "purpose": "...",
+                            "priority": "high",
+                            "metadata": {
+                                "terms": ["关键词A", "关键词B"],
+                                "match_mode": "all | any",
+                                "scopes": ["outline_segments", "chapter_summaries", "character_profiles", "index_cards", "documents"],
+                                "allow_document_scan": False,
+                                "match_strategy": "all=AND/共同出现；any=OR/词面变体召回",
+                            },
+                        },
+                        {
                             "request_type": "character_profile",
                             "name": "角色A",
                             "query": "...",
                             "purpose": "...",
                             "priority": "high",
                             "metadata": {"story_events_offset": 0, "story_events_char_budget": 4096},
+                        },
+                        {
+                            "request_type": "reference_outline_design",
+                            "query": "如何借鉴参考任务的阶段设计来优化用户原创大纲",
+                            "purpose": "给用户原创大纲提供方向建议，不继承原作事实",
+                            "priority": "high",
+                            "metadata": {
+                                "source_task_id": "参考任务 id",
+                                "reference_outline_design_index": ["从 seed_packet 复制的索引项"],
+                            },
                         }
                     ]
                 },
@@ -2166,7 +2368,11 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                 raise RuntimeError("Outline research model returned a non-object request item")
             normalized.append(dict(item))
         initial_round = not prior_results and not budget_state.get("total_requests_used")
-        if initial_round and not any(str(item.get("request_type") or item.get("type")) == "story_detail" for item in normalized):
+        if (
+            initial_round
+            and not seed_packet.reference_work
+            and not any(str(item.get("request_type") or item.get("type")) == "story_detail" for item in normalized)
+        ):
             desired_actions = [
                 str(item)
                 for item in (seed_packet.user_intent.get("desired_actions") or [])
@@ -2338,6 +2544,7 @@ class OutlineResearchRunResult:
     memory_query_trace: list[dict[str, Any]] = field(default_factory=list)
     memory_query_decision_log: list[dict[str, Any]] = field(default_factory=list)
     model_reasoning_debug: list[dict[str, Any]] = field(default_factory=list)
+    resume_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -2349,6 +2556,7 @@ class OutlineResearchRunResult:
             "memory_query_trace": [dict(item) for item in self.memory_query_trace],
             "memory_query_decision_log": [dict(item) for item in self.memory_query_decision_log],
             "model_reasoning_debug": [dict(item) for item in self.model_reasoning_debug],
+            "resume_context": dict(self.resume_context),
         }
 
 
@@ -2374,8 +2582,13 @@ class OutlineResearchLoopController:
     ) -> OutlineResearchRunResult:
         budget = budget or ResearchBudget()
         notebook = notebook or PlanningNotebook(notebook_id=f"{book_id}-planning-notebook")
-        for question, answer in (user_answers or {}).items():
-            notebook.add_user_answer(question=question, answer=answer)
+        user_answer_items = [
+            {"question": str(question), "answer": str(answer)}
+            for question, answer in (user_answers or {}).items()
+            if str(answer).strip()
+        ]
+        for item in user_answer_items:
+            notebook.add_user_answer(question=item["question"], answer=item["answer"])
 
         rounds: list[dict[str, Any]] = []
         prior_results: list[ResearchResult] = []
@@ -2470,6 +2683,14 @@ class OutlineResearchLoopController:
             "memory_query_rounds": len(memory_query_decision_log),
             "memory_query_final_evidence_ids": self._final_evidence_ids(memory_query_trace, memory_query_decision_log, prior_results),
         }
+        resume_context = self._build_resume_context(
+            seed_packet=seed_packet,
+            decision=decision,
+            notebook=notebook,
+            user_answer_items=user_answer_items,
+        )
+        if resume_context:
+            trace["resume_context"] = resume_context
         generated_outline = dict(
             self.model_adapter.generate_outline(
                 seed_packet=seed_packet,
@@ -2492,7 +2713,46 @@ class OutlineResearchLoopController:
                     "decision_count": len(memory_query_decision_log),
                 }
             ],
+            resume_context=resume_context,
         )
+
+    def _build_resume_context(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        decision: SufficiencyDecision,
+        notebook: PlanningNotebook,
+        user_answer_items: Sequence[Mapping[str, str]],
+    ) -> dict[str, Any]:
+        if not user_answer_items and decision.status not in {"needs_user_input", "blocked"}:
+            return {}
+        user_authorized_facts = [
+            fact.to_dict()
+            for fact in notebook.confirmed_facts
+            if fact.fact_status == "user_authorized"
+        ][-8:]
+        return {
+            "schema_version": "1.0",
+            "book_id": seed_packet.book_id,
+            "seed_packet_id": seed_packet.packet_id,
+            "pause_type": "needs_user_input" if decision.status == "needs_user_input" else decision.status,
+            "previous_decision_id": decision.decision_id,
+            "previous_status": decision.status,
+            "known_enough": list(decision.known_enough),
+            "blocking_gaps": list(decision.blocking_gaps),
+            "optional_gaps": list(decision.optional_gaps),
+            "remaining_risks": list(decision.remaining_risks),
+            "question_set_id": "",
+            "questions": [],
+            "resume_instruction": (
+                "用户回答后写入 planning_notebook.user_authorized，再运行一小轮 research / sufficiency gate。"
+                if decision.status == "needs_user_input"
+                else "根据当前状态继续 Writer workflow 或明确阻塞。"
+            ),
+            "answered_questions": [dict(item) for item in user_answer_items],
+            "user_authorized_facts_added": user_authorized_facts,
+            "post_resume_status": decision.status if user_answer_items else "",
+        }
 
     def _extract_memory_debug(self, results: Sequence[ResearchResult]) -> dict[str, list[dict[str, Any]]]:
         trace: list[dict[str, Any]] = []

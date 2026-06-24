@@ -6,6 +6,7 @@ interface TaskActionMenuProps {
   disabled?: boolean;
   onAction: (action: string, payload?: Record<string, unknown>) => void;
   onStartWriter: () => void;
+  startWriterLabel?: string;
   onResetCloseRead: () => void;
   onDeleteWriterRunPreview: () => void;
   onDeletePreview: () => void;
@@ -16,6 +17,7 @@ export function TaskActionMenu({
   disabled = false,
   onAction,
   onStartWriter,
+  startWriterLabel = "开始续写",
   onResetCloseRead,
   onDeleteWriterRunPreview,
   onDeletePreview
@@ -58,7 +60,7 @@ export function TaskActionMenu({
             构建 Creative KB
           </button>
           <button type="button" role="menuitem" onClick={() => run(onStartWriter)}>
-            开始续写
+            {startWriterLabel}
           </button>
           <button type="button" role="menuitem" onClick={() => run(() => onAction("resume", { requested_from: "task_menu" }))}>
             恢复续写

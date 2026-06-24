@@ -560,6 +560,7 @@ class AnalyzerLoopOutput:
     notebook_delta: dict[str, Any] = field(default_factory=dict)
     final_answer: str = ""
     message: str = ""
+    pause_context: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         status = _text(self.status).lower()
@@ -574,6 +575,7 @@ class AnalyzerLoopOutput:
         self.notebook_delta = dict(self.notebook_delta) if isinstance(self.notebook_delta, Mapping) else {}
         self.final_answer = _text(self.final_answer)
         self.message = _text(self.message)
+        self.pause_context = dict(self.pause_context) if isinstance(self.pause_context, Mapping) else {}
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> "AnalyzerLoopOutput":
@@ -597,6 +599,9 @@ class AnalyzerLoopOutput:
             notebook_delta=dict(data.get("notebook_delta") or {}) if isinstance(data.get("notebook_delta"), Mapping) else {},
             final_answer=str(data.get("final_answer") or data.get("answer") or ""),
             message=str(data.get("message") or ""),
+            pause_context=dict(data.get("pause_context") or data.get("resume_context_delta") or {})
+            if isinstance(data.get("pause_context") or data.get("resume_context_delta"), Mapping)
+            else {},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -606,4 +611,5 @@ class AnalyzerLoopOutput:
             "notebook_delta": dict(self.notebook_delta),
             "final_answer": self.final_answer,
             "message": self.message,
+            "pause_context": dict(self.pause_context),
         }

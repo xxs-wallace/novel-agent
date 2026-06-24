@@ -115,6 +115,9 @@ export function WorkspaceShell() {
       setSelectedTaskId(task.task_id);
       setMobilePanel("conversation");
       await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      if (!task.source_path) {
+        return;
+      }
       const result = await postAction(task.task_id, {
         action: "start_read",
         payload: { requested_from: "create_task" }
@@ -250,6 +253,7 @@ export function WorkspaceShell() {
   const shellStatus = selectedTask
     ? toPublicStatusText(selectedTask.progress?.step, selectedTask.close_read_done ? "可开始续写" : "进行中")
     : "未选择任务";
+  const writerIntentMode = selectedTask?.source_path ? "continuation" : "original_creation";
   const selectedJobIds = new Set(activeJobs.filter((job) => job.task_id === selectedTask?.task_id).map((job) => job.job_id));
 
   return (
@@ -321,6 +325,7 @@ export function WorkspaceShell() {
             decisionCards={decisionCards}
             actionPending={actionMutation.isPending}
             writerWizardSignal={writerWizardSignal}
+            writerIntentMode={writerIntentMode}
             onOpenArtifactDetail={setFocusedArtifactId}
             onAction={handleAction}
             onRequestWriterStart={checkWriterStartAllowed}

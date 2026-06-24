@@ -1,10 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpenCheck, CheckCircle2, ClipboardCheck, LoaderCircle, Send, WandSparkles } from "lucide-react";
+import { BookOpenCheck, CheckCircle2, ClipboardCheck, LoaderCircle, PlusCircle, Send, Undo2, WandSparkles } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { postCommand } from "../../api/actions";
-import { ANALYZER_MESSAGE_TIMEOUT_MS, getMessages, postMessage } from "../../api/messages";
+import {
+  ANALYZER_MESSAGE_TIMEOUT_MS,
+  createAnalyzerSession,
+  getAnalyzerSessions,
+  getMessages,
+  postMessage,
+  rollbackLatestAnalyzerTurn
+} from "../../api/messages";
 import type {
+  AnalyzerSessionSummary,
+  AnalyzerTurnRollbackPreview,
   ConversationMessage,
   DecisionAction,
   DecisionCardModel,
@@ -28,6 +37,7 @@ interface ConversationPaneProps {
   decisionCards: DecisionCardModel[];
   actionPending?: boolean;
   writerWizardSignal?: number;
+  writerIntentMode?: "continuation" | "original_creation";
   onOpenArtifactDetail?: (artifactId: string) => void;
   onAction: (action: string, payload?: Record<string, unknown>) => Promise<unknown> | void;
   onRequestWriterStart?: () => Promise<boolean> | boolean;
@@ -39,6 +49,7 @@ export function ConversationPane({
   decisionCards,
   actionPending = false,
   writerWizardSignal = 0,
+  writerIntentMode = "continuation",
   onOpenArtifactDetail,
   onAction,
   onRequestWriterStart
@@ -66,12 +77,60 @@ export function ConversationPane({
   const [dismissedActionMessageIds, setDismissedActionMessageIds] = useState<Set<string>>(() => new Set());
   const [pendingAnalyzerQuestion, setPendingAnalyzerQuestion] = useState("");
   const [analyzerError, setAnalyzerError] = useState("");
+  const [selectedAnalyzerSessionId, setSelectedAnalyzerSessionId] = useState("");
+  const [rollbackPreview, setRollbackPreview] = useState<AnalyzerTurnRollbackPreview | null>(null);
+  const [rollbackError, setRollbackError] = useState("");
   const taskId = selectedTask?.task_id ?? "";
 
+  const analyzerSessionsQuery = useQuery({
+    queryKey: ["analyzer-sessions", taskId],
+    queryFn: () => getAnalyzerSessions(taskId),
+    enabled: Boolean(taskId && analyzerMode)
+  });
+  const analyzerSessions = analyzerSessionsQuery.data ?? [];
+  const selectedAnalyzerSession = useMemo(
+    () => analyzerSessions.find((session) => session.session_id === selectedAnalyzerSessionId) ?? null,
+    [analyzerSessions, selectedAnalyzerSessionId]
+  );
+
   const messagesQuery = useQuery({
-    queryKey: ["messages", taskId],
-    queryFn: () => getMessages(taskId),
-    enabled: Boolean(taskId)
+    queryKey: ["messages", taskId, analyzerMode ? selectedAnalyzerSessionId : ""],
+    queryFn: () => getMessages(taskId, analyzerMode ? selectedAnalyzerSessionId : ""),
+    enabled: Boolean(taskId && (!analyzerMode || selectedAnalyzerSessionId))
+  });
+
+  const createAnalyzerSessionMutation = useMutation({
+    mutationFn: () => createAnalyzerSession(taskId, { title: "新的小说讨论" }),
+    onSuccess: (session) => {
+      setSelectedAnalyzerSessionId(session.session_id);
+      void queryClient.invalidateQueries({ queryKey: ["analyzer-sessions", taskId] });
+      void queryClient.invalidateQueries({ queryKey: ["messages", taskId, session.session_id] });
+    }
+  });
+
+  const rollbackPreviewMutation = useMutation({
+    mutationFn: (sessionId: string) => rollbackLatestAnalyzerTurn(taskId, sessionId),
+    onSuccess: (preview) => {
+      setRollbackPreview(preview);
+      setRollbackError("");
+    },
+    onError: (error) => {
+      setRollbackError(error instanceof Error ? error.message : "无法预览撤回操作。");
+    }
+  });
+
+  const rollbackConfirmMutation = useMutation({
+    mutationFn: (preview: AnalyzerTurnRollbackPreview) => rollbackLatestAnalyzerTurn(taskId, preview.session_id, { confirm: true }),
+    onSuccess: (result) => {
+      setRollbackPreview(null);
+      setRollbackError("");
+      void queryClient.invalidateQueries({ queryKey: ["analyzer-sessions", taskId] });
+      void queryClient.invalidateQueries({ queryKey: ["messages", taskId, result.session_id] });
+      void queryClient.invalidateQueries({ queryKey: ["messages", taskId] });
+    },
+    onError: (error) => {
+      setRollbackError(error instanceof Error ? error.message : "撤回失败，请刷新后重试。");
+    }
   });
 
   const submitMutation = useMutation({
@@ -84,7 +143,8 @@ export function ConversationPane({
           content,
           payload: {
             channel: "outline_analyzer",
-            question: content
+            question: content,
+            analyzer_session_id: selectedAnalyzerSessionId || undefined
           }
         }, {
           timeoutMs: ANALYZER_MESSAGE_TIMEOUT_MS,
@@ -139,6 +199,14 @@ export function ConversationPane({
       return postMessage(taskId, { content, payload: { channel: "natural_language" } });
     },
     onSuccess: (result) => {
+      if (analyzerMode && isConversationMessage(result)) {
+        const sessionId = String(result.payload?.analyzer_session_id ?? "");
+        if (sessionId) {
+          setSelectedAnalyzerSessionId(sessionId);
+          void queryClient.invalidateQueries({ queryKey: ["analyzer-sessions", taskId] });
+          void queryClient.invalidateQueries({ queryKey: ["messages", taskId, sessionId] });
+        }
+      }
       const activeQuestionSet = questionSets.find((item) => item.question_set_id === activeQuestionSetId);
       if (activeQuestionSet && isConversationMessage(result)) {
         setLocalAnswersByQuestionSet((current) => ({
@@ -178,6 +246,9 @@ export function ConversationPane({
       setPendingAnalyzerQuestion("");
       setAnalyzerError("");
       void queryClient.invalidateQueries({ queryKey: ["messages", taskId] });
+      if (selectedAnalyzerSessionId) {
+        void queryClient.invalidateQueries({ queryKey: ["messages", taskId, selectedAnalyzerSessionId] });
+      }
     }
   });
 
@@ -274,7 +345,24 @@ export function ConversationPane({
 
   useEffect(() => {
     setAnalyzerMode(false);
+    setSelectedAnalyzerSessionId("");
   }, [taskId]);
+
+  useEffect(() => {
+    if (!analyzerMode || selectedAnalyzerSessionId || !analyzerSessions.length) {
+      return;
+    }
+    setSelectedAnalyzerSessionId(analyzerSessions[0].session_id);
+  }, [analyzerMode, analyzerSessions, selectedAnalyzerSessionId]);
+
+  useEffect(() => {
+    if (!analyzerMode || !selectedAnalyzerSessionId || !analyzerSessions.length) {
+      return;
+    }
+    if (!analyzerSessions.some((session) => session.session_id === selectedAnalyzerSessionId)) {
+      setSelectedAnalyzerSessionId(analyzerSessions[0].session_id);
+    }
+  }, [analyzerMode, analyzerSessions, selectedAnalyzerSessionId]);
 
   useEffect(() => {
     if (analyzerMode) {
@@ -665,7 +753,9 @@ export function ConversationPane({
   }
 
   const composerContextLabel = analyzerMode
-    ? "正在和小说专家讨论剧情"
+    ? selectedAnalyzerSession
+      ? `正在讨论：${selectedAnalyzerSession.title}`
+      : "正在和小说专家讨论剧情"
     : activeQuestionSet
       ? `正在回答${questionResearchLabel(activeQuestionSet)}问题`
       : activeArtifactContext || composerArtifactReview
@@ -733,7 +823,7 @@ export function ConversationPane({
             }}
           >
             <BookOpenCheck size={16} aria-hidden="true" />
-            {analyzerMode ? "退出专家意见" : "小说专家意见"}
+            {analyzerMode ? "退出小说讨论" : "小说讨论"}
           </button>
           <button
             type="button"
@@ -742,10 +832,22 @@ export function ConversationPane({
             onClick={() => void requestWriterStart()}
           >
             <WandSparkles size={16} aria-hidden="true" />
-            开始续写
+            {writerIntentMode === "original_creation" ? "开始原创写作" : "开始续写"}
           </button>
         </div>
       </div>
+
+      {analyzerMode ? (
+        <AnalyzerSessionStrip
+          sessions={analyzerSessions}
+          selectedSessionId={selectedAnalyzerSessionId}
+          pending={analyzerSessionsQuery.isFetching || createAnalyzerSessionMutation.isPending}
+          rollbackPending={rollbackPreviewMutation.isPending || rollbackConfirmMutation.isPending}
+          onSelect={setSelectedAnalyzerSessionId}
+          onCreate={() => createAnalyzerSessionMutation.mutate()}
+          onRollbackLatest={(sessionId) => rollbackPreviewMutation.mutate(sessionId)}
+        />
+      ) : null}
 
       <MessageList
         messages={displayMessages}
@@ -789,7 +891,9 @@ export function ConversationPane({
           onChange={(event) => setInput(event.target.value)}
           placeholder={
             analyzerMode
-              ? "向小说专家提问，例如：当前未解之谜哪条最适合下一阶段回收？"
+              ? selectedAnalyzerSession
+                ? "继续这个小说讨论。你的回答会作为本 session 的背景。"
+                : "选择一个小说讨论，或直接输入问题创建新讨论。"
               : activeQuestionSet || composerQuestionSet
                 ? `回答当前${questionResearchLabel(activeQuestionSet ?? composerQuestionSet)}问题，然后点击右侧分支按钮继续。`
                 : activeWriterJob
@@ -975,11 +1079,41 @@ export function ConversationPane({
 
       <WriterIntentWizard
         open={wizardOpen}
+        mode={writerIntentMode}
         initialGoal={latestNaturalGoal}
         pending={actionPending}
         onClose={() => setWizardOpen(false)}
         onSubmit={submitWriterIntent}
       />
+      {rollbackPreview ? (
+        <div className="dialog-backdrop">
+          <div role="dialog" aria-modal="true" aria-labelledby="rollback-analyzer-title" className="dialog-card">
+            <div className="dialog-header">
+              <h2 id="rollback-analyzer-title">撤回最近一轮讨论</h2>
+            </div>
+            <p>{rollbackPreview.message}</p>
+            <div className="rollback-summary">
+              <span>将撤回 turn：{rollbackPreview.turn_id}</span>
+              {rollbackPreview.job_id ? <span>关联任务：{rollbackPreview.job_id}</span> : null}
+              {rollbackPreview.previous_turn_id ? <span>撤回后回到：{rollbackPreview.previous_turn_id}</span> : null}
+            </div>
+            {rollbackError ? <p className="error-text">{rollbackError}</p> : null}
+            <div className="dialog-actions">
+              <button type="button" className="secondary-button" onClick={() => setRollbackPreview(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                disabled={rollbackConfirmMutation.isPending}
+                onClick={() => rollbackConfirmMutation.mutate(rollbackPreview)}
+              >
+                确认撤回
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1033,6 +1167,82 @@ function localAnalyzerMessages({
       created_at: createdAt
     }
   ];
+}
+
+function AnalyzerSessionStrip({
+  sessions,
+  selectedSessionId,
+  pending,
+  rollbackPending,
+  onSelect,
+  onCreate,
+  onRollbackLatest
+}: {
+  sessions: AnalyzerSessionSummary[];
+  selectedSessionId: string;
+  pending: boolean;
+  rollbackPending: boolean;
+  onSelect: (sessionId: string) => void;
+  onCreate: () => void;
+  onRollbackLatest: (sessionId: string) => void;
+}) {
+  const selectedSession = sessions.find((session) => session.session_id === selectedSessionId) ?? null;
+  const canRollback = Boolean(selectedSession && selectedSession.turn_count > 0 && selectedSession.status !== "running");
+  return (
+    <section className="analyzer-session-strip" aria-label="小说讨论列表">
+      <div className="analyzer-session-header">
+        <span>小说讨论</span>
+        <div className="analyzer-session-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!canRollback || rollbackPending}
+            onClick={() => selectedSession && onRollbackLatest(selectedSession.session_id)}
+          >
+            <Undo2 size={15} aria-hidden="true" />
+            撤回最新
+          </button>
+          <button type="button" className="secondary-button" disabled={pending} onClick={onCreate}>
+            <PlusCircle size={15} aria-hidden="true" />
+            新讨论
+          </button>
+        </div>
+      </div>
+      <div className="analyzer-session-list">
+        {sessions.length ? (
+          sessions.map((session) => (
+            <button
+              key={session.session_id}
+              type="button"
+              className={`analyzer-session-item${session.session_id === selectedSessionId ? " selected" : ""}`}
+              onClick={() => onSelect(session.session_id)}
+            >
+              <span className="analyzer-session-title">{session.title}</span>
+              <span className="analyzer-session-meta">
+                {analyzerSessionStatusText(session.status)} · {session.turn_count} 轮
+              </span>
+              {session.latest_preview ? <span className="analyzer-session-preview">{session.latest_preview}</span> : null}
+            </button>
+          ))
+        ) : (
+          <div className="analyzer-session-empty">{pending ? "正在读取历史讨论..." : "还没有讨论。直接输入问题会创建新讨论。"}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function analyzerSessionStatusText(status: string) {
+  if (status === "running") {
+    return "分析中";
+  }
+  if (status === "waiting_user") {
+    return "待补充";
+  }
+  if (status === "failed") {
+    return "失败";
+  }
+  return "可继续";
 }
 
 function isConversationMessage(value: unknown): value is ConversationMessage {

@@ -80,10 +80,10 @@ class StatusPresenter:
         "freeze_d": ("Writer 分层生成", "本章写作输入已准备好", "下一步生成正文草稿"),
         "canon_ready": ("Writer 分层生成", "连续性检查已生成", "请决定当前章节草稿"),
         "wait_chapter_acceptance": ("Writer 分层生成", "请决定当前章节草稿", "提交后写入正文并更新续写记忆"),
-        "wait_chapter_review": ("Writer 分层生成", "请调整章节规划后重写", "通过后直接重新生成正文草稿"),
+        "wait_chapter_review": ("Writer 分层生成", "请重新生成章节梗概", "通过后直接重新整理写作输入并生成正文草稿"),
         "accepted": ("Writer 分层生成", "已接受本章", "正在提交正文并更新续写记忆"),
-        "rewrite_requested": ("Writer 分层生成", "按反馈重写正文", "基于当前章节梗概重新生成正文"),
-        "replan_requested": ("Writer 分层生成", "重做章节规划", "返回章节标题与梗概审阅"),
+        "rewrite_requested": ("Writer 分层生成", "按反馈修改正文", "基于上一版草稿修订正文"),
+        "replan_requested": ("Writer 分层生成", "重新生成章节梗概", "返回章节标题与梗概审阅"),
         "discarded": ("Writer 分层生成", "已作废当前草稿", "流程暂停，稍后可选择恢复点"),
         "writeback_review": ("Writer 分层生成", "提交本章正文", "继续提交正文并更新续写记忆"),
         "writeback_committed": ("Writer 分层生成", "已更新续写记忆", "进入完成状态"),
@@ -98,7 +98,7 @@ class StatusPresenter:
     _WRITER_STAGE_DESCRIPTIONS: dict[str, str] = {
         "artifact saved": "已保存文件内容；保存只是保留修改，不会自动确认当前审阅节点。",
         "reviewing_artifact": "请审阅当前产物；通过时可补充字数、风格、节奏、重点段落或禁止项，不通过时请说明标题、因果、人物动机、场景顺序或伏笔需要怎样调整。",
-        "reviewing_draft": "当前章节草稿已经生成，请决定提交正文、基于反馈重写、修改章节梗概后重写、作废或稍后继续。",
+        "reviewing_draft": "当前章节草稿已经生成，请决定提交正文、基于反馈修改正文、重新生成章节梗概、作废或稍后继续。",
         "generating_draft": "Writer 正在基于已通过的章节梗概、用户补充和装配上下文生成正文草稿。",
         "outline_research_user_input": "大纲研究发现少量阻塞问题；你的回答会作为用户授权证据进入 planning notebook，不会直接写入正式记忆。",
         "outline_research_blocked": "大纲研究判断前置建模不足；系统不会生成正式全书规划。",
@@ -108,8 +108,8 @@ class StatusPresenter:
         "chapter_review": "系统已生成章节标题、目标、冲突与梗概；通过时可补充字数、风格、节奏、重点描写和禁止项。",
         "wait_length_review": "这是旧 run 的迁移状态；新流程不再要求单独确认长度计划。",
         "freeze_d_review": "这是旧 run 的迁移状态；新流程不再要求单独确认写作材料。",
-        "wait_chapter_acceptance": "当前章节草稿已经生成，请决定提交正文、基于反馈重写、修改章节梗概后重写、作废或稍后继续。",
-        "wait_chapter_review": "请修改章节标题与梗概；通过后会直接重新整理写作输入并生成正文。",
+        "wait_chapter_acceptance": "当前章节草稿已经生成，请决定提交正文、基于反馈修改正文、重新生成章节梗概、作废或稍后继续。",
+        "wait_chapter_review": "请重新审阅章节标题与梗概；通过后会直接重新整理写作输入并生成正文。",
         "writeback_review": "本章草稿已接受；提交后会把正文、历史梗概、outline 片段和人物档案更新作为同一个事务处理。",
     }
 
@@ -129,9 +129,9 @@ class StatusPresenter:
         "chapter_review": (WriterStageAction("通过章节梗概并继续", "approve_writer_artifact"),),
         "wait_chapter_review": (
             WriterStageAction(
-                "通过修改后的章节梗概并继续",
+                "确认重新生成的章节梗概并继续",
                 "approve_writer_artifact",
-                "用于“修改章节梗概后重写”的继续路径。",
+                "用于“重新生成章节梗概”的继续路径。",
             ),
         ),
         "wait_length_review": (WriterStageAction("迁移回章节梗概审阅", "approve_writer_artifact"),),
@@ -146,8 +146,8 @@ class StatusPresenter:
         "freeze_d": (WriterStageAction("生成当前章草稿", "execute_current_chapter"),),
         "wait_chapter_acceptance": (
             WriterStageAction("提交本章正文", "accept_chapter", "确认使用这版草稿后直接提交正文并更新续写记忆。"),
-            WriterStageAction("基于反馈重写本章", "rewrite_chapter", "后续基于当前章节梗概重写。"),
-            WriterStageAction("修改章节梗概后重写", "replan_chapter", "后续回到章节梗概调整。"),
+            WriterStageAction("基于反馈修改正文", "rewrite_chapter", "后续以上一版草稿为基底修订正文。"),
+            WriterStageAction("重新生成章节梗概", "replan_chapter", "后续回到章节梗概调整。"),
             WriterStageAction("作废本次草稿", "discard_chapter", "后续暂停流程。"),
         ),
         "writeback_review": (WriterStageAction("提交本章正文", "approve_writeback"),),

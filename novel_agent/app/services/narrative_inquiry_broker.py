@@ -619,6 +619,8 @@ class NarrativeInquiryBroker:
             "matched_term_count": len(matched_terms),
             "match_mode": match_mode,
             "snippet": self._text_search_snippet(text, terms, limit=min(520, budget.max_evidence_chars_per_request)),
+            "snippet_policy": "compact_match_window",
+            "full_document_available_via": "raw_excerpt",
             "chapter_refs": [ref for ref in (self._normalize_chapter_ref(item) for item in chapter_refs) if ref],
             "source_doc_ids": normalized_doc_ids,
             "status": status or "candidate",
@@ -633,13 +635,102 @@ class NarrativeInquiryBroker:
         normalized = re.sub(r"\s+", " ", _text(text))
         if len(normalized) <= limit:
             return normalized
-        positions = [normalized.casefold().find(term.casefold()) for term in terms if term and term.casefold() in normalized.casefold()]
-        start = min((pos for pos in positions if pos >= 0), default=0)
-        start = max(0, start - max(20, limit // 5))
+        span = self._best_text_search_span(normalized, terms)
+        if span is None:
+            start = 0
+        else:
+            span_start, span_end = span
+            span_len = max(1, span_end - span_start)
+            if span_len >= limit:
+                start = max(0, span_start - max(12, limit // 8))
+            else:
+                start = max(0, span_start - max(20, min(limit // 5, (limit - span_len) // 2)))
         snippet = normalized[start : start + limit].strip()
         prefix = "..." if start > 0 else ""
         suffix = "..." if start + limit < len(normalized) else ""
         return f"{prefix}{snippet}{suffix}"
+
+    def _raw_excerpt_snippet(self, text: str, term_groups: Sequence[Sequence[str]], *, limit: int) -> str:
+        normalized = re.sub(r"\s+", " ", _text(text))
+        if len(normalized) <= limit:
+            return normalized
+        terms = self._dedupe_limited_terms([term for group in term_groups for term in group], limit=96)
+        if not terms:
+            return _safe_excerpt(normalized, limit=limit)
+        haystack = normalized.casefold()
+        occurrences: list[tuple[int, int, str]] = []
+        for term in terms:
+            needle = term.casefold()
+            if not needle:
+                continue
+            start = haystack.find(needle)
+            while start >= 0:
+                occurrences.append((start, start + len(needle), term))
+                start = haystack.find(needle, start + max(1, len(needle)))
+        if not occurrences:
+            return _safe_excerpt(normalized, limit=limit)
+
+        def score_window(start: int) -> tuple[float, int, int]:
+            window = haystack[start : start + limit]
+            matched = [term for term in terms if term.casefold() in window]
+            specificity = sum(max(1.0, min(12.0, len(term) / 2)) for term in matched)
+            return specificity, len(matched), -start
+
+        best_start = 0
+        best_score: tuple[float, int, int] | None = None
+        for occurrence_start, occurrence_end, _term in occurrences:
+            span_len = max(1, occurrence_end - occurrence_start)
+            if span_len >= limit:
+                start = max(0, occurrence_start - max(12, limit // 8))
+            else:
+                start = max(0, occurrence_start - max(20, min(limit // 5, (limit - span_len) // 2)))
+            score = score_window(start)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_start = start
+        snippet = normalized[best_start : best_start + limit].strip()
+        prefix = "..." if best_start > 0 else ""
+        suffix = "..." if best_start + limit < len(normalized) else ""
+        return f"{prefix}{snippet}{suffix}"
+
+    def _best_text_search_span(self, normalized_text: str, terms: Sequence[str]) -> tuple[int, int] | None:
+        haystack = normalized_text.casefold()
+        occurrences: list[tuple[int, int, int]] = []
+        for term_index, term in enumerate(terms):
+            needle = term.casefold()
+            if not needle:
+                continue
+            start = haystack.find(needle)
+            while start >= 0:
+                occurrences.append((start, start + len(needle), term_index))
+                start = haystack.find(needle, start + max(1, len(needle)))
+        if not occurrences:
+            return None
+        occurrences.sort(key=lambda item: (item[0], item[1]))
+        required_count = len({item[2] for item in occurrences})
+        counts: dict[int, int] = {}
+        covered = 0
+        left = 0
+        best: tuple[int, int] | None = None
+        for right, occurrence in enumerate(occurrences):
+            term_index = occurrence[2]
+            counts[term_index] = counts.get(term_index, 0) + 1
+            if counts[term_index] == 1:
+                covered += 1
+            while covered == required_count and left <= right:
+                window_start = occurrences[left][0]
+                window_end = max(item[1] for item in occurrences[left : right + 1])
+                if best is None or (window_end - window_start, window_start) < (best[1] - best[0], best[0]):
+                    best = (window_start, window_end)
+                left_term_index = occurrences[left][2]
+                counts[left_term_index] -= 1
+                if counts[left_term_index] == 0:
+                    covered -= 1
+                left += 1
+        if best is not None:
+            return best
+        first = occurrences[0]
+        return first[0], first[1]
 
     def _dedupe_text_search_matches(self, matches: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
@@ -671,7 +762,10 @@ class NarrativeInquiryBroker:
             )
         except Exception:
             return []
-        for item in state.current_candidates:
+        candidates = state if isinstance(state, list) else state.current_candidates
+        for item in candidates:
+            if not isinstance(item, Mapping):
+                continue
             text = " ".join(
                 _text(item.get(key))
                 for key in ("summary", "title", "page_id", "id", "source_doc_range")
@@ -1616,6 +1710,14 @@ class NarrativeInquiryBroker:
             request=request,
             limit=6,
         )
+        expanded_doc_ids, related_trace = self._expand_raw_excerpt_related_doc_ids(
+            conn,
+            book_id=book_id,
+            selected_doc_ids=selected_doc_ids,
+            request=request,
+            limit=6,
+        )
+        selected_doc_ids = expanded_doc_ids
         memory_bundle = self.memory_query_service.resolve_document_refs(
             conn,
             book_id=book_id,
@@ -1653,6 +1755,8 @@ class NarrativeInquiryBroker:
         )
         if selection_trace:
             bundle.trace.append(selection_trace)
+        if related_trace:
+            bundle.trace.append(related_trace)
         if snippet_by_doc_id:
             bundle.trace.append(
                 {
@@ -1661,6 +1765,69 @@ class NarrativeInquiryBroker:
                 }
             )
         return bundle
+
+    def _expand_raw_excerpt_related_doc_ids(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        book_id: str,
+        selected_doc_ids: Sequence[int],
+        request: NarrativeInquiryRequest,
+        limit: int,
+    ) -> tuple[list[int], dict[str, Any]]:
+        clean_ids = [int(item) for item in selected_doc_ids if int(item) > 0]
+        if not clean_ids or len(clean_ids) >= limit:
+            return clean_ids[:limit], {}
+        priority_terms, context_terms = self._raw_excerpt_filter_terms(request)
+        candidate_terms = self._dedupe_limited_terms([*priority_terms, *context_terms], limit=64)
+        precise_terms = [
+            term
+            for term in candidate_terms
+            if len(term) >= 4 or re.fullmatch(r"[A-Za-z0-9_]{3,}", term)
+        ][:24]
+        if not precise_terms:
+            return clean_ids[:limit], {}
+        rows = conn.execute(
+            """
+            SELECT doc_id, content, document_title
+            FROM documents
+            WHERE book_id = ?
+            ORDER BY doc_id
+            """,
+            (book_id,),
+        ).fetchall()
+        existing = set(clean_ids)
+        min_anchor = min(clean_ids)
+        related: list[tuple[tuple[float, int, int], int, list[str]]] = []
+        for row in rows:
+            doc_id = int(row["doc_id"])
+            if doc_id in existing or doc_id < min_anchor:
+                continue
+            text = " ".join([str(row["document_title"] or ""), str(row["content"] or "")])
+            matched = self._matched_raw_excerpt_terms(text, precise_terms)
+            if not matched:
+                continue
+            specificity = sum(max(1.0, min(12.0, len(term) / 2)) for term in matched)
+            related.append(((specificity, len(matched), -doc_id), doc_id, matched))
+        related.sort(reverse=True)
+        added: list[int] = []
+        matched_terms_by_doc_id: dict[str, list[str]] = {}
+        for _score, doc_id, matched in related:
+            if len(clean_ids) + len(added) >= limit:
+                break
+            added.append(doc_id)
+            matched_terms_by_doc_id[str(doc_id)] = matched[:8]
+            if len(added) >= 2:
+                break
+        if not added:
+            return clean_ids[:limit], {}
+        return [*clean_ids, *added][:limit], {
+            "operation": "raw_excerpt_related_doc_expansion",
+            "strategy": "precise_query_term_followup",
+            "base_doc_ids": clean_ids,
+            "added_doc_ids": added,
+            "matched_terms_by_doc_id": matched_terms_by_doc_id,
+        }
 
     def _raw_excerpt_snippets_by_doc_id(
         self,
@@ -1691,9 +1858,15 @@ class NarrativeInquiryBroker:
             text = str(row["content"] or "")
             if not text:
                 continue
-            snippets[int(row["doc_id"])] = self._text_search_snippet(
+            term_groups: list[list[str]] = []
+            if priority_terms:
+                term_groups.append(priority_terms)
+            if context_terms:
+                term_groups.append(context_terms)
+            term_groups.append(terms)
+            snippets[int(row["doc_id"])] = self._raw_excerpt_snippet(
                 text,
-                priority_terms or terms,
+                term_groups,
                 limit=max(80, int(limit or 80)),
             )
         return snippets
@@ -1797,7 +1970,10 @@ class NarrativeInquiryBroker:
             ]
             if item
         )
-        return self._dedupe_limited_terms(filter_terms, limit=24), self._dedupe_limited_terms(_tokens(context_text), limit=24)
+        return self._dedupe_limited_terms(filter_terms, limit=24), self._dedupe_limited_terms(
+            _expanded_query_tokens(context_text),
+            limit=48,
+        )
 
     def _dedupe_limited_terms(self, terms: Sequence[str], *, limit: int) -> list[str]:
         deduped: list[str] = []

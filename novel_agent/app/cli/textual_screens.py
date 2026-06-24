@@ -872,7 +872,14 @@ class WorkbenchScreen(Screen[None]):
 
     def show_chapter_acceptance_form(self, status: str) -> None:
         normalized = status.strip().lower()
-        if normalized not in {"accepted", "revise_length", "replan_chapter", "discarded"}:
+        if normalized not in {
+            "accepted",
+            "rewrite_requested",
+            "revise_length",
+            "replan_requested",
+            "replan_chapter",
+            "discarded",
+        }:
             self._append_message("错误", "未知章节草稿决策动作。")
             return
         self.chapter_acceptance_form_active = True

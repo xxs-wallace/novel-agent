@@ -7,7 +7,8 @@ export function createAppQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        retry: false,
+        retry: 3,
+        retryDelay: (attemptIndex) => Math.min(500 * 2 ** attemptIndex, 2_000),
         staleTime: 5_000
       },
       mutations: {

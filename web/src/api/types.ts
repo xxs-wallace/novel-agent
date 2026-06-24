@@ -152,6 +152,40 @@ export interface MessageCreateRequest {
   payload?: Record<string, unknown>;
 }
 
+export interface AnalyzerSessionSummary {
+  book_id: string;
+  session_id: string;
+  title: string;
+  source_task_id: string;
+  status: string;
+  turn_count: number;
+  latest_turn_id: string;
+  latest_preview: string;
+  conversation_brief: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AnalyzerSessionCreateRequest {
+  title?: string;
+  initial_question?: string;
+}
+
+export interface AnalyzerTurnRollbackPreview {
+  book_id: string;
+  session_id: string;
+  confirmed: boolean;
+  turn_id: string;
+  job_id: string;
+  previous_turn_id: string;
+  candidate_paths: string[];
+  moved_paths: string[];
+  backup_path: string;
+  errors: string[];
+  removed_message_count: number;
+  message: string;
+}
+
 export interface CommandRequest {
   command: string;
   payload?: Record<string, unknown>;

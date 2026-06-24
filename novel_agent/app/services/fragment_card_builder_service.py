@@ -13,7 +13,7 @@ from ..repos.fragment_cards_repo import FragmentCardsRepo
 from ..schemas.creative_kb_schema import FragmentCard, FragmentCardBuildResult, StyleFeatures
 
 FRAGMENT_CARD_SCHEMA_RETRY_ATTEMPTS = 3
-SOURCE_EXCERPT_MAX_CHARS = 400
+SOURCE_EXCERPT_MAX_CHARS = 1600
 MAX_PREFERRED_TAGS = 4
 
 

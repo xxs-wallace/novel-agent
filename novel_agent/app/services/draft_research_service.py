@@ -393,15 +393,19 @@ class DraftResearchService:
             "chapter_id": chapter_id,
             "source_decision_id": _text(rewrite_feedback.get("decision_id")),
             "source_draft_id": _text(rewrite_feedback.get("draft_id")),
-            "rewrite_mode": "full_rewrite",
-            "feedback_classification": "other",
+            "rewrite_mode": "targeted_rewrite",
+            "feedback_classification": "prose_only",
             "feedback_text": _text(rewrite_feedback.get("feedback_text")),
-            "preserve": [],
+            "preserve": [
+                "上一版草稿中未被用户反馈点名的问题、已满足 ChapterBrief 的剧情功能、人物行动、关系推进和结尾 hook。",
+            ],
             "remove_or_change": [_text(rewrite_feedback.get("feedback_text"))],
             "new_memory_notes": [],
             "character_constraints": [],
             "style_constraints": [],
-            "must_not_change": [],
+            "must_not_change": [
+                "不得默认丢弃上一版草稿；除非 rewrite_mode 明确为 full_rewrite 或 regenerate_from_brief，否则只做受控修订。",
+            ],
             "requires_replan": False,
             "replan_target": "",
         }
@@ -409,6 +413,8 @@ class DraftResearchService:
             system_prompt=(
                 "你是 Draft Research Loop 的重写计划器。只返回 JSON。"
                 "你要把用户草稿反馈转成 Draft Prose Executor 可执行的 preserve/change/must_not_change 约束。"
+                "默认把上一版草稿视为 primary edit base；prose_only、scene_emphasis 和局部人物声音问题应优先选择 targeted_rewrite。"
+                "只有当旧稿整体不可用但当前 ChapterBrief 仍可执行时，才选择 full_rewrite 或 regenerate_from_brief。"
                 "如果反馈证明当前 ChapterBrief 不可执行，必须 requires_replan=true。"
             ),
             user_prompt=json.dumps(

@@ -194,7 +194,7 @@ def _write_review_decision(*, workflow: object, run_id: str, status: str) -> Non
             "decision_id": decision_id,
             "chapter_id": chapter_id,
             "reason_code": reason_by_status[status],
-            "feedback_text": "用户要求修改章节梗概后重写。",
+            "feedback_text": "用户要求重新生成章节梗概。",
             "must_preserve": [],
             "must_change": [],
             "forbidden_carryover": [],

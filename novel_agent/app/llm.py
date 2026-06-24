@@ -50,6 +50,27 @@ class InvalidJSONResponseError(ValueError):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ModelToolCall:
+    id: str
+    name: str
+    arguments: Any
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "arguments": self.arguments,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCallModelResponse:
+    tool_calls: list[ModelToolCall]
+    content: str
+    raw_response: Any | None = None
+
+
 class JsonModelClient:
     def __init__(self, settings: ModelSettings) -> None:
         self.settings = settings
@@ -178,6 +199,51 @@ class JsonModelClient:
             timeout_seconds=request_timeout_seconds,
         )
 
+    def generate_tool_calls(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tools: list[Any],
+        tool_choice: str | dict[str, Any] | None = "auto",
+        timeout_seconds: int | None = None,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        include_reasoning_content: bool | None = None,
+    ) -> ToolCallModelResponse:
+        if self.settings.dry_run:
+            raise RuntimeError("Dry-run mode does not support model tool calls")
+        if self.model is None:
+            raise RuntimeError("Model client is not initialized")
+        from smolagents.models import ChatMessage, MessageRole
+
+        messages: list[Any | dict[str, Any]] = [
+            ChatMessage(role=MessageRole.SYSTEM, content=system_prompt),
+            ChatMessage(role=MessageRole.USER, content=user_prompt),
+        ]
+        attempts = max(1, int(self.settings.request_retry_attempts))
+        backoff = max(0.0, float(self.settings.request_retry_backoff_seconds))
+        prompt_chars = len(system_prompt) + len(user_prompt)
+        request_timeout_seconds = max(1, int(timeout_seconds or self.settings.timeout_seconds or 1))
+        active_settings = self._settings_for_call(
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            include_reasoning_content=include_reasoning_content,
+        )
+        model = self.model if active_settings is self.settings else self._build_model(active_settings)
+        response = self._generate_tool_call_response_with_retries(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            attempts=attempts,
+            backoff=backoff,
+            prompt_chars=prompt_chars,
+            retry_label="tool_call",
+            timeout_seconds=request_timeout_seconds,
+        )
+        return self._tool_call_model_response(response)
+
     def _settings_for_call(
         self,
         *,
@@ -220,7 +286,12 @@ class JsonModelClient:
         for attempt in range(1, attempts + 1):
             started_at = time.monotonic()
             try:
-                response = self._generate_with_timeout(model=model, messages=messages, timeout_seconds=timeout_seconds)
+                response = self._generate_with_timeout(
+                    model=model,
+                    messages=messages,
+                    timeout_seconds=timeout_seconds,
+                    generation_kwargs={"temperature": self.settings.temperature},
+                )
                 text = str(response.content or "").strip()
                 if not text:
                     text = self._extract_text_from_raw_response(response).strip()
@@ -270,16 +341,75 @@ class JsonModelClient:
             f"Model returned empty text after {attempts} attempts for model={self.settings.model_name}"
         )
 
+    def _generate_tool_call_response_with_retries(
+        self,
+        *,
+        model: Any,
+        messages: list[Any | dict[str, Any]],
+        tools: list[Any],
+        tool_choice: str | dict[str, Any] | None,
+        attempts: int,
+        backoff: float,
+        prompt_chars: int,
+        retry_label: str,
+        timeout_seconds: int,
+    ) -> Any:
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            started_at = time.monotonic()
+            try:
+                return self._generate_with_timeout(
+                    model=model,
+                    messages=messages,
+                    timeout_seconds=timeout_seconds,
+                    generation_kwargs={
+                        "temperature": self.settings.temperature,
+                        "tools_to_call_from": tools,
+                        "tool_choice": tool_choice,
+                    },
+                )
+            except Exception as exc:
+                last_error = exc
+                elapsed = time.monotonic() - started_at
+                if attempt >= attempts:
+                    logger.warning(
+                        "LLM tool-call request failed after attempt %s/%s for model=%s prompt_chars=%s mode=%s elapsed=%.3fs error=%s",
+                        attempt,
+                        attempts,
+                        self.settings.model_name,
+                        prompt_chars,
+                        retry_label,
+                        elapsed,
+                        exc,
+                    )
+                    raise
+                logger.warning(
+                    "LLM tool-call request failed on attempt %s/%s for model=%s prompt_chars=%s mode=%s elapsed=%.3fs; retrying in %.1f: %s",
+                    attempt,
+                    attempts,
+                    self.settings.model_name,
+                    prompt_chars,
+                    retry_label,
+                    elapsed,
+                    backoff,
+                    exc,
+                )
+                time.sleep(backoff)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"Model tool-call request failed after {attempts} attempts for model={self.settings.model_name}")
+
     def _generate_with_timeout(
         self,
         *,
         model: Any,
         messages: list[Any | dict[str, Any]],
         timeout_seconds: int | None = None,
+        generation_kwargs: dict[str, Any] | None = None,
     ) -> Any:
         timeout_seconds = max(1, int(timeout_seconds or self.settings.timeout_seconds or 1))
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="novel-agent-llm")
-        future = executor.submit(cast(Any, model).generate, messages, temperature=self.settings.temperature)
+        future = executor.submit(cast(Any, model).generate, messages, **(generation_kwargs or {}))
         try:
             return future.result(timeout=timeout_seconds)
         except FutureTimeoutError as exc:
@@ -329,6 +459,26 @@ class JsonModelClient:
                     parts.append(text)
             return "\n".join(parts)
         return ""
+
+    def _tool_call_model_response(self, response: Any) -> ToolCallModelResponse:
+        content = str(getattr(response, "content", "") or "").strip()
+        raw_calls = getattr(response, "tool_calls", None) or []
+        calls: list[ModelToolCall] = []
+        for index, call in enumerate(raw_calls, start=1):
+            call_id = str(getattr(call, "id", "") or f"tool-call-{index}")
+            function = getattr(call, "function", None)
+            name = str(getattr(function, "name", "") or "")
+            arguments = getattr(function, "arguments", {})
+            if not name and isinstance(call, dict):
+                call_id = str(call.get("id") or call_id)
+                function_data = call.get("function") or {}
+                if isinstance(function_data, dict):
+                    name = str(function_data.get("name") or "")
+                    arguments = function_data.get("arguments", {})
+            if not name:
+                continue
+            calls.append(ModelToolCall(id=call_id, name=name, arguments=arguments))
+        return ToolCallModelResponse(tool_calls=calls, content=content, raw_response=response)
 
     def generate_json(
         self,

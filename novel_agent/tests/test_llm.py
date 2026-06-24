@@ -105,6 +105,50 @@ def test_json_model_client_generate_text_allows_timeout_override(monkeypatch: py
     assert seen_timeouts == [7]
 
 
+def test_json_model_client_generate_tool_calls_passes_tools_and_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class ToolCallingModel:
+        def generate(self, _messages: object, **kwargs: object) -> SimpleNamespace:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                content=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        id="call-1",
+                        function=SimpleNamespace(name="text_search", arguments='{"terms":["证据"]}'),
+                    )
+                ],
+                raw=None,
+            )
+
+    tool = SimpleNamespace(name="text_search")
+    monkeypatch.setattr(JsonModelClient, "_build_model", lambda _self: ToolCallingModel())
+    client = JsonModelClient(
+        ModelSettings(
+            model_type="FakeModel",
+            model_name="fake",
+            request_retry_attempts=1,
+            request_retry_backoff_seconds=0,
+        )
+    )
+
+    response = client.generate_tool_calls(
+        system_prompt="system",
+        user_prompt="user",
+        tools=[tool],
+        tool_choice="auto",
+        timeout_seconds=3,
+    )
+
+    assert captured["tools_to_call_from"] == [tool]
+    assert captured["tool_choice"] == "auto"
+    assert response.content == ""
+    assert response.tool_calls[0].id == "call-1"
+    assert response.tool_calls[0].name == "text_search"
+    assert response.tool_calls[0].arguments == '{"terms":["证据"]}'
+
+
 def test_generate_json_does_not_replace_transport_failures_with_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -134,6 +134,14 @@ class CloseReadRuntimeConfig:
     close_read_extraction_window_count: int = 1
     close_read_extraction_max_workers: int = 4
     character_evidence_coverage_audit: bool = True
+    character_full_roster_paging_enabled: bool = True
+    character_full_roster_page_chars: int = 8000
+    character_full_roster_page_model_name: str = ""
+    character_full_roster_prefilter_enabled: bool = True
+    character_full_roster_prefilter_model_name: str = "deepseek-v4-flash"
+    character_full_roster_prefilter_max_candidates: int = 64
+    character_full_roster_prefilter_index_max_candidates: int = 128
+    character_full_roster_prefilter_recent_keep: int = 16
     character_reduce_max_workers: int = 4
     character_reduce_pending_min_evidence_count: int = 6
     character_reduce_pending_min_evidence_chars: int = 3000

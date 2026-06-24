@@ -374,11 +374,13 @@ class WorkflowFacade:
         if not db_path.exists():
             raise FileNotFoundError(f"close-read sqlite not found: {db_path}")
         model_client = self._build_outline_analyzer_model(api_key=api_key)
+        analyzer_tool_calls = _env_optional_bool("NOVEL_AGENT_ANALYZER_TOOL_CALLS")
         service = AnalyzerService(
             repo_root=self.repo_root,
             model_client=model_client,
             budget=self._build_outline_analyzer_budget(),
             prompt_trace_recorder=prompt_trace_recorder,
+            use_tool_call_requests=True if analyzer_tool_calls is None else bool(analyzer_tool_calls),
         )
         db = NovelAgentDB(db_path)
         with db.connect() as conn:
@@ -507,11 +509,37 @@ class WorkflowFacade:
     def writer_start_preflight(self, *, book_id: str) -> dict[str, object]:
         from .. import run_interactive
 
-        db_path = run_interactive.resolve_writer_memory_db_path(
-            repo_root=self.repo_root,
-            book_id=book_id,
-            reset=False,
-        )
+        snapshot = self.task_snapshot(book_id=book_id)
+        try:
+            db_path = run_interactive.resolve_writer_memory_db_path(
+                repo_root=self.repo_root,
+                book_id=book_id,
+                reset=False,
+            )
+        except FileNotFoundError:
+            if snapshot.source_path:
+                raise
+            return {
+                "book_id": book_id,
+                "can_start": True,
+                "missing_modeling_steps": [],
+                "modeling_advisories": [
+                    "original_creation_reference_required",
+                    "original_creation_outline_required",
+                ],
+                "missing_guidance": [],
+                "advisory_guidance": [
+                    "原创写作任务没有原文记忆；开始 Writer 时请选择借鉴任务并输入原创大纲。",
+                ],
+                "modeling_status": {
+                    "ready_for_continuation": False,
+                    "missing_modeling_steps": [
+                        "original_creation_reference_required",
+                        "original_creation_outline_required",
+                    ],
+                    "original_creation_task": True,
+                },
+            }
         db, workflow = run_interactive.build_writer_workflow(
             repo_root=self.repo_root,
             db_path=db_path,
@@ -634,11 +662,17 @@ class WorkflowFacade:
         from .. import run_interactive
 
         run_id = run_id or uuid.uuid4().hex
-        db_path = run_interactive.resolve_writer_memory_db_path(
-            repo_root=self.repo_root,
-            book_id=book_id,
-            reset=False,
-        )
+        snapshot = self.task_snapshot(book_id=book_id)
+        try:
+            db_path = run_interactive.resolve_writer_memory_db_path(
+                repo_root=self.repo_root,
+                book_id=book_id,
+                reset=False,
+            )
+        except FileNotFoundError:
+            if snapshot.source_path:
+                raise
+            db_path = self.db_path_for_book(book_id)
         db, workflow = run_interactive.build_writer_workflow(
             repo_root=self.repo_root,
             db_path=db_path,

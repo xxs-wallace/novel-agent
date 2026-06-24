@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from ..schemas import JobEventView, JobStatus, JobSummary
 
@@ -89,6 +89,7 @@ class JobManager:
         self._events: dict[str, list[JobEventView]] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._condition = asyncio.Condition()
+        self._recover_persisted_jobs()
 
     async def create_job(
         self,
@@ -106,6 +107,7 @@ class JobManager:
         if active_record is not None:
             active_record.message = "已有后台任务正在运行"
             active_record.updated_at = _utc_now()
+            self._persist_record(active_record)
             self.emit_event(
                 active_record.job_id,
                 "progress",
@@ -124,7 +126,13 @@ class JobManager:
         )
         self._records[job_id] = record
         self._events[job_id] = []
-        self.emit_event(job_id, "queued", "任务已加入后台队列", payload={"type": job_type, "request_payload": dict(payload or {})})
+        self._persist_record(record)
+        self.emit_event(
+            job_id,
+            "queued",
+            "任务已加入后台队列",
+            payload={"task_id": task_id, "type": job_type, "request_payload": dict(payload or {})},
+        )
         task = asyncio.create_task(self._run_job(record, runner or self._default_runner))
         self._tasks[job_id] = task
         return self.summary(job_id)
@@ -230,10 +238,12 @@ class JobManager:
         if record.status in self.TERMINAL_STATUSES:
             record.message = "后台任务已经结束"
             record.updated_at = _utc_now()
+            self._persist_record(record)
             return self.summary(job_id)
         record.status = "cancelled"
         record.message = "已取消后台任务"
         record.updated_at = _utc_now()
+        self._persist_record(record)
         self.emit_event(job_id, "cancelled", "已取消后台任务", payload={"recovery_suggestion": "需要时可重新启动同一动作。"})
         task = self._tasks.get(job_id)
         if task and not task.done():
@@ -285,6 +295,7 @@ class JobManager:
         record.status = "running"
         record.message = "后台任务正在运行"
         record.updated_at = _utc_now()
+        self._persist_record(record)
         self.emit_event(record.job_id, "running", "后台任务正在运行")
         context = JobContext(self, record)
         try:
@@ -293,6 +304,7 @@ class JobManager:
             record.status = "cancelled"
             record.message = "已取消后台任务"
             record.updated_at = _utc_now()
+            self._persist_record(record)
             return
         except Exception as exc:  # noqa: BLE001 - errors are converted to safe user events.
             error_traceback = traceback.format_exc()
@@ -305,6 +317,7 @@ class JobManager:
                 "error_type": exc.__class__.__name__,
                 "traceback": error_traceback,
             }
+            self._persist_record(record)
             self.emit_event(
                 record.job_id,
                 "error",
@@ -321,6 +334,7 @@ class JobManager:
             record.status = "cancelled"
             record.message = "已取消后台任务"
             record.updated_at = _utc_now()
+            self._persist_record(record)
             self.emit_event(
                 record.job_id,
                 "cancelled",
@@ -332,6 +346,7 @@ class JobManager:
         record.status = "succeeded"
         record.message = "后台任务已完成"
         record.updated_at = _utc_now()
+        self._persist_record(record)
         self.emit_event(record.job_id, "succeeded", "后台任务已完成", payload=record.result)
 
     async def _default_runner(self, context: JobContext) -> dict[str, Any]:
@@ -356,10 +371,201 @@ class JobManager:
         return record
 
     def _persist_event(self, event: JobEventView) -> None:
-        path = self.repo_root / "runs" / "web_jobs" / event.job_id / "events.jsonl"
+        path = self._job_dir(event.job_id) / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = _model_dump(event)
         path.open("a", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+    def _persist_record(self, record: JobRecord) -> None:
+        path = self._job_dir(record.job_id) / "job.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._record_payload(record), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    def _record_payload(self, record: JobRecord) -> dict[str, Any]:
+        return {
+            "schema_version": "1.0",
+            "job_id": record.job_id,
+            "task_id": record.task_id,
+            "type": record.type,
+            "status": record.status,
+            "payload": dict(record.payload),
+            "message": record.message,
+            "cancel_requested": record.cancel_requested,
+            "created_at": record.created_at.isoformat(),
+            "updated_at": record.updated_at.isoformat(),
+            "result": dict(record.result),
+        }
+
+    def _recover_persisted_jobs(self) -> None:
+        root = self.repo_root / "runs" / "web_jobs"
+        if not root.exists():
+            return
+        for record_path in root.glob("*/job.json"):
+            payload = self._read_json(record_path)
+            record = self._record_from_payload(payload)
+            if record is None:
+                continue
+            self._records[record.job_id] = record
+            self._events[record.job_id] = self._read_events(record.job_id)
+            if record.status not in self.TERMINAL_STATUSES:
+                previous_status = record.status
+                record.status = "failed"
+                record.message = "上一次后台服务中断，任务未完成"
+                record.updated_at = _utc_now()
+                record.result = {
+                    "status": "failed",
+                    "error": "Web backend stopped before the job reached a terminal state.",
+                    "error_type": "ServiceInterrupted",
+                    "previous_status": previous_status,
+                }
+                self._persist_record(record)
+                self.emit_event(
+                    record.job_id,
+                    "error",
+                    "上一次后台服务中断，任务未完成。",
+                    payload={
+                        "error": record.result["error"],
+                        "error_type": record.result["error_type"],
+                        "previous_status": previous_status,
+                        "recovery_suggestion": "请从最近 checkpoint 重新触发对应动作；如问题持续，请查看 runs/logs/web_launcher.log。",
+                    },
+                )
+        for events_path in root.glob("*/events.jsonl"):
+            job_id = events_path.parent.name
+            if job_id in self._records:
+                continue
+            events = self._read_events(job_id)
+            record = self._legacy_record_from_events(job_id=job_id, events=events)
+            if record is None:
+                continue
+            self._records[record.job_id] = record
+            self._events[record.job_id] = events
+            self._persist_record(record)
+            if record.status not in self.TERMINAL_STATUSES:
+                previous_status = record.status
+                record.status = "failed"
+                record.message = "上一次后台服务中断，任务未完成"
+                record.updated_at = _utc_now()
+                record.result = {
+                    "status": "failed",
+                    "error": "Web backend stopped before the job reached a terminal state.",
+                    "error_type": "ServiceInterrupted",
+                    "previous_status": previous_status,
+                }
+                self._persist_record(record)
+                self.emit_event(
+                    record.job_id,
+                    "error",
+                    "上一次后台服务中断，任务未完成。",
+                    payload={
+                        "error": record.result["error"],
+                        "error_type": record.result["error_type"],
+                        "previous_status": previous_status,
+                        "recovery_suggestion": "请从最近 checkpoint 重新触发对应动作；如问题持续，请查看 runs/logs/web_launcher.log。",
+                    },
+                )
+
+    def _record_from_payload(self, payload: Mapping[str, Any]) -> JobRecord | None:
+        job_id = str(payload.get("job_id") or "").strip()
+        task_id = str(payload.get("task_id") or "").strip()
+        job_type = str(payload.get("type") or "").strip()
+        if not job_id or not task_id or not job_type:
+            return None
+        status = str(payload.get("status") or "failed")
+        if status not in {"queued", "running", "succeeded", "failed", "cancelled"}:
+            status = "failed"
+        return JobRecord(
+            job_id=job_id,
+            task_id=task_id,
+            type=job_type,
+            status=status,  # type: ignore[arg-type]
+            payload=dict(payload.get("payload") or {}) if isinstance(payload.get("payload"), Mapping) else {},
+            message=str(payload.get("message") or ""),
+            cancel_requested=bool(payload.get("cancel_requested")),
+            created_at=self._parse_datetime(payload.get("created_at")),
+            updated_at=self._parse_datetime(payload.get("updated_at")),
+            result=dict(payload.get("result") or {}) if isinstance(payload.get("result"), Mapping) else {},
+        )
+
+    def _read_events(self, job_id: str) -> list[JobEventView]:
+        path = self._job_dir(job_id) / "events.jsonl"
+        if not path.exists():
+            return []
+        events: list[JobEventView] = []
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                events.append(JobEventView(**payload))
+            except Exception:
+                continue
+        return events
+
+    def _legacy_record_from_events(self, *, job_id: str, events: list[JobEventView]) -> JobRecord | None:
+        if not events:
+            return None
+        first = events[0]
+        queued_payload = first.payload
+        job_type = str(queued_payload.get("type") or "").strip()
+        if not job_type:
+            return None
+        task_id = str(queued_payload.get("task_id") or "").strip() or self._infer_legacy_task_id(job_id=job_id, job_type=job_type)
+        if not task_id:
+            return None
+        last = events[-1]
+        status: JobStatus = "running"
+        result: dict[str, Any] = {}
+        if last.kind == "succeeded":
+            status = "succeeded"
+            result = dict(last.payload)
+        elif last.kind == "cancelled":
+            status = "cancelled"
+        elif last.kind == "error":
+            status = "failed"
+            result = dict(last.payload)
+        return JobRecord(
+            job_id=job_id,
+            task_id=task_id,
+            type=job_type,
+            status=status,
+            payload=dict(queued_payload.get("request_payload") or {})
+            if isinstance(queued_payload.get("request_payload"), Mapping)
+            else {},
+            message=str(last.message or first.message),
+            created_at=first.created_at,
+            updated_at=last.created_at,
+            result=result,
+        )
+
+    def _infer_legacy_task_id(self, *, job_id: str, job_type: str) -> str:
+        if job_type in {"read", "close_read"}:
+            for path in (self.repo_root / "runs" / "web_pipeline").glob(f"*/read_{job_id}.md"):
+                return path.parent.name
+        return ""
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return dict(payload) if isinstance(payload, Mapping) else {}
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        raw = str(value or "").strip()
+        if raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        return _utc_now()
+
+    def _job_dir(self, job_id: str) -> Path:
+        return self.repo_root / "runs" / "web_jobs" / job_id
 
     def _notify_watchers(self) -> None:
         try:

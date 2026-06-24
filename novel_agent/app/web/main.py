@@ -9,6 +9,7 @@ from .deps import default_repo_root
 from .routes import actions, artifacts, jobs, messages, tasks
 from .schemas import ApiError
 from .services.analyzer_turn_service import AnalyzerTurnService
+from .services.analyzer_session_service import AnalyzerSessionService
 from .services.artifact_tree_service import ArtifactTreeService
 from .services.artifact_view_service import ArtifactViewService
 from .services.job_manager import JobManager
@@ -28,7 +29,9 @@ def create_app(*, repo_root: Path | None = None, job_manager: JobManager | None 
 
     session_service = WebSessionService(repo_root=root)
     analyzer_turn_service = AnalyzerTurnService(repo_root=root)
+    analyzer_session_service = AnalyzerSessionService(repo_root=root, turn_service=analyzer_turn_service)
     session_service.analyzer_turn_service = analyzer_turn_service
+    session_service.analyzer_session_service = analyzer_session_service
     artifact_tree_service = ArtifactTreeService(repo_root=root, facade=session_service.facade)
     artifact_view_service = ArtifactViewService(repo_root=root, facade=session_service.facade)
     active_job_manager = job_manager or JobManager(repo_root=root)
@@ -45,6 +48,7 @@ def create_app(*, repo_root: Path | None = None, job_manager: JobManager | None 
     app.state.job_manager = active_job_manager
     app.state.web_action_service = action_service
     app.state.analyzer_turn_service = analyzer_turn_service
+    app.state.analyzer_session_service = analyzer_session_service
 
     app.include_router(tasks.router)
     app.include_router(messages.router)

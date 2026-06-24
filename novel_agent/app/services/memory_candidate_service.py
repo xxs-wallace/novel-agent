@@ -119,13 +119,13 @@ class MemoryCandidateService:
             result.append(
                 {
                     "book_id": prompt_input.get("book_id"),
+                    "chapter_summary": chapter_summary,
+                    "chapter_context_text": chapter_summary["chapter_context_text"],
+                    "current_outline_segment": reduce_outline_segment,
                     "character_id": character_id,
                     "canonical_name": canonical_name,
                     "existing_profile": existing_profile,
                     "ordered_character_evidence": evidence_items,
-                    "chapter_summary": chapter_summary,
-                    "chapter_context_text": chapter_summary["chapter_context_text"],
-                    "current_outline_segment": reduce_outline_segment,
                     "reduce_policy": {
                         "same_character_must_be_reduced_serially": True,
                         "relationships_are_merged_inside_character_reduce": True,

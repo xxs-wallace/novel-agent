@@ -39,6 +39,7 @@ NARRATION_CONSISTENCY_RULES = (
     "角色内心、现场细节和离场事件的呈现方式必须与原作的信息来源习惯一致。",
     "当冻结事实、风格参考和用户输入发生冲突时，优先保持原作叙事契约与已冻结事实。",
 )
+PREVIOUS_DRAFT_REVISION_MAX_CHARS = 24_000
 
 _REQUIREMENT_STOPWORDS = {
     "包含",
@@ -117,6 +118,46 @@ def _safe_tail_excerpt(text: str, *, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return "..." + text[-limit:].lstrip()
+
+
+def _prompt_head_tail_sample(text: str, *, limit: int = 6000) -> str:
+    raw_text = str(text or "").strip()
+    max_chars = max(1000, int(limit or 6000))
+    if len(raw_text) <= max_chars:
+        return raw_text
+    marker = "\n\n[...正文中段已为写回阶段压缩省略...]\n\n"
+    half = max(400, (max_chars - len(marker)) // 2)
+    return raw_text[:half].rstrip() + marker + raw_text[-half:].lstrip()
+
+
+def _previous_draft_revision_payload(
+    text: str,
+    *,
+    draft_id: str = "",
+    limit: int = PREVIOUS_DRAFT_REVISION_MAX_CHARS,
+) -> dict[str, Any]:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return {}
+    max_chars = max(1000, int(limit or PREVIOUS_DRAFT_REVISION_MAX_CHARS))
+    truncated = len(raw_text) > max_chars
+    included_text = raw_text
+    if truncated:
+        marker = "\n\n[previous draft truncated for prompt budget]\n\n"
+        half = max(400, (max_chars - len(marker)) // 2)
+        included_text = raw_text[:half].rstrip() + marker + raw_text[-half:].lstrip()
+    return {
+        "draft_id": _normalize_text(draft_id),
+        "role": "primary_edit_base",
+        "text": included_text,
+        "chars": len(raw_text),
+        "included_chars": len(included_text),
+        "truncated": truncated,
+        "rule": (
+            "When draft_rewrite_plan.rewrite_mode is targeted_rewrite, revise this draft in place; "
+            "preserve unaffected plot, paragraph order, character actions, relationship movement, and ending hook."
+        ),
+    }
 
 
 def build_authorized_synopsis_execution_input(
@@ -457,6 +498,8 @@ class StyleReferenceBundle:
     selected_fragment_ids: list[str] = field(default_factory=list)
     references: list[StyleReferenceItem] = field(default_factory=list)
     selection_notes: str = ""
+    reference_work: dict[str, Any] = field(default_factory=dict)
+    reference_usage_policy: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -464,6 +507,8 @@ class StyleReferenceBundle:
             "selected_fragment_ids": list(self.selected_fragment_ids),
             "references": [item.to_dict() for item in self.references],
             "selection_notes": self.selection_notes,
+            "reference_work": dict(self.reference_work),
+            "reference_usage_policy": self.reference_usage_policy,
         }
 
 
@@ -711,6 +756,11 @@ class RestrictedWriterExecutor:
             length_plan=length_plan,
         )
         style_bundle = self._build_style_reference_bundle(conn, chapter_brief)
+        style_bundle = self._with_reference_style_bundle(
+            run_id=run_id,
+            base_bundle=style_bundle,
+            chapter_brief=chapter_brief,
+        )
         planned_constraints = self._build_planned_character_constraints(
             chapter_id=chapter_id,
             planned_profiles=planned_profiles,
@@ -728,6 +778,13 @@ class RestrictedWriterExecutor:
             book_id=book_id,
             before_document_title_index=title_index,
         )
+        execution_plan_context = self._build_execution_plan_context(
+            book_plan=book_plan,
+            world_pack=world_pack,
+            batch_plan=batch_plan,
+            chapter_package=chapter_package,
+            chapter_id=chapter_id,
+        )
         user_supplement = self._load_optional_run_payload(run_id, "user_supplement.json")
         if not isinstance(user_supplement, Mapping):
             user_supplement = {}
@@ -735,18 +792,10 @@ class RestrictedWriterExecutor:
             conn,
             book_id=book_id,
             chapter_brief=chapter_brief,
-            upstream_payloads={
-                "book_continuation_plan": dict(book_plan or {}),
-                "world_expansion_pack": dict(world_pack or {}),
-                "batch_plan": dict(batch_plan or {}),
-                "chapter_package": dict(chapter_package or {}),
-                "user_supplement": dict(user_supplement or {}),
-            },
+            upstream_payloads={**execution_plan_context, "user_supplement": dict(user_supplement or {})},
         )
         fact_inputs = {
-            "book_continuation_plan": dict(book_plan or {}),
-            "world_expansion_pack": dict(world_pack or {}),
-            "batch_plan": dict(batch_plan or {}),
+            **execution_plan_context,
             "chapter_package_id": str(chapter_package.get("package_id") or ""),
         }
         if recent_story_synopses:
@@ -763,6 +812,14 @@ class RestrictedWriterExecutor:
                 "Do not replay it as current chapter prose."
             )
         fact_inputs.update(character_fact_inputs)
+        fact_inputs["prompt_context_budget"] = {
+            "mode": "compressed_execution_context",
+            "fact_inputs_chars_before_audit": self._json_prompt_size(fact_inputs),
+            "policy": (
+                "The frozen plan remains authoritative in run artifacts. This prompt input carries only the "
+                "chapter-relevant execution slice needed for drafting."
+            ),
+        }
         execution_input = FrozenChapterExecutionInput(
             run_id=run_id,
             book_id=book_id,
@@ -781,6 +838,7 @@ class RestrictedWriterExecutor:
             writer_rules=[
                 "只允许承接冻结的 ChapterBrief 与上游 Freeze 事实。",
                 "事实输入优先于风格输入，风格只能影响表达不能覆盖事实。",
+                "如果 style_reference_bundle.reference_usage_policy 存在，必须遵守：参考任务片段只用于正文文笔、节奏、句式和氛围，不得继承人物、设定、桥段或事实。",
                 "不得越过当前批次边界，不得跳过关系桥接。",
                 "不得自由创建未被上游批准的关键新角色。",
                 "不得补大型新设定，只能在冻结事实范围内展开。",
@@ -876,13 +934,159 @@ class RestrictedWriterExecutor:
             payload["story_outline_evidence"] = story_lines
         return payload
 
+    def _build_execution_plan_context(
+        self,
+        *,
+        book_plan: Mapping[str, Any] | None,
+        world_pack: Mapping[str, Any] | None,
+        batch_plan: Mapping[str, Any] | None,
+        chapter_package: Mapping[str, Any],
+        chapter_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "book_continuation_plan": self._compact_book_plan_for_execution(book_plan or {}, chapter_id=chapter_id),
+            "world_expansion_pack": self._compact_prompt_value(world_pack or {}, text_limit=300, list_limit=6, max_depth=2),
+            "batch_plan": self._compact_batch_plan_for_execution(batch_plan or {}, chapter_id=chapter_id),
+            "chapter_package_context": self._compact_chapter_package_for_execution(chapter_package, chapter_id=chapter_id),
+        }
+
+    def _compact_book_plan_for_execution(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        chapter_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(plan, Mapping):
+            return {}
+        return {
+            "plan_id": str(plan.get("plan_id") or ""),
+            "continuation_goal": _safe_excerpt(str(plan.get("continuation_goal") or ""), limit=320),
+            "ending_direction": _safe_excerpt(str(plan.get("ending_direction") or ""), limit=240),
+            "target_chapter_count": plan.get("target_chapter_count"),
+            "target_total_chars": plan.get("target_total_chars"),
+            "pacing_profile": _safe_excerpt(str(plan.get("pacing_profile") or ""), limit=260),
+            "climax_plan": self._compact_prompt_value(plan.get("climax_plan") or {}, text_limit=220, list_limit=5, max_depth=2),
+            "current_chapter_slot": self._find_matching_plan_item(plan.get("chapter_outline_slots"), chapter_id=chapter_id),
+            "stage_highlights": self._compact_prompt_value(plan.get("stage_highlights") or [], text_limit=260, list_limit=4, max_depth=2),
+            "character_arcs": self._compact_prompt_value(plan.get("character_arcs") or [], text_limit=240, list_limit=7, max_depth=2),
+            "relationship_guardrails": self._compact_prompt_value(plan.get("relationship_guardrails") or [], text_limit=240, list_limit=6, max_depth=2),
+            "must_preserve": self._compact_prompt_value(plan.get("must_preserve") or [], text_limit=220, list_limit=8, max_depth=1),
+        }
+
+    def _compact_batch_plan_for_execution(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        chapter_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(plan, Mapping):
+            return {}
+        return {
+            "batch_id": str(plan.get("batch_id") or ""),
+            "batch_goal": _safe_excerpt(str(plan.get("batch_goal") or ""), limit=320),
+            "emotional_arc": _safe_excerpt(str(plan.get("emotional_arc") or ""), limit=260),
+            "conflict_arc": _safe_excerpt(str(plan.get("conflict_arc") or ""), limit=260),
+            "current_chapter_plan": self._find_matching_plan_item(plan.get("chapters"), chapter_id=chapter_id),
+            "current_chapter_slot": self._find_matching_plan_item(plan.get("chapter_outline_slots"), chapter_id=chapter_id),
+            "must_resolve": self._compact_prompt_value(plan.get("must_resolve") or [], text_limit=220, list_limit=8, max_depth=1),
+            "must_not_consume": self._compact_prompt_value(plan.get("must_not_consume") or [], text_limit=220, list_limit=8, max_depth=1),
+            "planned_character_beats": self._compact_prompt_value(
+                plan.get("planned_character_beats") or [],
+                text_limit=220,
+                list_limit=8,
+                max_depth=2,
+            ),
+            "exit_hook": _safe_excerpt(str(plan.get("exit_hook") or ""), limit=260),
+            "target_chapter_count": plan.get("target_chapter_count"),
+            "target_total_chars": plan.get("target_total_chars"),
+        }
+
+    def _compact_chapter_package_for_execution(
+        self,
+        package: Mapping[str, Any],
+        *,
+        chapter_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(package, Mapping):
+            return {}
+        return {
+            "package_id": str(package.get("package_id") or ""),
+            "batch_id": str(package.get("batch_id") or ""),
+            "package_goal": _safe_excerpt(str(package.get("package_goal") or ""), limit=280),
+            "current_chapter": self._find_matching_plan_item(package.get("chapters"), chapter_id=chapter_id),
+            "review_notes": self._compact_prompt_value(package.get("review_notes") or [], text_limit=220, list_limit=5, max_depth=1),
+        }
+
+    def _find_matching_plan_item(self, value: Any, *, chapter_id: str) -> dict[str, Any]:
+        if not isinstance(value, list):
+            return {}
+        normalized_chapter_id = str(chapter_id or "")
+        fallback: Mapping[str, Any] | None = None
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            if fallback is None:
+                fallback = item
+            candidate_ids = {
+                str(item.get("chapter_id") or ""),
+                str(item.get("id") or ""),
+                str(item.get("slot_id") or ""),
+            }
+            if normalized_chapter_id in candidate_ids:
+                return self._compact_prompt_value(item, text_limit=320, list_limit=8, max_depth=2)
+        return self._compact_prompt_value(fallback or {}, text_limit=260, list_limit=6, max_depth=2)
+
+    def _compact_prompt_value(
+        self,
+        value: Any,
+        *,
+        text_limit: int,
+        list_limit: int,
+        max_depth: int,
+        _depth: int = 0,
+    ) -> Any:
+        if isinstance(value, str):
+            return _safe_excerpt(value, limit=max(40, int(text_limit)))
+        if isinstance(value, Mapping):
+            if _depth >= max_depth:
+                return {
+                    str(key): _safe_excerpt(json.dumps(item, ensure_ascii=False), limit=max(80, int(text_limit)))
+                    for key, item in value.items()
+                }
+            return {
+                str(key): self._compact_prompt_value(
+                    item,
+                    text_limit=text_limit,
+                    list_limit=list_limit,
+                    max_depth=max_depth,
+                    _depth=_depth + 1,
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                self._compact_prompt_value(
+                    item,
+                    text_limit=text_limit,
+                    list_limit=list_limit,
+                    max_depth=max_depth,
+                    _depth=_depth + 1,
+                )
+                for item in value[: max(0, int(list_limit))]
+            ]
+        return value
+
+    @staticmethod
+    def _json_prompt_size(value: Any) -> int:
+        return len(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
     def _build_recent_story_synopses(
         self,
         conn: sqlite3.Connection,
         *,
         book_id: str,
         before_document_title_index: int,
-        limit: int = 5,
+        limit: int = 3,
     ) -> list[dict[str, Any]]:
         rows: list[sqlite3.Row] = []
         for row in self.chapters_repo.list_by_book(conn, book_id=book_id):
@@ -899,8 +1103,8 @@ class RestrictedWriterExecutor:
             {
                 "document_title_index": int(row["document_title_index"] or 0),
                 "chapter_title": str(row["chapter_title"] or ""),
-                "summary_short": _safe_excerpt(str(row["summary_short"] or ""), limit=240),
-                "summary_md": _safe_excerpt(str(row["summary_md"] or ""), limit=1200),
+                "summary_short": _safe_excerpt(str(row["summary_short"] or ""), limit=180),
+                "summary_md": _safe_excerpt(str(row["summary_md"] or ""), limit=520),
                 "summary_status": str(row["summary_status"] or ""),
                 "summary_evidence_window": str(row["summary_evidence_window"] or ""),
                 "summary_target_range": str(row["summary_target_range"] or ""),
@@ -916,7 +1120,7 @@ class RestrictedWriterExecutor:
         *,
         book_id: str,
         before_document_title_index: int,
-        max_chars: int = 1800,
+        max_chars: int = 1200,
     ) -> dict[str, Any]:
         previous_rows = [
             row
@@ -963,7 +1167,7 @@ class RestrictedWriterExecutor:
         *,
         book_id: str,
         matcher_text: str,
-        limit: int = 8,
+        limit: int = 6,
     ) -> list[dict[str, Any]]:
         scored: list[tuple[int, int, dict[str, Any]]] = []
         for row in self.character_profiles_repo.list_by_book(conn, book_id=book_id):
@@ -978,29 +1182,29 @@ class RestrictedWriterExecutor:
             score = sum(3 if name == profile.get("canonical_name") else 2 for name in matched_names)
             importance = int(profile.get("importance_score") or 0)
             prompt_profile = self._prompt_character_profile(profile, matcher_text=matcher_text)
-            prompt_profile["matched_names"] = matched_names[:12]
+            prompt_profile["matched_names"] = matched_names[:6]
             scored.append((score, importance, prompt_profile))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return [item[2] for item in scored[:limit]]
 
     def _prompt_character_profile(self, profile: Mapping[str, Any], *, matcher_text: str) -> dict[str, Any]:
-        aliases = _normalize_string_list(profile.get("aliases"))[:12]
+        aliases = _normalize_string_list(profile.get("aliases"))[:6]
         relationships = self._prompt_relationship_facts(profile, matcher_text=matcher_text)
-        recent_activity = self._prompt_profile_items(profile.get("recent_activity"), limit=6)
-        story_events, story_events_page = self._prompt_story_events(profile.get("story_events"), matcher_text=matcher_text, limit=6)
+        recent_activity = self._prompt_profile_items(profile.get("recent_activity"), limit=2)
+        story_events, story_events_page = self._prompt_story_events(profile.get("story_events"), matcher_text=matcher_text, limit=2)
         return {
             "canonical_name": str(profile.get("canonical_name") or ""),
             "aliases": aliases,
             "evidence_level": str(profile.get("evidence_level") or ""),
             "speaking_character_status": str(profile.get("speaking_character_status") or ""),
-            "profile_summary_md": _safe_excerpt(str(profile.get("profile_summary_md") or ""), limit=1200),
+            "profile_summary_md": _safe_excerpt(str(profile.get("profile_summary_md") or ""), limit=500),
             "relationships": relationships,
             "recent_activity": recent_activity,
             "story_events": story_events,
             "story_events_page": story_events_page,
         }
 
-    def _prompt_relationship_facts(self, profile: Mapping[str, Any], *, matcher_text: str, limit: int = 12) -> list[dict[str, Any]]:
+    def _prompt_relationship_facts(self, profile: Mapping[str, Any], *, matcher_text: str, limit: int = 4) -> list[dict[str, Any]]:
         relationships = [item for item in (profile.get("relationships") or []) if isinstance(item, Mapping)]
         names = [
             str(profile.get("canonical_name") or ""),
@@ -1014,7 +1218,7 @@ class RestrictedWriterExecutor:
             payload = {
                 "target_name": str(item.get("target_name") or item.get("target_character") or ""),
                 "relation_type": str(item.get("relation_type") or ""),
-                "status_summary": _safe_excerpt(str(item.get("status_summary") or item.get("status") or summary), limit=360),
+                "status_summary": _safe_excerpt(str(item.get("status_summary") or item.get("status") or summary), limit=180),
                 "evidence_level": str(item.get("evidence_level") or ""),
                 "source_chapter_indexes": item.get("source_chapter_indexes") or [],
             }
@@ -1033,10 +1237,10 @@ class RestrictedWriterExecutor:
                 payload = dict(item)
                 for key in ("value", "summary", "status_summary"):
                     if key in payload:
-                        payload[key] = _safe_excerpt(str(payload.get(key) or ""), limit=360)
+                        payload[key] = _safe_excerpt(str(payload.get(key) or ""), limit=180)
                 cleaned.append(payload)
             else:
-                text = _safe_excerpt(str(item), limit=360)
+                text = _safe_excerpt(str(item), limit=180)
                 if text:
                     cleaned.append(text)
             if len(cleaned) >= limit:
@@ -1069,7 +1273,7 @@ class RestrictedWriterExecutor:
             token
             for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", matcher_text)
             if token
-        ][:80]
+        ][:60]
         scored: list[tuple[int, int, Mapping[str, Any]]] = []
         for index, item in enumerate(items):
             rendered = json.dumps(item, ensure_ascii=False)
@@ -1118,16 +1322,18 @@ class RestrictedWriterExecutor:
         *,
         book_id: str,
         terms: list[str],
-        limit: int = 24,
+        limit: int = 12,
     ) -> list[str]:
         if not terms:
             return []
         assets = self.assets_repo.get(conn, book_id=book_id)
         outline_path_text = str(assets["outline_markdown_path"] or "") if assets is not None else ""
+        if not outline_path_text.strip():
+            return []
         path = Path(outline_path_text)
         if not path.is_absolute():
             path = self.repo_root / path
-        if not path.exists():
+        if not path.exists() or not path.is_file():
             return []
         lines: list[str] = []
         seen: set[str] = set()
@@ -1137,7 +1343,7 @@ class RestrictedWriterExecutor:
                 continue
             if not any(term and term in line for term in terms):
                 continue
-            compact = _safe_excerpt(line, limit=700)
+            compact = _safe_excerpt(line, limit=360)
             if compact in seen:
                 continue
             seen.add(compact)
@@ -1206,6 +1412,11 @@ class RestrictedWriterExecutor:
         rewrite_plan = self._load_optional_run_payload(run_id, "draft_rewrite_plan.json")
         if isinstance(rewrite_plan, Mapping):
             execution_input["draft_rewrite_plan"] = dict(rewrite_plan)
+        if rewrite_feedback:
+            execution_input["previous_draft_for_revision"] = _previous_draft_revision_payload(
+                previous_draft_md,
+                draft_id=str(rewrite_feedback.get("draft_id") or ""),
+            )
         self.run_writer.write_json(run_id, "chapter_execution_input.json", execution_input)
         self.run_writer.write_freeze_record(
             run_id,
@@ -1538,6 +1749,7 @@ class RestrictedWriterExecutor:
     def _build_execution_prompt(self, execution_input: Mapping[str, Any]) -> dict[str, str]:
         chapter_brief = dict(execution_input.get("chapter_brief") or {})
         length_budget = dict(execution_input.get("length_budget") or {})
+        draft_prompt_view = self._draft_prompt_view(execution_input)
         reference_document_synopses = chapter_brief.get("reference_document_synopses")
         if not isinstance(reference_document_synopses, list):
             structure_hint = chapter_brief.get("structure_hint")
@@ -1602,6 +1814,9 @@ class RestrictedWriterExecutor:
                 "chapter_brief.must_include 主要是连续性校验锚点，coverage_plot_beats 才是完整剧情覆盖目标。"
                 "如果输入包含 draft_context，必须优先使用其中摘取的 confirmed/candidate evidence 约束事实、人物和关系。"
                 "如果输入包含 draft_rewrite_plan，必须按 preserve/remove_or_change/must_not_change 受控重写。"
+                "如果输入包含 previous_draft_for_revision 且 rewrite_mode=targeted_rewrite，必须把上一版草稿作为主要修订基底，"
+                "默认保留未被反馈触及的剧情、段落顺序、人物行动、关系推进和结尾 hook。"
+                "只有 rewrite_mode 明确为 full_rewrite 或 regenerate_from_brief 时，才允许放弃上一版草稿重新生成。"
                 "如果输入包含 draft_feedback 或 draft_rewrite_requests，必须优先按反馈修订当前草稿。"
                 "只输出正文，不要解释。"
             ),
@@ -1612,14 +1827,15 @@ class RestrictedWriterExecutor:
                     "length_budget": length_budget,
                     "expansion_guidance": expansion_guidance,
                     "narration_consistency_rules": list(NARRATION_CONSISTENCY_RULES),
-                    "fact_inputs": execution_input.get("fact_inputs"),
-                    "draft_context": execution_input.get("draft_context"),
-                    "style_reference_bundle": execution_input.get("style_reference_bundle"),
+                    "fact_inputs": draft_prompt_view.get("fact_inputs"),
+                    "draft_context": draft_prompt_view.get("draft_context"),
+                    "style_reference_bundle": draft_prompt_view.get("style_reference_bundle"),
                     "planned_character_constraints": execution_input.get("planned_character_constraints"),
                     "user_supplement": execution_input.get("user_supplement"),
                     "user_supplements": execution_input.get("user_supplements"),
                     "forbidden_inputs": execution_input.get("forbidden_inputs"),
                     "writer_rules": execution_input.get("writer_rules"),
+                    "previous_draft_for_revision": execution_input.get("previous_draft_for_revision"),
                     "draft_rewrite_plan": execution_input.get("draft_rewrite_plan"),
                     "draft_feedback": execution_input.get("draft_feedback"),
                     "draft_rewrite_requests": execution_input.get("draft_rewrite_requests"),
@@ -1628,6 +1844,106 @@ class RestrictedWriterExecutor:
                 indent=2,
             ),
         }
+
+    def _draft_prompt_view(self, execution_input: Mapping[str, Any]) -> dict[str, Any]:
+        fact_inputs = self._draft_prompt_fact_inputs(dict(execution_input.get("fact_inputs") or {}))
+        draft_context = self._compact_prompt_value(
+            execution_input.get("draft_context") or {},
+            text_limit=240,
+            list_limit=5,
+            max_depth=2,
+        )
+        style_bundle = self._draft_prompt_style_bundle(dict(execution_input.get("style_reference_bundle") or {}))
+        return {
+            "fact_inputs": fact_inputs,
+            "draft_context": draft_context,
+            "style_reference_bundle": style_bundle,
+        }
+
+    def _draft_prompt_fact_inputs(self, fact_inputs: Mapping[str, Any]) -> dict[str, Any]:
+        payload = {
+            key: value
+            for key, value in dict(fact_inputs).items()
+            if key
+            not in {
+                "prompt_context_budget",
+            }
+        }
+        if "character_profiles" in payload:
+            payload["character_profiles"] = self._draft_prompt_character_profiles(payload.get("character_profiles"))
+        if "recent_story_synopses" in payload:
+            payload["recent_story_synopses"] = self._compact_prompt_value(
+                payload.get("recent_story_synopses") or [],
+                text_limit=220,
+                list_limit=2,
+                max_depth=2,
+            )
+        if "previous_accepted_chapter_tail_excerpt" in payload:
+            tail = dict(payload.get("previous_accepted_chapter_tail_excerpt") or {})
+            tail["excerpt"] = _safe_tail_excerpt(str(tail.get("excerpt") or ""), limit=800)
+            payload["previous_accepted_chapter_tail_excerpt"] = tail
+        if "story_outline_evidence" in payload:
+            payload["story_outline_evidence"] = self._compact_prompt_value(
+                payload.get("story_outline_evidence") or [],
+                text_limit=240,
+                list_limit=6,
+                max_depth=1,
+            )
+        return self._compact_prompt_value(payload, text_limit=300, list_limit=8, max_depth=3)
+
+    def _draft_prompt_character_profiles(self, value: Any) -> list[dict[str, Any]]:
+        profiles = [dict(item) for item in (value if isinstance(value, list) else []) if isinstance(item, Mapping)]
+        selected: list[dict[str, Any]] = []
+        for profile in profiles[:4]:
+            selected.append(
+                {
+                    "canonical_name": str(profile.get("canonical_name") or ""),
+                    "aliases": _normalize_string_list(profile.get("aliases"))[:3],
+                    "matched_names": _normalize_string_list(profile.get("matched_names"))[:3],
+                    "profile_summary_md": _safe_excerpt(str(profile.get("profile_summary_md") or ""), limit=260),
+                    "relationships": self._compact_prompt_value(
+                        profile.get("relationships") or [],
+                        text_limit=140,
+                        list_limit=2,
+                        max_depth=2,
+                    ),
+                    "recent_activity": self._compact_prompt_value(
+                        profile.get("recent_activity") or [],
+                        text_limit=140,
+                        list_limit=1,
+                        max_depth=2,
+                    ),
+                    "story_events": self._compact_prompt_value(
+                        profile.get("story_events") or [],
+                        text_limit=140,
+                        list_limit=1,
+                        max_depth=2,
+                    ),
+                }
+            )
+        return selected
+
+    def _draft_prompt_style_bundle(self, style_bundle: Mapping[str, Any]) -> dict[str, Any]:
+        payload = dict(style_bundle or {})
+        if "scene_brief" in payload:
+            payload["scene_brief"] = self._compact_prompt_value(
+                payload.get("scene_brief") or {},
+                text_limit=240,
+                list_limit=6,
+                max_depth=2,
+            )
+        if "references" in payload:
+            references = []
+            for item in payload.get("references") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                ref = dict(item)
+                ref["excerpt"] = _safe_excerpt(str(ref.get("excerpt") or ""), limit=700)
+                references.append(ref)
+                if len(references) >= 2:
+                    break
+            payload["references"] = references
+        return self._compact_prompt_value(payload, text_limit=260, list_limit=6, max_depth=3)
 
     def _fallback_draft(
         self,
@@ -1895,7 +2211,7 @@ class RestrictedWriterExecutor:
                     "chapter_brief": dict(execution_input.get("chapter_brief") or {}),
                     "chapter_title": str(execution_input.get("chapter_title") or ""),
                     "document_title_index": execution_input.get("document_title_index"),
-                    "draft_text": _safe_excerpt(draft_text, limit=12_000),
+                    "draft_text": _prompt_head_tail_sample(draft_text, limit=6_000),
                     "fallback_shape": fallback,
                 },
                 ensure_ascii=False,
@@ -2371,13 +2687,21 @@ class RestrictedWriterExecutor:
             *scene_brief.preferred_tags,
         ]
         query_text = " ".join(item for item in query_terms if item).strip()
-        fts_hits = self.fragment_cards_repo.search_fts(conn, query_text=query_text, limit=12)
-        fragment_ids = [item.fragment_id for item in fts_hits]
-        cards = self.fragment_cards_repo.list_by_fragment_ids(conn, fragment_ids=fragment_ids)
-        if not cards:
-            cards = self.fragment_cards_repo.list_representatives(conn)[:8]
-        cluster_ids = [card.cluster_id for card in cards if card.cluster_id]
-        clusters = self.fragment_clusters_repo.list_by_cluster_ids(conn, cluster_ids=list(dict.fromkeys(cluster_ids)))
+        try:
+            fts_hits = self.fragment_cards_repo.search_fts(conn, query_text=query_text, limit=12)
+            fragment_ids = [item.fragment_id for item in fts_hits]
+            cards = self.fragment_cards_repo.list_by_fragment_ids(conn, fragment_ids=fragment_ids)
+            if not cards:
+                cards = self.fragment_cards_repo.list_representatives(conn)[:8]
+            cluster_ids = [card.cluster_id for card in cards if card.cluster_id]
+            clusters = self.fragment_clusters_repo.list_by_cluster_ids(conn, cluster_ids=list(dict.fromkeys(cluster_ids)))
+        except sqlite3.OperationalError:
+            return StyleReferenceBundle(
+                scene_brief=scene_brief.to_dict(),
+                selected_fragment_ids=[],
+                references=[],
+                selection_notes="Creative KB is not available for the current task.",
+            )
         coarse = self.coarse_retrieval_service.retrieve(
             scene_brief=scene_brief,
             fragment_cards=cards,
@@ -2413,6 +2737,65 @@ class RestrictedWriterExecutor:
             references=references,
             selection_notes=rerank.selection_notes,
         )
+
+    def _with_reference_style_bundle(
+        self,
+        *,
+        run_id: str,
+        base_bundle: StyleReferenceBundle,
+        chapter_brief: Mapping[str, Any],
+    ) -> StyleReferenceBundle:
+        reference_work = self._reference_work_for_run(run_id)
+        source_task_id = _normalize_text(reference_work.get("source_task_id"))
+        if not source_task_id:
+            return base_bundle
+        db_path = self.repo_root / ".indexes" / f"{source_task_id}.db"
+        if not db_path.exists():
+            return base_bundle
+        try:
+            with sqlite3.connect(db_path) as reference_conn:
+                reference_conn.row_factory = sqlite3.Row
+                reference_bundle = self._build_style_reference_bundle(reference_conn, chapter_brief)
+        except sqlite3.Error:
+            return base_bundle
+        references = [*base_bundle.references, *reference_bundle.references]
+        selected_fragment_ids = [
+            *base_bundle.selected_fragment_ids,
+            *[
+                fragment_id
+                for fragment_id in reference_bundle.selected_fragment_ids
+                if fragment_id not in set(base_bundle.selected_fragment_ids)
+            ],
+        ]
+        bundle = StyleReferenceBundle(
+            scene_brief=dict(base_bundle.scene_brief),
+            selected_fragment_ids=selected_fragment_ids,
+            references=references[:8],
+            selection_notes="; ".join(
+                item
+                for item in (
+                    base_bundle.selection_notes,
+                    f"Reference style fragments loaded from task {source_task_id}.",
+                )
+                if item
+            ),
+            reference_work=dict(reference_work),
+            reference_usage_policy=(
+                "Reference fragments are available only at final prose generation for style imitation: "
+                "sentence rhythm, dialogue texture, detail density, atmosphere, and pacing. "
+                "Do not inherit reference characters, facts, worldbuilding, plot events, names, or relationships."
+            ),
+        )
+        return bundle
+
+    def _reference_work_for_run(self, run_id: str) -> dict[str, Any]:
+        manifest = self._load_optional_run_payload(run_id, "original_creation_task_manifest.json")
+        if isinstance(manifest, Mapping) and isinstance(manifest.get("reference_work"), Mapping):
+            return dict(manifest["reference_work"])
+        intent = self._load_optional_run_payload(run_id, "continuation_intent.json")
+        if isinstance(intent, Mapping) and isinstance(intent.get("reference_work"), Mapping):
+            return dict(intent["reference_work"])
+        return {}
 
     def _build_planned_character_constraints(
         self,
@@ -2532,7 +2915,7 @@ class RestrictedWriterExecutor:
         user_prompt = json.dumps(
             {
                 "requirements": normalized_requirements,
-                "draft_text": draft_text[:18000],
+                "draft_text": _prompt_head_tail_sample(draft_text, limit=6_000),
                 "output_schema": {
                     "coverage": [
                         {
@@ -2727,7 +3110,7 @@ class RestrictedWriterExecutor:
         }
 
     def _chapter_target_chars(self, chapter_brief: Mapping[str, Any]) -> int:
-        return max(1, int(chapter_brief.get("target_word_count") or 1200) * 2)
+        return max(1, int(chapter_brief.get("target_word_count") or 1200))
 
     def _collect_forbidden_inputs(
         self,

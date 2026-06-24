@@ -49,14 +49,16 @@ Writer 的核心不是用流程编排器把用户推过一串固定确认点，�
 - **模型主导下一步**：当信息不足时，模型返回结构化 tool call；Agent 负责执行本地查询或用户交互，不用固定流程替模型猜测。
 - **artifact 是协作界面**：全书规划、批次计划、章节梗概、章节草稿和写回摘要都是可审阅、可修改、可恢复的 artifact。
 - **用户输入是 prompt 材料**：用户通过 artifact 时的补充信息会原文保留，并作为下一轮模型输入；用户拒绝 artifact 时的调整信息会驱动模型修订 artifact。
+- **借鉴对象只提供建议和风格**：在“借鉴对象引导创作”模式中，借鉴对象的精读大纲、剧情设计和结构模式可进入大纲 prompt loop，用来给用户的大纲和人物设定提建议；借鉴对象的原作事实不得进入新任务 canon，真正的文风仿写只在正文执行阶段作为 style reference 生效。
 
 ## 3. 核心流程
 
 ```mermaid
 flowchart TD
     A["用户意图 / Memory / KB / runs artifacts"] --> B["Agent Loop"]
+    A2["可选借鉴对象: 精读大纲 / 剧情设计 / Creative KB"] --> B
     B --> C{"模型是否需要更多信息?"}
-    C -->|本地资料| D["story_detail / character_profile / world_concept / structure_pattern"]
+    C -->|本地资料| D["story_detail / character_profile / world_concept / structure_pattern / reference_outline_design"]
     D --> E["Context Broker 查询 Memory / KB / artifacts"]
     E --> B
     C -->|用户授权或知识| F["WriterQuestionSet"]
@@ -69,7 +71,9 @@ flowchart TD
     I -->|稍后继续| K["halted / recoverable"]
     J -->|全书 / 批次 / 人物 / 设定规划| B
     J -->|章节标题与梗概| L["Draft Research Loop"]
-    L -->|需要资料| D
+    L -->|需要事实资料| D
+    L -->|需要文风参考| R["Creative KB style references"]
+    R --> L
     L -->|需要用户补充| F
     L -->|事实足够| M["Draft Prose Executor 生成章节正文"]
     M --> N["连续性检查"]
@@ -99,6 +103,10 @@ flowchart TD
 
 大纲生成不应由编排器一次性把所有 Memory 拼进 prompt。正确做法是先给模型轻量索引，让模型主动提出自己需要了解的故事细节、人物档案或世界观概念，再由本地 Agent 翻译成 SQLite / Markdown / Memory 查询。
 
+本文中的“大纲 prompt loop”“outline prompt loop”和口语化的“outline-researcher 流程”均指同一条正式流程：`Outline Research Loop`。借鉴对象引导创作不是新增第二套大纲 loop，而是给既有 Outline Research Loop 增加新的只读参考资源、建议生成能力和用户取舍记录。
+
+在借鉴对象引导创作模式中，大纲研究循环同时承担“创作顾问”的职责。系统可以把借鉴对象的精读大纲、剧情设计摘要、`SourceArcMap`、`NarrativeStructurePattern` / `ArcPatternCard` 和 Creative KB 结构信息作为只读参考索引交给模型，让模型对用户自己的大纲提出方向建议。此时 reference evidence 的语义是 `reference_advice`，只说明“可借鉴的设计经验”，不说明新故事中已经确认发生了什么。
+
 初始输入称为 `OutlineSeedPacket`，只提供索引入口：
 
 - 用户续写意图、故事规模、节奏偏好和高潮约束
@@ -108,14 +116,16 @@ flowchart TD
 - 世界观重要概念名词索引
 - 已有故事精炼总览：每部小说的大致内容、起止时间和当前续写起点
 - 可选的未决伏笔、悬念或源作品结构位置标题级索引
+- 可选的借鉴对象大纲与剧情设计摘要、结构模式索引和风格参考策略
 
 模型可在多轮中返回四类核心请求：
 
 - `story_detail`：用一句自然语言说明想进一步了解的故事细节。
-- `text_search`：grep-like 词面定位；按关键词交集 / 并集在 root summary、人物档案、outline segment、章节摘要、index card 和受限 document scope 中定位候选章节或 source_doc_ids。
+- `text_search`：grep-like 词面定位；按关键词交集 / 并集在 root summary、人物档案、outline segment、章节摘要、index card 和受限 document scope 中定位候选章节或 source_doc_ids；document scope 的 snippet 应围绕共同命中窗口或最紧凑匹配窗口截取，避免返回只包含较早宽泛词的片段。
 - `character_profile`：按人名请求人物当前状态、能力边界、关系状态和最近变化。
 - `world_concept`：按概念名词请求规则、限制、代价、例外和禁止突破点。
 - `structure_pattern`：请求与当前写作目标匹配的结构模式或篇章节奏参考。
+- `reference_outline_design`：在借鉴对象引导创作模式下，请求借鉴对象的大纲设计、高潮布局、人物功能配置、铺垫回收方式或篇章节奏经验，用于提出方向建议，不得作为新任务事实。
 
 本地 `Context Broker` 负责把这些语义请求转换为可执行检索，并返回裁剪后的 evidence。模型每轮判断信息是否足够；若不足以靠本地资料解决，则向用户提出少量关键问题。
 
@@ -129,6 +139,15 @@ Memory Query 属于 Writer Prompt Loop 的工具调用能力，而不是只在�
 
 高风险事项，例如终局秘密、主要人物身份、关系跃迁、世界规则突破和新增人物是否成立，不得被模型静默假设。用户补充后的回答应作为 `user_authorized` evidence 进入 planning notebook，再继续一小轮 research 或直接生成大纲。
 
+Agent 给出的方向建议和用户回答应留在同一个 prompt loop 中，而不是另起一个独立问卷流程。建议可以表现为可审阅 artifact，也可以表现为结构化 `WriterQuestionSet`；只有用户明确采纳、修改或回答后的内容，才能作为 `user_authorized` planning material 进入后续全书规划、人物补充、批次规划和章节梗概。
+
+`needs_user_input` 暂停时，Writer SHOULD 同步保存一个内部 `outline_research_resume_context.json`
+或等价结构化 payload。该 payload 汇总 `SufficiencyDecision`、当前 `planning_notebook`、
+问题集和恢复策略，用于表达“为什么暂停”和“用户回答后如何继续”。它不是新的跨层用户 contract，
+不得替代 `OutlineResearchQuestionSet` / `OutlineResearchAnswerSubmission`，也不得保存模型完整思维链。
+用户回答后，系统 SHOULD 更新同一 resume context，记录已回答问题、写入 notebook 的
+`user_authorized` facts、恢复后状态，以及是否仍有新的 blocking gap。
+
 ### Web / Chat UI 协作边界
 
 Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 Writer 层必须输出可绑定的结构化问题集，而不是要求 Web 从自然语言日志中猜测状态。
@@ -139,6 +158,9 @@ Outline Research Loop 的用户补充问题可以通过聊天消息承载，但 
 - 继续执行必须通过 `continue_after_outline_research_input` 或等价结构化 action。payload 可同时包含自然语言 `answer_text` 和逐题 `user_answers[]`。
 - 若只有 `answer_text`，Writer 层只做最小映射并保留原文；不得编造未回答问题，不得把普通聊天当作用户授权。
 - 用户回答进入 planning notebook 时来源类型为 `user_authorized`，随后 workflow 决定继续一小轮 research、进入 `proceed_with_assumptions`，或生成规划产物。
+- 恢复 prompt 只能消费 `planning_notebook`、committed evidence、问题集、用户回答和
+  `outline_research_resume_context` 中的结构化结论；不得把 debug trace 或模型 scratchpad
+  作为隐藏事实注入下一轮。
 
 详细请求格式、`Story Detail Resolver`、剧情段落索引要求和 research budget 见 [`designs/outline-research-loop.design.md`](designs/outline-research-loop.design.md)。
 
@@ -176,6 +198,8 @@ review gate 的记录至少包含：
 
 正文 writer 仍然受分层边界约束：它不能自由改写全书方向、批次目标、章节核心因果、关键设定或关系跃迁。但它不再被限制为一次性消费固定 prompt；它可以在正文生成前主动查询和摘取必要 evidence。
 
+在借鉴对象引导创作模式中，“仿写”仅在本阶段生效。Draft Research Loop 可以根据已通过的 `ChapterBrief -> SceneBrief` 从借鉴对象 Creative KB 中检索风格、节奏、情绪机制、对白密度、叙述距离或场景展开方式；Draft Prose Executor 只能把这些内容当作 `style_reference_bundle`，不得据此改写上游大纲、人物设定或世界观事实。
+
 ### 6.1 Draft Research Loop
 
 章节梗概通过后，Agent 先构建轻量 `DraftSeedPacket`，而不是直接把所有 Memory 拼入 prompt。Seed packet 至少包含：
@@ -190,7 +214,9 @@ review gate 的记录至少包含：
 模型在 Draft Research Loop 中可以返回结构化请求：
 
 - `character_profile`：按 `character_id` 优先查询人物基础属性、当前状态、关系、称谓、能力边界和可展开的关键经历索引。
-- `text_search`：当需要先定位历史细节、人物共同经历、伏笔、称谓、原文线索或关键词交集时，模型可请求词面定位，并用 `terms`、`match_mode`、`scopes` 表达查询；定位失败分支只保留 trace，不进入 notebook 事实。
+- `text_search`：当需要先定位历史细节、人物共同经历、伏笔、称谓、原文线索或关键词交集时，模型可请求词面定位，并用 `terms`、`match_mode`、`scopes` 表达查询；`match_mode=all` 表示 AND / 交集，`match_mode=any` 表示 OR / 并集；document scope 返回紧凑命中窗口 snippet 与 source doc ids，不默认返回完整 document；定位失败分支只保留 trace，不进入 notebook 事实。
+- 对 text_search 命中的对象、话语、线索、消息或道具，模型必须区分“内容已定位”和“事件生命周期已确认”。如果后续写作判断依赖该对象是否被发送、收到、说出、兑现、使用、公开、撤回或产生影响，而当前 snippet 只覆盖草稿、计划、犹豫、取消或早期状态，Draft Research Loop 应继续读取后续候选 source doc、翻页，或用内容词加动作/结果词重新检索，不得把早期状态当作最终状态。
+- 用户输入中的动作、关系、对象、时间或结果限定属于证据要求，不能被静默降级为更弱的准备/计划状态。若已获得高精度原句、标题、编号、独特称谓或内容短语，应优先用该短语继续做 document text_search，定位重复出现、后续兑现或结果场景。
 - `character_experience`：按 `experience_id`、`outline_segment_id`、`source_doc_ids` 或 `source_doc_range` 展开某个人物关键经历；当模型需要浏览人物经历时间线而非命中单个关键词时，可使用 `metadata.story_events_offset` / `metadata.story_events_char_budget` 分页读取，单页不超过 4096 字符。
 - `story_detail`：查询与本章事实、因果、伏笔或早期剧情相关的历史细节。
 - `chapter_excerpt`：按 `document_title_index`、`doc_id` 或 `source_doc_range` 请求原始正文摘录。
@@ -237,16 +263,21 @@ Draft Prose Executor 是新的受限正文执行器，替代旧的固定 prompt 
 
 最终正文 prompt 应由 Writer 层统一组装，目标是“证据更全但更精炼”：只携带 Draft Research Loop 选中的必要事实、摘取笔记、来源摘要和写作约束，不把完整人物档案、完整检索上下文或大量原文一次性塞入 prompt。
 
-### 6.3 草稿重写
+### 6.3 草稿修订与重新生成梗概
 
-用户不接受草稿时，`GenerationReviewDecision.feedback_text` 先进入 Draft Research Loop，而不是直接拼入旧正文 prompt。Loop 必须先判断反馈类型：
+用户不接受草稿时，系统必须先区分两个产品动作：
+
+- **基于反馈修改正文**：当前章节的剧情方向、核心事件和结尾 hook 基本可用，用户只要求修正文风、节奏、详略、对白、局部事实、人物声音或少量场景呈现。该动作属于正文层 revision，不得默认丢弃上一版草稿。
+- **重新生成章节梗概**：用户认为本章“应该发生什么”不对，或反馈指向章节因果、scene beats、上游规划冲突。该动作属于回到 `ChapterBrief` / `ChapterPackage` 层的重新规划；修订后的梗概必须重新进入章节梗概 review gate，用户确认后才重新准备正文输入并生成草稿。
+
+`GenerationReviewDecision.status = rewrite_requested` 表示“基于反馈修改正文”。其 `feedback_text` 先进入 Draft Research Loop，而不是直接拼入旧正文 prompt。Loop 必须加载当前已通过的 `ChapterBrief`、上一版 `draft.md`、`continuity_report.json`、`draft_context_notebook.json` 和执行输入，并先判断反馈类型：
 
 - `prose_only`：文风、节奏、详略、对白密度等表达层问题，通常可复用现有 notebook。
 - `scene_emphasis`：需要调整重点场景、展开比例或情绪重心。
 - `continuity_fix`：用户指出事实、时间线、伏笔或设定冲突，需要查询 Memory。
 - `character_voice_fix`：人物声音、称谓、关系、身份或行为边界不对，需要查询人物档案或人物经历。
-- `structure_fix`：章节顺序、因果桥接或 scene beats 不成立，可能需要回章节梗概层。
-- `upstream_conflict`：已通过 `ChapterBrief` 与 canon 冲突，必须返回 `replan_requested`。
+- `structure_fix`：章节顺序、因果桥接或 scene beats 不成立，通常需要回章节梗概层。
+- `upstream_conflict`：已通过 `ChapterBrief` 与 canon 冲突，必须返回 `replan_required` / `replan_requested`。
 
 Draft Research Loop 应生成或更新 `draft_rewrite_plan.json`，明确：
 
@@ -257,7 +288,22 @@ Draft Research Loop 应生成或更新 `draft_rewrite_plan.json`，明确：
 - 不得改变的上游约束
 - 是否需要用户补充或回到章节梗概 review gate
 
-Draft Prose Executor 根据 `draft_rewrite_plan.json` 生成新版完整草稿或受控局部重写结果。未被用户接受的旧草稿和新版草稿都只保留为运行产物，不得写回 Memory。
+Rewrite mode 的默认语义：
+
+- `targeted_rewrite` 是 `prose_only`、`scene_emphasis` 和局部 `character_voice_fix` 的默认选择。Executor 必须把上一版正文当作 primary edit base，默认保留未被反馈触及的剧情、段落顺序、人物行动、关系推进和结尾 hook。
+- `full_rewrite` 只用于当前草稿整体表达或连续性大面积不可用，但仍可在当前已通过 `ChapterBrief` 内完成的场景。
+- `regenerate_from_brief` 表示放弃旧稿，但仍沿用当前已通过 `ChapterBrief` 重新生成正文；只有当 rewrite plan 明确选择该模式时才允许。
+- `replan_required` 表示正文层无法解决，必须回到章节梗概 review gate。
+
+Draft Prose Executor 根据 `draft_rewrite_plan.json` 输出新版完整草稿，但当 mode 是 `targeted_rewrite` 时，内部行为必须是“修订上一版草稿”而不是 fresh draft。Executor prompt 必须包含受控的 `previous_draft_for_revision`，并明确：
+
+- 上一版草稿是主要修订基底。
+- 用户反馈、rewrite plan、补充范文或 Creative KB 风格参考只作为 patch / style guidance。
+- 未列入 `remove_or_change` 的段落和剧情功能默认保留。
+- 若只要求文风优化，不得重构剧情或新增未授权事件。
+- 输出仍为完整新版正文，便于后续审阅和写回。
+
+`GenerationReviewDecision.status = replan_requested` 表示“重新生成章节梗概”。Workflow 应将用户反馈作为 `ChapterPackage` / `ChapterBrief` 的 `revision_feedback`，回到章节梗概审阅节点，而不是把它当成正文 rewrite。未被用户接受的旧草稿和新版草稿都只保留为运行产物，不得写回 Memory。
 
 ### 6.4 ChapterBrief 人物索引
 
@@ -431,6 +477,10 @@ Writer 层新增对象不得重定义 MVP 跨层 contract：
 - `memory_query_trace.json`
 - `memory_query_decision_log.json`
 - `planning_notebook.json`
+- `original_creation_task_manifest.json`
+- `reference_outline_design_digest.json`
+- `outline_guidance_notebook.json`
+- `style_imitation_policy.json`
 - `book_continuation_plan.json`
 - `world_expansion_pack.json`
 - `character_requirement_report.json`

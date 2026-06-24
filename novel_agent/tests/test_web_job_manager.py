@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -129,6 +131,126 @@ def test_job_manager_failure_event_preserves_traceback_for_task_details(tmp_path
         assert manager._records[summary.job_id].result["traceback"] == error_event.payload["traceback"]  # noqa: SLF001
 
     asyncio.run(run())
+
+
+def test_job_manager_recovers_interrupted_persisted_job_as_failed(tmp_path: Path) -> None:
+    job_dir = tmp_path / "runs" / "web_jobs" / "job-interrupted"
+    job_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc).isoformat()
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "job_id": "job-interrupted",
+                "task_id": "book-one",
+                "type": "close_read",
+                "status": "running",
+                "payload": {"action": "start_close_read"},
+                "message": "后台任务正在运行",
+                "cancel_requested": False,
+                "created_at": now,
+                "updated_at": now,
+                "result": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_id": "000001",
+                        "job_id": "job-interrupted",
+                        "kind": "queued",
+                        "message": "任务已加入后台队列",
+                        "payload": {"task_id": "book-one", "type": "close_read"},
+                        "created_at": now,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "event_id": "000002",
+                        "job_id": "job-interrupted",
+                        "kind": "running",
+                        "message": "后台任务正在运行",
+                        "payload": {},
+                        "created_at": now,
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    manager = JobManager(repo_root=tmp_path)
+
+    summary = manager.summary("job-interrupted")
+    assert summary.status == "failed"
+    assert summary.task_id == "book-one"
+    assert summary.type == "close_read"
+    error_events = [event for event in manager.events("job-interrupted") if event.kind == "error"]
+    assert len(error_events) == 1
+    assert error_events[0].payload["error_type"] == "ServiceInterrupted"
+    assert "web_launcher.log" in error_events[0].payload["recovery_suggestion"]
+
+    reloaded = JobManager(repo_root=tmp_path)
+    assert reloaded.summary("job-interrupted").status == "failed"
+    assert len([event for event in reloaded.events("job-interrupted") if event.kind == "error"]) == 1
+
+
+def test_job_manager_recovers_legacy_close_read_event_log_as_failed(tmp_path: Path) -> None:
+    job_dir = tmp_path / "runs" / "web_jobs" / "legacy-job"
+    job_dir.mkdir(parents=True)
+    pipeline_dir = tmp_path / "runs" / "web_pipeline" / "book-one"
+    pipeline_dir.mkdir(parents=True)
+    (pipeline_dir / "read_legacy-job.md").write_text("# debug\n", encoding="utf-8")
+    now = datetime.now(timezone.utc).isoformat()
+    (job_dir / "events.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "event_id": "000001",
+                        "job_id": "legacy-job",
+                        "kind": "queued",
+                        "message": "任务已加入后台队列",
+                        "payload": {"type": "close_read", "request_payload": {"action": "start_close_read"}},
+                        "created_at": now,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "event_id": "000002",
+                        "job_id": "legacy-job",
+                        "kind": "progress",
+                        "message": "正在调用模型：人物证据",
+                        "payload": {"stage": "close_reading", "event": "prompt_start"},
+                        "created_at": now,
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    manager = JobManager(repo_root=tmp_path)
+
+    summary = manager.summary("legacy-job")
+    assert summary.status == "failed"
+    assert summary.task_id == "book-one"
+    assert summary.type == "close_read"
+    assert (job_dir / "job.json").exists()
+    error_event = manager.events("legacy-job")[-1]
+    assert error_event.kind == "error"
+    assert error_event.payload["error_type"] == "ServiceInterrupted"
 
 
 def test_job_events_endpoint_streams_sse_and_supports_replay(tmp_path: Path) -> None:

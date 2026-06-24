@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +15,7 @@ from ..constants import DEFAULT_CLOSE_READING_STAGE
 from ..llm import InvalidJSONResponseError, JsonModelClient, ModelSettings
 from ..prompts.chapter_summary_prompt import build_chapter_summary_prompt
 from ..prompts.character_evidence_coverage_prompt import build_character_evidence_coverage_prompt
+from ..prompts.character_full_roster_prefilter_prompt import build_character_full_roster_prefilter_prompt
 from ..prompts.character_evidence_prompt import build_character_evidence_prompt
 from ..prompts.character_reduce_prompt import build_character_reduce_prompt
 from ..prompts.global_memory_prompt import build_global_memory_prompt
@@ -120,6 +121,7 @@ WORLD_EVIDENCE_KEYWORDS = (
     "超自然",
 )
 CHARACTER_EVIDENCE_FAST_ROSTER_LIMIT = 32
+CHAPTER_SUMMARY_SCHEMA_REPAIR_ATTEMPTS = 2
 
 
 @dataclass(slots=True)
@@ -1149,13 +1151,26 @@ class CloseReadRunner:
             chapter_context = prompt_input["chapter_summary"].get("chapter_context_text")
         if chapter_context is not None:
             metrics["chapter_context_chars"] = len(str(chapter_context))
+        if isinstance(prompt_input.get("chapter_summary"), dict):
+            metrics["chapter_summary_chars"] = len(
+                json.dumps(prompt_input["chapter_summary"], ensure_ascii=False, separators=(",", ":"))
+            )
         if isinstance(prompt_input.get("current_outline_segment"), dict):
             metrics["current_outline_segment_chars"] = len(
                 json.dumps(prompt_input["current_outline_segment"], ensure_ascii=False, separators=(",", ":"))
             )
         if isinstance(prompt_input.get("ordered_character_evidence"), list):
+            metrics["ordered_character_evidence_count"] = len(prompt_input["ordered_character_evidence"])
             metrics["ordered_character_evidence_chars"] = len(
                 json.dumps(prompt_input["ordered_character_evidence"], ensure_ascii=False, separators=(",", ":"))
+            )
+        if isinstance(prompt_input.get("reduce_policy"), dict):
+            metrics["reduce_policy_chars"] = len(
+                json.dumps(prompt_input["reduce_policy"], ensure_ascii=False, separators=(",", ":"))
+            )
+        if isinstance(prompt_input.get("profile_update_gate"), dict):
+            metrics["profile_update_gate_chars"] = len(
+                json.dumps(prompt_input["profile_update_gate"], ensure_ascii=False, separators=(",", ":"))
             )
         return metrics
 
@@ -1592,9 +1607,27 @@ class CloseReadRunner:
         ]
         if len(full_roster) <= len(fast_input["existing_character_roster"]):
             return payload
+        if bool(getattr(self.config.runtime, "character_full_roster_paging_enabled", True)):
+            return self._generate_paged_full_roster_character_evidence(
+                model_client=model_client,
+                batch=batch,
+                prompt_input=prompt_input,
+                first_pass_payload=payload,
+                full_roster=full_roster,
+            )
+        filtered_roster = self._prefilter_full_roster_for_evidence(
+            model_client=model_client,
+            batch=batch,
+            prompt_input=prompt_input,
+            first_pass_payload=payload,
+            recent_roster=fast_input["existing_character_roster"],
+            full_roster=full_roster,
+        )
         full_input = dict(prompt_input)
-        full_input["existing_character_roster"] = full_roster
-        full_input["character_roster_scope"] = "full"
+        full_input["existing_character_roster"] = filtered_roster
+        full_input["character_roster_scope"] = (
+            "filtered_full" if len(filtered_roster) < len(full_roster) else "full"
+        )
         full_input["can_request_full_roster"] = False
         return self._generate_agent_payload(
             model_client=model_client,
@@ -1607,6 +1640,545 @@ class CloseReadRunner:
             prompt_builder=build_character_evidence_prompt,
             fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
         )
+
+    def _generate_paged_full_roster_character_evidence(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+        first_pass_payload: dict[str, Any],
+        full_roster: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        page_chars = max(1, int(getattr(self.config.runtime, "character_full_roster_page_chars", 8000)))
+        roster_pages = self._full_roster_pages(full_roster, page_chars=page_chars)
+        if not roster_pages:
+            return first_pass_payload
+        page_model_client = self._full_roster_page_model_client(model_client)
+        max_workers = max(1, min(len(roster_pages), int(self.config.runtime.close_read_extraction_max_workers)))
+        page_payloads: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for page_index, roster_page in enumerate(roster_pages, start=1):
+                page_input = dict(prompt_input)
+                page_input["existing_character_roster"] = roster_page
+                page_input["character_roster_scope"] = "full_page"
+                page_input["can_request_full_roster"] = False
+                futures.append(
+                    executor.submit(
+                        self._generate_agent_payload,
+                        model_client=page_model_client,
+                        batch=batch,
+                        prompt_input=self._build_character_evidence_input(
+                            batch=batch,
+                            prompt_input=page_input,
+                        ),
+                        agent_name="character_evidence_full_roster",
+                        prompt_builder=build_character_evidence_prompt,
+                        fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
+                    )
+                )
+            for future in futures:
+                page_payloads.append(future.result())
+        return self._merge_paged_full_roster_character_evidence(
+            first_pass_payload=first_pass_payload,
+            page_payloads=page_payloads,
+            full_roster=full_roster,
+        )
+
+    def _full_roster_page_model_client(self, model_client: JsonModelClient) -> JsonModelClient:
+        model_name = str(
+            getattr(self.config.runtime, "character_full_roster_page_model_name", "")
+            or model_client.settings.model_name
+        ).strip()
+        settings = replace(
+            model_client.settings,
+            model_name=model_name,
+            thinking="disabled",
+            reasoning_effort=None,
+            include_reasoning_content=False,
+        )
+        return JsonModelClient(settings)
+
+    def _full_roster_pages(self, full_roster: list[dict[str, Any]], *, page_chars: int) -> list[list[dict[str, Any]]]:
+        pages: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_chars = 2
+        for item in full_roster:
+            compact = self._compact_roster_prefilter_item(item)
+            item_chars = len(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))) + 1
+            if current and current_chars + item_chars > page_chars:
+                pages.append(current)
+                current = []
+                current_chars = 2
+            current.append(compact)
+            current_chars += item_chars
+        if current:
+            pages.append(current)
+        return pages
+
+    def _merge_paged_full_roster_character_evidence(
+        self,
+        *,
+        first_pass_payload: dict[str, Any],
+        page_payloads: list[dict[str, Any]],
+        full_roster: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        roster_by_id = {
+            str(item.get("character_id") or "").strip(): item
+            for item in full_roster
+            if str(item.get("character_id") or "").strip()
+        }
+        roster_by_name = {
+            str(item.get("canonical_name") or "").strip(): item
+            for item in full_roster
+            if str(item.get("canonical_name") or "").strip()
+        }
+        roster_by_alias: dict[str, dict[str, Any]] = {}
+        for item in full_roster:
+            aliases = item.get("aliases", [])
+            if not isinstance(aliases, list):
+                continue
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text and alias_text not in roster_by_alias:
+                    roster_by_alias[alias_text] = item
+        resolved: list[dict[str, Any]] = []
+        resolved_keys: set[str] = set()
+        for payload in page_payloads:
+            for raw_character in self._flatten_character_evidence_items(payload):
+                if not isinstance(raw_character, dict):
+                    continue
+                character = dict(raw_character)
+                roster_item = self._roster_item_for_page_match(
+                    character=character,
+                    roster_by_id=roster_by_id,
+                    roster_by_name=roster_by_name,
+                    roster_by_alias=roster_by_alias,
+                )
+                if roster_item is None:
+                    continue
+                character_id = str(roster_item.get("character_id") or character.get("character_id") or "").strip()
+                canonical_name = str(roster_item.get("canonical_name") or character.get("canonical_name") or "").strip()
+                if not character_id or not canonical_name:
+                    continue
+                character["character_id"] = character_id
+                character["canonical_name"] = canonical_name
+                character["resolution_status"] = "resolved_existing"
+                character.setdefault("candidate_type", "character")
+                character.setdefault("source_doc_ids", first_pass_payload.get("doc_ids", []))
+                character.setdefault("source_title_indexes", first_pass_payload.get("document_title_indexes", []))
+                key = f"id:{character_id}"
+                if key in resolved_keys:
+                    continue
+                resolved.append(character)
+                resolved_keys.add(key)
+
+        merged = dict(first_pass_payload)
+        first_pass_characters = [
+            dict(item)
+            for item in first_pass_payload.get("characters", [])
+            if isinstance(item, dict) and not self._first_pass_character_replaced_by_resolved(item, resolved)
+        ]
+        existing_keys = {self._character_evidence_identity_key(item) for item in first_pass_characters}
+        for character in resolved:
+            key = self._character_evidence_identity_key(character)
+            if key and key in existing_keys:
+                continue
+            first_pass_characters.append(character)
+            if key:
+                existing_keys.add(key)
+        merged["characters"] = first_pass_characters
+        merged["request_full_roster"] = False
+        merged["request_full_roster_reason"] = ""
+        return merged
+
+    def _roster_item_for_page_match(
+        self,
+        *,
+        character: dict[str, Any],
+        roster_by_id: dict[str, dict[str, Any]],
+        roster_by_name: dict[str, dict[str, Any]],
+        roster_by_alias: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        character_id = str(character.get("character_id") or "").strip()
+        if character_id and character_id in roster_by_id:
+            return roster_by_id[character_id]
+        name = str(character.get("canonical_name") or "").strip()
+        if name and name in roster_by_name:
+            return roster_by_name[name]
+        if name and name in roster_by_alias:
+            return roster_by_alias[name]
+        aliases = character.get("aliases")
+        if isinstance(aliases, list):
+            for alias in aliases:
+                alias_text = str(alias or "").strip()
+                if alias_text in roster_by_name:
+                    return roster_by_name[alias_text]
+                if alias_text in roster_by_alias:
+                    return roster_by_alias[alias_text]
+        return None
+
+    def _first_pass_character_replaced_by_resolved(
+        self,
+        first_pass_character: dict[str, Any],
+        resolved_characters: list[dict[str, Any]],
+    ) -> bool:
+        first_id = str(first_pass_character.get("character_id") or "").strip()
+        if first_id:
+            return False
+        names = {str(first_pass_character.get("canonical_name") or "").strip()}
+        aliases = first_pass_character.get("aliases")
+        if isinstance(aliases, list):
+            names.update(str(alias or "").strip() for alias in aliases)
+        names.discard("")
+        if not names:
+            return False
+        for character in resolved_characters:
+            resolved_names = {str(character.get("canonical_name") or "").strip()}
+            resolved_aliases = character.get("aliases")
+            if isinstance(resolved_aliases, list):
+                resolved_names.update(str(alias or "").strip() for alias in resolved_aliases)
+            resolved_names.discard("")
+            if names & resolved_names:
+                return True
+        return False
+
+    def _prefilter_full_roster_for_evidence(
+        self,
+        *,
+        model_client: JsonModelClient,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+        first_pass_payload: dict[str, Any],
+        recent_roster: list[dict[str, Any]],
+        full_roster: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not bool(getattr(self.config.runtime, "character_full_roster_prefilter_enabled", True)):
+            return full_roster
+        max_candidates = max(
+            1,
+            int(getattr(self.config.runtime, "character_full_roster_prefilter_max_candidates", 64)),
+        )
+        if len(full_roster) <= max_candidates:
+            return full_roster
+        deterministic_keep = self._deterministic_full_roster_prefilter(
+            batch=batch,
+            first_pass_payload=first_pass_payload,
+            recent_roster=recent_roster,
+            full_roster=full_roster,
+        )
+        local_candidate_pool = self._full_roster_prefilter_candidate_pool(
+            batch=batch,
+            first_pass_payload=first_pass_payload,
+            recent_roster=recent_roster,
+            full_roster=full_roster,
+            deterministic_keep=deterministic_keep,
+        )
+        prefilter_input = self._build_full_roster_prefilter_input(
+            batch=batch,
+            prompt_input=prompt_input,
+            first_pass_payload=first_pass_payload,
+            recent_roster=recent_roster,
+            full_roster=local_candidate_pool,
+            deterministic_keep=deterministic_keep,
+            max_candidates=max_candidates,
+        )
+        fallback_payload = {
+            "fallback_to_full_roster": False,
+            "selected_character_ids": [str(item.get("character_id") or "") for item in deterministic_keep],
+            "selected_canonical_names": [str(item.get("canonical_name") or "") for item in deterministic_keep],
+            "reason": "deterministic_prefilter_fallback",
+            "confidence": 0.5,
+        }
+        try:
+            payload = self._generate_agent_payload(
+                model_client=self._full_roster_prefilter_model_client(model_client),
+                batch=batch,
+                prompt_input=prefilter_input,
+                agent_name="character_full_roster_prefilter",
+                prompt_builder=build_character_full_roster_prefilter_prompt,
+                fallback_factory=lambda: fallback_payload,
+            )
+        except Exception:
+            return local_candidate_pool or full_roster
+        if bool(payload.get("fallback_to_full_roster")):
+            return local_candidate_pool or full_roster
+        confidence = self._safe_float(payload.get("confidence"))
+        if confidence is not None and confidence < 0.2:
+            return local_candidate_pool or full_roster
+        selected_ids = {
+            str(item).strip()
+            for item in payload.get("selected_character_ids", [])
+            if str(item).strip()
+        }
+        selected_names = {
+            str(item).strip()
+            for item in payload.get("selected_canonical_names", [])
+            if str(item).strip()
+        }
+        filtered = self._merge_roster_candidates(
+            full_roster=full_roster,
+            selected_ids=selected_ids,
+            selected_names=selected_names,
+            deterministic_keep=deterministic_keep,
+        )
+        if not filtered:
+            return local_candidate_pool or full_roster
+        return filtered[: max(len(deterministic_keep), max_candidates)]
+
+    def _full_roster_prefilter_candidate_pool(
+        self,
+        *,
+        batch: ChapterBatch,
+        first_pass_payload: dict[str, Any],
+        recent_roster: list[dict[str, Any]],
+        full_roster: list[dict[str, Any]],
+        deterministic_keep: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        index_limit = max(
+            int(getattr(self.config.runtime, "character_full_roster_prefilter_max_candidates", 64)),
+            int(getattr(self.config.runtime, "character_full_roster_prefilter_index_max_candidates", 128)),
+        )
+        current_title_index = int(batch.document_title_index or 0)
+        text = "\n".join(str(doc.content) for doc in batch.documents)
+        hints_text = self._full_roster_hint_text(first_pass_payload)
+        combined = f"{text}\n{hints_text}"
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        deterministic_keys = {
+            str(item.get("character_id") or item.get("canonical_name") or "").strip()
+            for item in deterministic_keep
+        }
+        recent_keys = {
+            str(item.get("character_id") or item.get("canonical_name") or "").strip()
+            for item in recent_roster
+        }
+        for ordinal, item in enumerate(full_roster):
+            key = str(item.get("character_id") or item.get("canonical_name") or "").strip()
+            score = 0
+            if key and key in deterministic_keys:
+                score += 1000
+            if key and key in recent_keys:
+                score += 200
+            score += self._roster_item_text_match_score(item, combined)
+            last_seen_title = self._safe_int(item.get("last_seen_title_index"))
+            if current_title_index > 0 and last_seen_title is not None:
+                gap = max(0, current_title_index - last_seen_title)
+                score += max(0, 80 - gap * 4)
+            last_seen_doc = self._safe_int(item.get("last_seen_doc_id"))
+            if last_seen_doc is not None:
+                score += min(50, max(0, last_seen_doc) // 20)
+            ranked.append((score, -ordinal, item))
+        ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        pool: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in deterministic_keep:
+            self._append_roster_item(pool, seen, item)
+        for _score, _ordinal, item in ranked:
+            self._append_roster_item(pool, seen, item)
+            if len(pool) >= index_limit:
+                break
+        return pool
+
+    def _full_roster_prefilter_model_client(self, model_client: JsonModelClient) -> JsonModelClient:
+        model_name = str(
+            getattr(self.config.runtime, "character_full_roster_prefilter_model_name", "")
+            or model_client.settings.model_name
+        ).strip()
+        timeout_seconds = max(30, min(int(model_client.settings.timeout_seconds or 120), 90))
+        settings = replace(
+            model_client.settings,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+            max_output_tokens=min(int(model_client.settings.max_output_tokens or 8192), 2048),
+            thinking="disabled",
+            reasoning_effort=None,
+            include_reasoning_content=False,
+        )
+        return JsonModelClient(settings)
+
+    def _build_full_roster_prefilter_input(
+        self,
+        *,
+        batch: ChapterBatch,
+        prompt_input: dict[str, Any],
+        first_pass_payload: dict[str, Any],
+        recent_roster: list[dict[str, Any]],
+        full_roster: list[dict[str, Any]],
+        deterministic_keep: list[dict[str, Any]],
+        max_candidates: int,
+    ) -> dict[str, Any]:
+        doc_text = "\n\n".join(str(doc.content) for doc in batch.documents)
+        return {
+            "book_id": self.config.book_id,
+            "current_title_index": prompt_input.get("current_title_index"),
+            "document_context": {
+                "doc_ids": [int(doc.doc_id) for doc in batch.documents],
+                "document_title_indexes": batch.title_indexes,
+                "chapter_title": batch.chapter_title,
+                "content": clamp_text(doc_text, self.config.runtime.document_chars_budget),
+            },
+            "first_pass_request": {
+                "request_full_roster_reason": first_pass_payload.get("request_full_roster_reason", ""),
+                "characters": self._compact_character_items(first_pass_payload.get("characters", [])),
+            },
+            "roster_filter_hints": first_pass_payload.get("roster_filter_hints", {}),
+            "recent_character_roster": self._roster_prefilter_index(recent_roster),
+            "deterministic_keep": self._roster_prefilter_index(deterministic_keep),
+            "full_roster_index": self._roster_prefilter_index(full_roster),
+            "max_candidates": max_candidates,
+        }
+
+    def _deterministic_full_roster_prefilter(
+        self,
+        *,
+        batch: ChapterBatch,
+        first_pass_payload: dict[str, Any],
+        recent_roster: list[dict[str, Any]],
+        full_roster: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        recent_keep = max(
+            0,
+            int(getattr(self.config.runtime, "character_full_roster_prefilter_recent_keep", 16)),
+        )
+        text = "\n".join(str(doc.content) for doc in batch.documents)
+        hints_text = self._full_roster_hint_text(first_pass_payload)
+        combined = f"{text}\n{hints_text}"
+        kept: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in recent_roster[:recent_keep]:
+            self._append_roster_item(kept, seen, item)
+        for item in full_roster:
+            names = [str(item.get("canonical_name") or "").strip()]
+            aliases = item.get("aliases", [])
+            if isinstance(aliases, list):
+                names.extend(str(alias).strip() for alias in aliases if str(alias).strip())
+            if any(name and name in combined for name in names):
+                self._append_roster_item(kept, seen, item)
+        return kept
+
+    def _full_roster_hint_text(self, first_pass_payload: dict[str, Any]) -> str:
+        parts: list[str] = [str(first_pass_payload.get("request_full_roster_reason") or "")]
+        hints = first_pass_payload.get("roster_filter_hints")
+        if isinstance(hints, dict):
+            for value in hints.values():
+                if isinstance(value, list):
+                    parts.extend(str(item) for item in value)
+                else:
+                    parts.append(str(value))
+        characters = first_pass_payload.get("characters", [])
+        if not isinstance(characters, list):
+            characters = []
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            parts.append(str(character.get("canonical_name") or ""))
+            aliases = character.get("aliases", [])
+            if isinstance(aliases, list):
+                parts.extend(str(alias) for alias in aliases)
+        return "\n".join(part for part in parts if part.strip())
+
+    def _merge_roster_candidates(
+        self,
+        *,
+        full_roster: list[dict[str, Any]],
+        selected_ids: set[str],
+        selected_names: set[str],
+        deterministic_keep: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        kept: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in deterministic_keep:
+            self._append_roster_item(kept, seen, item)
+        for item in full_roster:
+            character_id = str(item.get("character_id") or "").strip()
+            name = str(item.get("canonical_name") or "").strip()
+            if character_id in selected_ids or name in selected_names:
+                self._append_roster_item(kept, seen, item)
+        return kept
+
+    def _append_roster_item(self, target: list[dict[str, Any]], seen: set[str], item: dict[str, Any]) -> None:
+        key = str(item.get("character_id") or item.get("canonical_name") or "").strip()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        target.append(item)
+
+    def _roster_prefilter_index(self, roster: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            self._compact_roster_prefilter_item(item)
+            for item in roster
+            if isinstance(item, dict)
+        ]
+
+    def _compact_roster_prefilter_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        compact = {
+                "character_id": str(item.get("character_id") or "").strip(),
+                "canonical_name": str(item.get("canonical_name") or "").strip(),
+                "aliases": self._compact_string_list(item.get("aliases"), limit=6),
+                "occupations": self._compact_string_list(item.get("occupations"), limit=2),
+                "last_seen_doc_id": item.get("last_seen_doc_id"),
+                "last_seen_title_index": item.get("last_seen_title_index"),
+                "speaking_character_status": item.get("speaking_character_status", ""),
+            }
+        return {key: value for key, value in compact.items() if value not in ("", [], None)}
+
+    def _roster_item_text_match_score(self, item: dict[str, Any], text: str) -> int:
+        score = 0
+        names = [str(item.get("canonical_name") or "").strip()]
+        aliases = item.get("aliases", [])
+        if isinstance(aliases, list):
+            names.extend(str(alias).strip() for alias in aliases if str(alias).strip())
+        for name in names:
+            if not name:
+                continue
+            if name in text:
+                score += 120 if name == str(item.get("canonical_name") or "").strip() else 90
+            elif len(name) >= 2 and any(part and part in text for part in self._name_parts(name)):
+                score += 25
+        return score
+
+    def _name_parts(self, name: str) -> list[str]:
+        separators = ("·", "・", ".", " ", "/", "／", "-", "_")
+        parts = [name]
+        for separator in separators:
+            next_parts: list[str] = []
+            for part in parts:
+                next_parts.extend(part.split(separator))
+            parts = next_parts
+        return [part.strip() for part in parts if len(part.strip()) >= 2]
+
+    def _compact_string_list(self, value: object, *, limit: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _compact_character_items(self, value: object) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            result.append(
+                {
+                    "character_id": str(item.get("character_id") or "").strip(),
+                    "canonical_name": str(item.get("canonical_name") or "").strip(),
+                    "aliases": item.get("aliases", []),
+                    "resolution_status": item.get("resolution_status", ""),
+                    "candidate_type": item.get("candidate_type", ""),
+                    "confidence": item.get("confidence", 0),
+                    "uncertainty_reason": item.get("uncertainty_reason", ""),
+                }
+            )
+        return result
 
     def _augment_character_evidence_with_coverage(
         self,
@@ -1928,50 +2500,102 @@ class CloseReadRunner:
         prompt_input: dict[str, Any],
     ) -> dict[str, Any]:
         system_prompt, user_prompt = build_chapter_summary_prompt(prompt_input)
-        started_at = time.perf_counter()
-        self._emit_progress(
-            {
-                "stage": "close_reading",
-                "agent": "chapter_summary",
-                "event": "prompt_start",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-                "prompt_chars": len(system_prompt) + len(user_prompt),
-                "system_prompt_chars": len(system_prompt),
-                "user_prompt_chars": len(user_prompt),
-            }
-        )
-        payload, _ = model_client.generate_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            fallback_factory=lambda: self._disallowed_summary_fallback(batch),
-            use_fallback_on_error=False,
-        )
-        self._emit_progress(
-            {
-                "stage": "close_reading",
-                "agent": "chapter_summary",
-                "event": "prompt_end",
-                "document_title_indexes": batch.title_indexes,
-                "doc_count": len(batch.documents),
-                "total_chars": batch.total_chars,
-                "prompt_chars": len(system_prompt) + len(user_prompt),
-                "system_prompt_chars": len(system_prompt),
-                "user_prompt_chars": len(user_prompt),
-                "duration_seconds": round(time.perf_counter() - started_at, 3),
-            }
-        )
-        if not isinstance(payload, dict):
-            review_path = self._write_summary_review_markdown(
-                batch=batch,
-                reason="chapter_summary returned a non-dict JSON payload",
-                payload={"raw_payload_type": type(payload).__name__},
+        last_error: InvalidChapterSynopsisError | None = None
+        for attempt in range(1, CHAPTER_SUMMARY_SCHEMA_REPAIR_ATTEMPTS + 1):
+            attempt_user_prompt = user_prompt
+            if attempt > 1 and last_error is not None:
+                attempt_user_prompt = self._chapter_summary_repair_prompt(
+                    base_user_prompt=user_prompt,
+                    previous_error=last_error,
+                )
+            started_at = time.perf_counter()
+            self._emit_progress(
+                {
+                    "stage": "close_reading",
+                    "agent": "chapter_summary",
+                    "event": "prompt_start",
+                    "document_title_indexes": batch.title_indexes,
+                    "doc_count": len(batch.documents),
+                    "total_chars": batch.total_chars,
+                    "prompt_chars": len(system_prompt) + len(attempt_user_prompt),
+                    "system_prompt_chars": len(system_prompt),
+                    "user_prompt_chars": len(attempt_user_prompt),
+                    "attempt_index": attempt,
+                }
             )
-            raise InvalidChapterSynopsisError("chapter_summary returned non-dict JSON", review_path=review_path)
-        payload = self._normalize_chapter_summary_schema_aliases(payload)
-        self._validate_summary_payload(batch=batch, payload=payload)
-        return payload
+            payload, _ = model_client.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=attempt_user_prompt,
+                fallback_factory=lambda: self._disallowed_summary_fallback(batch),
+                use_fallback_on_error=False,
+            )
+            self._emit_progress(
+                {
+                    "stage": "close_reading",
+                    "agent": "chapter_summary",
+                    "event": "prompt_end",
+                    "document_title_indexes": batch.title_indexes,
+                    "doc_count": len(batch.documents),
+                    "total_chars": batch.total_chars,
+                    "prompt_chars": len(system_prompt) + len(attempt_user_prompt),
+                    "system_prompt_chars": len(system_prompt),
+                    "user_prompt_chars": len(attempt_user_prompt),
+                    "attempt_index": attempt,
+                    "duration_seconds": round(time.perf_counter() - started_at, 3),
+                }
+            )
+            try:
+                if not isinstance(payload, dict):
+                    review_path = self._write_summary_review_markdown(
+                        batch=batch,
+                        reason="chapter_summary returned a non-dict JSON payload",
+                        payload={"raw_payload_type": type(payload).__name__},
+                    )
+                    raise InvalidChapterSynopsisError("chapter_summary returned non-dict JSON", review_path=review_path)
+                payload = self._normalize_chapter_summary_schema_aliases(payload)
+                self._validate_summary_payload(batch=batch, payload=payload)
+                return payload
+            except InvalidChapterSynopsisError as exc:
+                last_error = exc
+                if attempt >= CHAPTER_SUMMARY_SCHEMA_REPAIR_ATTEMPTS:
+                    raise
+                self._emit_progress(
+                    {
+                        "stage": "close_reading",
+                        "agent": "chapter_summary",
+                        "event": "schema_repair_retry",
+                        "document_title_indexes": batch.title_indexes,
+                        "doc_count": len(batch.documents),
+                        "total_chars": batch.total_chars,
+                        "attempt_index": attempt + 1,
+                        "error": self._chapter_summary_repair_error(exc),
+                    }
+                )
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("chapter_summary failed without an error")
+
+    @staticmethod
+    def _chapter_summary_repair_error(error: InvalidChapterSynopsisError) -> str:
+        return str(error).split(" Review written to:", 1)[0]
+
+    def _chapter_summary_repair_prompt(
+        self,
+        *,
+        base_user_prompt: str,
+        previous_error: InvalidChapterSynopsisError,
+    ) -> str:
+        return (
+            f"{base_user_prompt}\n\n"
+            "上一次输出是可解析 JSON，但不符合章节摘要 schema。\n"
+            f"校验错误：{self._chapter_summary_repair_error(previous_error)}\n"
+            "请重新基于输入 documents 生成完整的顶层 JSON 对象，不要只返回 world_evidence_candidates "
+            "中的单个候选对象，也不要只返回某个子字段。\n"
+            "顶层必须至少包含：summary_quality、chapter_summary_md、chapter_summary_short、"
+            "importance_score、importance_reason、related_chapters、world_signal_score、"
+            "world_evidence_candidates、noise_documents。chapter_summary_md 必须包含四个 Markdown 小节："
+            "## 剧情事件链、## 人物状态/关系变化、## 关键信息/设定、## 结构功能/节奏。"
+        )
 
     def _compose_close_read_payload(
         self,
@@ -2619,6 +3243,12 @@ class CloseReadRunner:
     def _safe_int(self, value: object) -> int | None:
         try:
             return int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    def _safe_float(self, value: object) -> float | None:
+        try:
+            return float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None
 

@@ -13,6 +13,7 @@ interface CreateTaskDialogProps {
 export function CreateTaskDialog({ open, pending = false, onClose, onSubmit }: CreateTaskDialogProps) {
   const [taskId, setTaskId] = useState("");
   const [sourcePath, setSourcePath] = useState("");
+  const [originalOnly, setOriginalOnly] = useState(false);
   const [error, setError] = useState("");
 
   if (!open) {
@@ -26,13 +27,14 @@ export function CreateTaskDialog({ open, pending = false, onClose, onSubmit }: C
       setError("请填写任务 ID。");
       return;
     }
-    if (!sourcePath.trim()) {
+    if (!originalOnly && !sourcePath.trim()) {
       setError("请填写原文路径，创建后会立即导入原文。");
       return;
     }
-    await onSubmit({ task_id: taskId.trim(), source_path: sourcePath.trim() });
+    await onSubmit({ task_id: taskId.trim(), source_path: originalOnly ? "" : sourcePath.trim() });
     setTaskId("");
     setSourcePath("");
+    setOriginalOnly(false);
     onClose();
   }
 
@@ -52,16 +54,25 @@ export function CreateTaskDialog({ open, pending = false, onClose, onSubmit }: C
           </label>
           <label>
             原文路径
-            <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="/path/to/book.txt" />
+            <input
+              value={sourcePath}
+              disabled={originalOnly}
+              onChange={(event) => setSourcePath(event.target.value)}
+              placeholder="/path/to/book.txt"
+            />
           </label>
-          <p className="form-hint">创建后会立即开始导入原文，左侧进度会自动刷新。</p>
+          <label className="checkbox-row">
+            <input checked={originalOnly} type="checkbox" onChange={(event) => setOriginalOnly(event.target.checked)} />
+            原创写作任务（无原文）
+          </label>
+          <p className="form-hint">{originalOnly ? "创建后可在 Writer 中选择借鉴任务并输入原创大纲。" : "创建后会立即开始导入原文，左侧进度会自动刷新。"}</p>
           {error ? <p className="form-error">{error}</p> : null}
           <div className="dialog-actions">
             <button type="button" className="secondary-button" onClick={onClose}>
               取消
             </button>
             <button type="submit" className="primary-button" disabled={pending}>
-              创建并导入
+              {originalOnly ? "创建任务" : "创建并导入"}
             </button>
           </div>
         </form>

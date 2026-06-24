@@ -13,6 +13,7 @@ from novel_agent.app.repos.fragment_cards_repo import FragmentCardsRepo
 from novel_agent.app.services.fragment_card_builder_service import (
     FragmentCardBuildError,
     FragmentCardBuilderService,
+    SOURCE_EXCERPT_MAX_CHARS,
 )
 
 
@@ -30,7 +31,8 @@ class _FakeModelClient:
         return response
 
 
-def _document(*, doc_id: int = 1, content_tags: list[str] | None = None) -> DocumentRow:
+def _document(*, doc_id: int = 1, content: str | None = None, content_tags: list[str] | None = None) -> DocumentRow:
+    resolved_content = content or "雨夜里她没有立刻说出告别。"
     return DocumentRow(
         doc_id=doc_id,
         book_id="book-1",
@@ -40,14 +42,14 @@ def _document(*, doc_id: int = 1, content_tags: list[str] | None = None) -> Docu
         document_title="第十章",
         document_title_index=10,
         inferred_chapter_no=10,
-        content="雨夜里她没有立刻说出告别。",
-        content_chars=14,
+        content=resolved_content,
+        content_chars=len(resolved_content),
         character_keywords=[],
         content_tags=content_tags or ["雨天", "告别"],
         source_path="/tmp/source.md",
         source_file_name="source.md",
         source_start_offset=0,
-        source_end_offset=14,
+        source_end_offset=len(resolved_content),
     )
 
 
@@ -99,6 +101,18 @@ def test_build_card_result_success() -> None:
     assert result.retry_count == 0
     assert result.used_fallback is False
     assert result.fragment_card.preferred_tags == ["雨天", "告别"]
+
+
+def test_build_card_result_keeps_1600_char_source_excerpt() -> None:
+    service = _service_with_responses([(_valid_payload(), "{}")])
+    content = "雨夜里她没有立刻说出告别。" * 200
+
+    result = service.build_card_result(_document(content=content))
+
+    assert result.status == "success"
+    assert result.fragment_card is not None
+    assert len(result.fragment_card.source_excerpt) == SOURCE_EXCERPT_MAX_CHARS
+    assert result.fragment_card.source_excerpt == content[:SOURCE_EXCERPT_MAX_CHARS]
 
 
 def test_build_card_result_marks_failed_after_schema_retries() -> None:

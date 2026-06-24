@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -306,6 +307,91 @@ def test_outline_research_schema_serialization_and_validation(tmp_path: Path) ->
         SufficiencyDecision(decision_id="bad", status="maybe")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="user_questions"):
         SufficiencyDecision(decision_id="bad", status="needs_user_input")
+
+
+def test_reference_guided_outline_schema_and_broker_result(tmp_path: Path) -> None:
+    reference_index = [
+        {
+            "reference_item_id": "longzu-前三部:outline_root:01",
+            "source_task_id": "longzu-前三部",
+            "source_kind": "outline_root",
+            "source_path": str(tmp_path / "outline_segments.json"),
+            "summary": "以异世界学院入口承接现实身份错位，并用伙伴群像逐步扩大冲突。",
+            "advice_scope": "阶段设计、人物功能和冲突升级",
+            "fact_status": "reference_advice",
+        }
+    ]
+    packet = OutlineSeedPacket(
+        packet_id="packet-reference",
+        book_id="wasteland-original",
+        user_intent={"desired_actions": ["写废土穿越原创故事"]},
+        reference_work={"source_task_id": "longzu-前三部", "mode": "reference_guided_original_creation"},
+        reference_outline_design_index=reference_index,
+    )
+    saved_packet = OutlineSeedPacket.from_dict(packet.to_dict())
+    assert saved_packet.reference_work["source_task_id"] == "longzu-前三部"
+    assert saved_packet.reference_outline_design_index[0]["fact_status"] == "reference_advice"
+
+    request = ResearchRequest(
+        request_id="research-reference-outline-01",
+        request_type="reference_outline_design",
+        query="如何优化废土穿越大纲的人物群像和冲突升级",
+        purpose="给用户原创大纲提供方向建议",
+        priority="high",
+        metadata={
+            "source_task_id": "longzu-前三部",
+            "reference_outline_design_index": reference_index,
+        },
+    )
+    result = OutlineResearchContextBroker(repo_root=tmp_path)._resolve_one(  # noqa: SLF001
+        sqlite3.connect(":memory:"),
+        book_id="wasteland-original",
+        request=request,
+        max_chars=1000,
+    )
+
+    assert result.request_type == "reference_outline_design"
+    assert result.fact_status == "reference_advice"
+    assert result.results[0]["usage_policy"].startswith("只作为用户原创大纲")
+
+
+def test_model_research_adapter_allows_reference_guided_requests_without_story_detail() -> None:
+    model_client = _PromptLengthModelClient(
+        {
+            "requests": [
+                {
+                    "request_id": "reference-only",
+                    "request_type": "reference_outline_design",
+                    "query": "如何优化原创大纲",
+                    "purpose": "参考借鉴对象给出方向建议",
+                    "priority": "high",
+                    "metadata": {"source_task_id": "longzu-前三部"},
+                }
+            ]
+        }
+    )
+    adapter = ModelOutlineResearchModelAdapter(model_client=model_client)
+    requests = adapter.propose_research_requests(
+        seed_packet=OutlineSeedPacket(
+            packet_id="packet-reference",
+            book_id="wasteland-original",
+            user_intent={"desired_actions": ["写废土穿越原创故事"]},
+            reference_work={"source_task_id": "longzu-前三部"},
+            reference_outline_design_index=[
+                {
+                    "reference_item_id": "ref-1",
+                    "source_task_id": "longzu-前三部",
+                    "summary": "参考阶段设计",
+                    "fact_status": "reference_advice",
+                }
+            ],
+        ),
+        notebook=PlanningNotebook(notebook_id="nb-reference"),
+        prior_results=[],
+        budget_state={"max_requests_per_round": 4},
+    )
+
+    assert requests[0]["request_type"] == "reference_outline_design"
 
 
 def test_outline_research_needs_user_input_uses_concrete_model_questions() -> None:
@@ -1470,6 +1556,9 @@ def test_workflow_needs_user_input_then_continues_without_unconfirmed_character_
     assert initial["stage"] == "outline_research_user_input"
     assert initial["sufficiency_decision"]["user_questions"] == ["顾迟是否为新增人物？"]
     assert initial["question_set"]["question_set_id"] == "outline-research-run-user-input-needs-answer"
+    assert initial["resume_context"]["question_set_id"] == "outline-research-run-user-input-needs-answer"
+    assert initial["resume_context"]["blocking_gaps"] == ["主要人物身份未确认"]
+    assert initial["resume_context"]["questions"][0]["prompt"] == "顾迟是否为新增人物？"
     question_set = _load_run_data(planner.run_writer, "run-user-input", "outline_research_question_set.json")
     assert question_set["run_id"] == "run-user-input"
     assert question_set["questions"][0]["question_id"] == "q1"
@@ -1479,7 +1568,14 @@ def test_workflow_needs_user_input_then_continues_without_unconfirmed_character_
     submission = _load_run_data(planner.run_writer, "run-user-input", "outline_research_answer_submission.json")
     assert submission["answer_text"] == "不是新增人物，本轮不加入。"
     assert submission["user_answers"] == [{"question_id": "q1", "answer_text": "不是新增人物，本轮不加入。"}]
-    assert _load_run_data(planner.run_writer, "run-user-input", "planning_notebook.json")["confirmed_facts"][0]["fact_status"] == "user_authorized"
+    notebook = _load_run_data(planner.run_writer, "run-user-input", "planning_notebook.json")
+    assert notebook["confirmed_facts"][0]["fact_status"] == "user_authorized"
+    resume_context = _load_run_data(planner.run_writer, "run-user-input", "outline_research_resume_context.json")
+    assert resume_context["answered_questions"] == [
+        {"question": "顾迟是否为新增人物？", "answer": "不是新增人物，本轮不加入。"}
+    ]
+    assert resume_context["post_resume_status"] == "enough"
+    assert resume_context["user_authorized_facts_added"][0]["fact_status"] == "user_authorized"
 
 
 def test_outline_research_missing_required_answer_does_not_fabricate_user_evidence(tmp_path: Path) -> None:

@@ -632,9 +632,10 @@ Character Reduce 不应再读取完整 `profile_summary_md`、全量 `relationsh
 5. 普通 Character Reduce 每条 prompt 只包含当前 batch 的 ordered evidence、章节短摘要、当前 outline segment、持久化 `profile_brief`（移除全量 `source_refs`）和必要来源索引。
 6. `defer_index_only` 的人物跳过 Character Reduce 模型调用，只保存极简 `outline_segment_id` / source range / role / one-line summary 和 pending evidence，累计到阈值或再次变热时再交给模型归并；`drop_for_profile` 的人物只保留底层 mention / scene index。
 7. 初始建议的 character reduce 预算是：document evidence 摘要不超过约 16KB；同一 prompt 默认一个目标人物；`profile_brief` 约 1-2KB。这些数字必须可配置，并通过 benchmark 调参。
-8. 如果人物之间关系高度耦合，系统可以把相关人物 brief 作为关系参照；如果关系冲突复杂、模型低置信或输出混淆身份，则退回单人物 reduce 或人工确认。
-9. 模型输出每个人物的增量更新、更新后的 `profile_brief` 和本轮 `source_ref_delta`，覆盖范围包括人物性证据、基础属性、发言状态、关系和人物经历增量；输出必须按 `character_id` 或 canonical identity 分离。
-10. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，人物经历按 `experience_id` / `outline_segment_id` 合并；`compacted_until.outline_segment_id` 更新为本次 compact 输入中最后一个被吸收的 segment，`consumed_pending_experience_ids` 由本轮 `recent_key_experiences` 的 id 组装，`source_ref_delta` append / 去重进持久化 `profile_brief.source_refs`。
+8. Character Reduce prompt input SHOULD 把同一批人物共享的 `chapter_summary`、`chapter_context_text`、`current_outline_segment` 和公共约束放在人物专属字段之前；`character_id`、`existing_profile`、`ordered_character_evidence` 和 detail gate 放在后面，以便同章多人物 reduce 尽量命中模型服务的 prefix caching。
+9. 如果人物之间关系高度耦合，系统可以把相关人物 brief 作为关系参照；如果关系冲突复杂、模型低置信或输出混淆身份，则退回单人物 reduce 或人工确认。
+10. 模型输出每个人物的增量更新、更新后的 `profile_brief` 和本轮 `source_ref_delta`，覆盖范围包括人物性证据、基础属性、发言状态、关系和人物经历增量；输出必须按 `character_id` 或 canonical identity 分离。
+11. 本地 merge 层按字段语义写回：基础属性和人物性证据做去重 / 归并，关系按目标人物和最近证据合并冲突，人物经历按 `experience_id` / `outline_segment_id` 合并；`compacted_until.outline_segment_id` 更新为本次 compact 输入中最后一个被吸收的 segment，`consumed_pending_experience_ids` 由本轮 `recent_key_experiences` 的 id 组装，`source_ref_delta` append / 去重进持久化 `profile_brief.source_refs`。
 
 该 loop 的目的不是让模型自由重写整个档案，而是在有限 evidence 和少量相关现有档案之间做语义归并，减少重复、别名分裂、关系冲突和调用次数。
 
@@ -1112,6 +1113,33 @@ Detector 的输出进入两个地方：
 - 直接写入人物档案
 
 当输入提供 `existing_character_roster` 时，Character Evidence Agent 应把正文称呼解析到 roster 中的 `character_id`。若只确认了 canonical name 但不能确认 id，必须通过 `resolution_status` 标注为 `unresolved_alias` 或等价状态，交给后续身份归并服务处理。
+
+#### Full Roster Fallback Gate
+
+Character Evidence 的常规路径默认只读取最近人物名册，避免把完整人物档案索引塞入每个 document prompt。模型在最近名册不足时不得无条件请求完整 roster，而应先区分：
+
+- `resolved_existing`：正文称呼可确认指向最近名册中的既有人物，直接返回 `character_id`。
+- `new_or_unresolved`：正文呈现强新人物信号，例如首次正式命名、集中外貌/身份介绍、独立人物行动/发言、与现有人物发生明确互动，且与已有最近名册姓名/别名无明显匹配；此时可低成本创建 provisional 人物档案，后续若识别错误再走身份合并。
+- `needs_roster_fallback`：正文称呼可能是远期旧人物、别名、关系称谓、伪装身份或身份揭示，但最近名册不足以确认；此时才设置 `request_full_roster = true`。
+
+当 `request_full_roster = true` 时，Character Evidence Agent SHOULD 返回结构化 `roster_filter_hints`，至少包含当前文档中的候选姓名、称谓/别名、关系线索、职业/阵营/上下文摘要和需要保留的 source doc id。系统 SHOULD 优先使用 paged full roster resolution：把完整历史人物概要名册按约 8KB 的 compact roster page 拆分，关闭 thinking，并对每页运行受限的 `character_evidence_full_roster` 匹配调用。
+
+Paged full roster resolution 的语义不是重新抽取人物，而是只判断“当前文档候选是否匹配本页历史人物”。每页调用必须遵守：
+
+- `character_roster_scope=full_page`；
+- 只输出能确认匹配当前页 `existing_character_roster` 的既有人物；
+- 本页没有命中时返回空 `characters`；
+- 不得创建新人、不得输出 ambiguous、不得继续请求完整名册；
+- 第一轮 Character Evidence 已识别的新人物 / unresolved 人物作为基础结果保留；分页结果只负责把其中可确认的候选替换或补充为既有 `character_id`。
+
+如果配置选择使用 `Full Roster Prefilter Gate`，系统可先运行一个轻量模型，推荐使用 `deepseek-v4-flash` 或等价低成本模型并关闭 thinking，对完整 roster 做粗筛，只保留：
+
+- 与正文候选姓名、别名、称谓有词面或强语义匹配的人物；
+- 最近窗口或当前章节已确认人物的强关系人物；
+- gate 判断可能相关的远期旧人物；
+- 少量最近出现人物作为安全垫。
+
+Prefilter Gate 只能缩小 full roster 输入，不负责最终身份判断。生产实现 SHOULD 先用本地低成本候选池保留最近人物、词面命中姓名/别名的人物、与当前标题距离较近的人物和少量安全垫，再把候选池交给轻量模型筛选；若 gate 失败、输出为空、低置信或要求回退，系统 SHOULD 使用该本地候选池作为保守 fallback，只有候选池为空或配置关闭粗筛时才退回完整 roster，避免一次失败重新放大全量名册输入。
 
 ### 10.3 Memory Candidate Agent
 

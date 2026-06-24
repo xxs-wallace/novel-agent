@@ -137,6 +137,12 @@ SeedBuilder SHOULD 优先读取结构化 Memory；只有缺失时才回退到 Ma
 
 RelationshipAnalyzer / OutlineAnalyzer 的 loop 与 triage 阶段 SHOULD 关闭 thinking，用于快速、集中地产生和筛选 evidence request；final answer 阶段 SHOULD 允许使用默认 Analyzer thinking / reasoning 配置，以便进行更充分的文学分析。
 
+Loop 输出 MAY 包含结构化 `pause_context` / `resume_context_delta`，
+用于表达本轮为什么需要暂停、哪些事实已经提交、哪些缺口仍阻塞、用户补充后应如何恢复。
+该字段是“可提交状态”，不是模型完整思维链；不得保存或回放未提交的 scratchpad、
+无来源猜测或被 triage 拒绝的 evidence。下一轮恢复时只能消费 compact notebook、
+committed evidence、用户补充和 `pause_context` 中的结构化结论。
+
 推荐每轮输出：
 
 ```json
@@ -157,6 +163,14 @@ RelationshipAnalyzer / OutlineAnalyzer 的 loop 与 triage 阶段 SHOULD 关闭 
     "uncertain_gaps": [],
     "candidate_directions": [],
     "chapters_worth_raw_read": []
+  },
+  "pause_context": {
+    "pause_reason": "",
+    "why_it_matters": "",
+    "known_so_far": [],
+    "blocking_gaps": [],
+    "requested_user_input": [],
+    "expected_after_resume": ""
   }
 }
 ```
@@ -264,7 +278,7 @@ Analyzer、Writer Research 和 Reviewer SHOULD 尽量复用同一套 request typ
 - `story_detail` 用于事件、因果链、伏笔状态、关系转折。
 - `fact_check` 用于判断某个事实是否被 Memory / 原文支持。
 - `related_documents` 用于返回与概念、人物、事件相关的 chapter / document refs。
-- `text_search` 用于 grep-like 词面定位：模型把问题拆成少量通用关键词，Broker 在 root summary / Memory root、outline segment、chapter summary、character profile、index card 或受限 document scope 中执行交集或并集匹配，返回候选 chapter refs / source doc ids。
+- `text_search` 用于 grep-like 词面定位：模型把问题拆成少量通用关键词，Broker 在 root summary / Memory root、outline segment、chapter summary、character profile、index card 或受限 document scope 中执行交集或并集匹配，返回候选 chapter refs / source doc ids。对 document scope，候选 snippet SHOULD 围绕共同命中窗口或最紧凑匹配窗口截取，避免只截到文档中较早出现的宽泛关键词。
 - `raw_excerpt` 只能在摘要层不足时使用，并必须带 read reason。
 
 这些 request type 的语义归属在 `NarrativeInquiryBroker`，不应由 Analyzer 单独定义一套平行字段。
@@ -419,7 +433,7 @@ for round in max_rounds:
         return model.final_answer(seed, notebook)
 
     if loop_output.status == needs_user_preference:
-        return ask_user_preference(loop_output, notebook)
+        return ask_user_preference(loop_output, notebook, pause_context=loop_output.pause_context)
 
     if loop_output.status == insufficient_memory:
         return explain_missing_memory(loop_output, notebook)
@@ -449,6 +463,26 @@ return answer_with_budget_limit(seed, notebook)
   "max_evidence_chars_per_request": 2500
 }
 ```
+
+### 5.3 Resume Context
+
+`need_user_input` / `needs_user_preference` 不是完成态。用户补充后，Analyzer
+SHALL 恢复同一个 turn，而不是仅凭聊天历史重新猜测内部状态。
+
+恢复 prompt SHOULD 包含：
+
+- 原始用户问题和用户补充原文。
+- 上次暂停的 `status`、`pause_reason`、`why_it_matters`。
+- 上次 `AnalyzerNotebook` 的 compact 版本，包括 confirmed facts、reasonable inferences、
+  uncertain gaps、candidate / blocked directions 和 user preferences。
+- 已提交 evidence 的 digest；rejected evidence 只可留在 debug trace，不得回放为事实上下文。
+- 用户补充对应的 pending question / blocking gap；若无法确定映射，应以原文保留为 user preference
+  或 user authorization candidate，而不是编造未回答内容。
+- 恢复后的下一步意图，例如“写入 user preference 后重新判断 answer readiness”或
+  “补一轮 bounded evidence request”。
+
+恢复 prompt MUST NOT 包含完整 chain-of-thought。完整 prompt trace 可以保留到调试文件，
+但下一轮模型只能消费结构化 resume context、notebook 和 committed evidence。
 
 预算策略：
 
@@ -524,14 +558,36 @@ Analyzer SHOULD support a shared `text_search` inquiry request as a cheap locato
 `text_search` SHOULD accept:
 
 - `metadata.terms`: short generic search terms chosen by the model.
-- `metadata.match_mode`: `all` for intersection / AND, `any` for broad recall.
+- `metadata.match_mode`: `all` for intersection / AND when every term must appear in the same candidate; `any` for union / OR when any one term can recall a candidate, especially for aliases, translations, surface-form variants or uncertain wording.
 - `metadata.scopes`: one or more of `memory_roots`, `outline_segments`, `chapter_summaries`, `character_profiles`, `index_cards`, and bounded `documents`.
 
-The root summary / Memory root, character profile, outline segment, chapter summary and index card branches are equivalent locator branches. A failed branch SHOULD remain in trace as a missing locator result, but SHOULD NOT be committed into the Analyzer notebook as a semantic fact or repeatedly replayed as prompt history. Once one branch narrows the location to a small set of chapter refs or source doc ids, the loop SHOULD request `chapter_summary` or bounded `raw_excerpt` according to model-judged evidence sufficiency.
+The root summary / Memory root, character profile, outline segment, chapter summary and index card branches are equivalent locator branches. A failed branch SHOULD remain in trace as a missing locator result, but SHOULD NOT be committed into the Analyzer notebook as a semantic fact or repeatedly replayed as prompt history. For document scope, `text_search` returns compact snippets around the common match window or tightest match window, plus source doc ids; it does not return the full document. Once one branch narrows the location to a small set of chapter refs or source doc ids, the loop SHOULD request `chapter_summary` or bounded `raw_excerpt` according to model-judged evidence sufficiency. If the compact snippet already covers the fact granularity required by the question, the loop MAY answer from the snippet with its evidence boundary; if the answer depends on longer setup, adjacent dialogue, motive, or cross-paragraph continuity, the loop SHOULD request bounded `raw_excerpt`.
+
+When a located snippet proves the content of an object, utterance, clue, message or artifact but the user question also depends on whether it was later sent, received, spoken, fulfilled, used, revealed, withdrawn or caused downstream effects, Analyzer SHOULD split those into separate verifiable facts. Evidence for a draft, plan, hesitation, cancellation or other early lifecycle state MUST NOT be promoted into a final "never happened" conclusion unless later or global evidence supports that conclusion. The loop SHOULD inspect later candidate `source_doc_ids`, use `metadata.match_offset` for the next document hits, or issue a narrower `text_search` using the known content terms plus action/outcome terms before finalizing lifecycle claims.
+
+User-question qualifiers are part of the evidence requirement. Analyzer MUST NOT silently downgrade a target described by the user as delivered, received, spoken, used, fulfilled, revealed or otherwise completed into a weaker "prepared / planned / not-yet-completed" target. If a candidate snippet exposes that mismatch, triage SHOULD keep it as gap/conflict evidence and the loop/readiness step SHOULD verify the lifecycle boundary. Once a high-precision phrase, exact line, title, id or distinctive alias has been found, Analyzer SHOULD use that exact phrase as the next document `text_search` term to find repeated occurrences or downstream result scenes, instead of continuing with broad topical terms.
 
 Unbounded document search is not the default. Document text search SHOULD run only when `source_doc_ids` / `document_ids` / chapter refs already bound the scope, or when a product-specific budget explicitly allows a bounded scan. If all locator branches fail, Analyzer SHOULD stop expanding and ask the user for a chapter, scene, nearby event or more specific keywords.
 
 Broker SHOULD 支持通用 query expansion 来处理细节措辞问题中的近义检索，例如“生日快乐歌 / 歌词”可扩展到“生日祝福 / 短信 / 彩信 / 语音 / 录音”等通用表达；该扩展不得包含只服务某一部小说的专名或桥段。
+
+### 6.5 Native Tool-Call Request Adapter
+
+当底层模型 API 支持 OpenAI-compatible / DeepSeek `tools`、`tool_choice`、`tool_calls`
+协议时，Analyzer MAY 将部分 evidence request 暴露为原生 function tools，让模型用官方
+tool-call 参数格式表达取证动作。该适配层只改变“模型如何声明想查什么”，不改变本地事实执行边界：
+
+- `text_search` tool 对应共享 `NarrativeInquiryRequest(type="text_search")`，用于关键词定位。
+- `raw_excerpt` tool 对应共享 `NarrativeInquiryRequest(type="raw_excerpt")`，用于受预算原文回读。
+- `character_profile` tool 对应共享 `NarrativeInquiryRequest(type="character_profile")`，用于人物状态、关系和经历读取。
+
+模型返回 tool_calls 后，Analyzer SHALL 将 tool name / arguments / tool_call_id 转换为现有
+`NarrativeInquiryRequest`，再交给 `NarrativeInquiryBroker` 执行、预算裁剪、去重、trace 和 evidence
+归并。tool 结果不得绕过 Broker，也不得写 Memory、KB 或 Writer artifact。
+
+Native tool-call adapter 不要求保存或回放完整思维链。跨轮连续性 SHALL 由 tool_call 记录、broker
+返回的 `EvidenceBundle`、committed notebook 和 `pause_context` 中的结构化暂停原因承担。若模型没有
+返回 tool_calls，或当前模型 client 不支持 tool calling，Analyzer SHALL 继续使用既有 JSON loop 输出。
 
 ## 7. Prompt Design
 
@@ -555,6 +611,7 @@ System prompt SHOULD 明确：
 - `AnalyzerSeedPacket`
 - 当前 `AnalyzerNotebook`
 - 上轮 evidence bundle 摘要
+- 可选 `resume_context` / `pause_context`，仅在同一 turn 恢复时提供
 - 剩余 budget
 - 用户当前 question
 - 最近 Analyzer conversation brief

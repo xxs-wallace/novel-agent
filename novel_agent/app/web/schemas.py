@@ -155,6 +155,40 @@ class ConversationMessage(BaseModel):
     created_at: datetime
 
 
+class AnalyzerSessionSummary(BaseModel):
+    book_id: str
+    session_id: str
+    title: str
+    source_task_id: str
+    status: str = "idle"
+    turn_count: int = 0
+    latest_turn_id: str = ""
+    latest_preview: str = ""
+    conversation_brief: str = ""
+    created_at: datetime | str
+    updated_at: datetime | str
+
+
+class AnalyzerSessionCreateRequest(BaseModel):
+    title: str = ""
+    initial_question: str = ""
+
+
+class AnalyzerTurnRollbackPreview(BaseModel):
+    book_id: str
+    session_id: str
+    confirmed: bool = False
+    turn_id: str
+    job_id: str = ""
+    previous_turn_id: str = ""
+    candidate_paths: list[str] = Field(default_factory=list)
+    moved_paths: list[str] = Field(default_factory=list)
+    backup_path: str = ""
+    errors: list[str] = Field(default_factory=list)
+    removed_message_count: int = 0
+    message: str = ""
+
+
 class WebActionRequest(BaseModel):
     action: str
     payload: dict[str, Any] = Field(default_factory=dict)

@@ -12,7 +12,7 @@ import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import BinaryIO, Callable, Sequence
 
 
 ImportModule = Callable[[str], object]
@@ -40,6 +40,10 @@ class LauncherConfig:
     @property
     def api_url(self) -> str:
         return f"http://{self.api_host}:{self.api_port}"
+
+    @property
+    def log_path(self) -> Path:
+        return self.repo_root / "runs" / "logs" / "web_launcher.log"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +142,7 @@ class WebWorkbenchLauncher:
     def __init__(self, config: LauncherConfig) -> None:
         self.config = config
         self.processes: list[subprocess.Popen[bytes]] = []
+        self._log_file: BinaryIO | None = None
 
     def ensure_frontend_dependencies(self) -> None:
         node_modules = self.config.web_dir / "node_modules"
@@ -192,22 +197,37 @@ class WebWorkbenchLauncher:
         self.ensure_frontend_dependencies()
         self._warn_if_port_accepts_connections(self.config.api_host, self.config.api_port, "后端")
         self._warn_if_port_accepts_connections(self.config.web_host, self.config.web_port, "前端")
+        log_file = self._open_log_file()
+        print(f"服务日志：{self.config.log_path}")
 
         print(f"启动 Novel Agent Web 后端：{self.config.api_url}")
-        backend = subprocess.Popen(self.backend_command(), cwd=self.config.repo_root, env=self.backend_environment())
+        backend = subprocess.Popen(
+            self.backend_command(),
+            cwd=self.config.repo_root,
+            env=self.backend_environment(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
         self.processes.append(backend)
+        if not self._wait_for_port(self.config.api_host, self.config.api_port, "后端"):
+            self.terminate()
+            return 1
 
         print(f"启动 Novel Agent Web 前端：{self.config.frontend_url}")
         frontend = subprocess.Popen(
             self.frontend_command(),
             cwd=self.config.web_dir,
             env=self.frontend_environment(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
         self.processes.append(frontend)
+        if not self._wait_for_port(self.config.web_host, self.config.web_port, "前端"):
+            self.terminate()
+            return 1
 
         print(f"打开工作台：{self.config.frontend_url}")
         if self.config.open_browser:
-            time.sleep(1.0)
             webbrowser.open(self.config.frontend_url)
 
         return self.wait()
@@ -225,6 +245,8 @@ class WebWorkbenchLauncher:
             print("\n收到退出信号，正在关闭前后端服务。")
             self.terminate()
             return 130
+        finally:
+            self._close_log_file()
 
     def terminate(self) -> None:
         for process in self.processes:
@@ -240,11 +262,37 @@ class WebWorkbenchLauncher:
             except subprocess.TimeoutExpired:
                 process.kill()
 
+    def _open_log_file(self) -> BinaryIO:
+        if self._log_file is None or self._log_file.closed:
+            self.config.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = self.config.log_path.open("ab", buffering=0)
+            self._log_file.write(f"\n===== Novel Agent Web start {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n".encode())
+        return self._log_file
+
+    def _close_log_file(self) -> None:
+        if self._log_file is not None and not self._log_file.closed:
+            self._log_file.close()
+
     def _warn_if_port_accepts_connections(self, host: str, port: int, label: str) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.2)
             if sock.connect_ex((host, port)) == 0:
                 print(f"警告：{label}端口 {host}:{port} 已可连接；如果启动失败，请换一个端口。")
+
+    def _wait_for_port(self, host: str, port: int, label: str, *, timeout_seconds: float = 30.0) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for process in self.processes:
+                if process.poll() is not None:
+                    print(f"{label}启动失败：进程已退出，退出码 {process.returncode}。请查看日志：{self.config.log_path}")
+                    return False
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.2)
+                if sock.connect_ex((host, port)) == 0:
+                    return True
+            time.sleep(0.25)
+        print(f"{label}启动超时：{host}:{port} 未在 {timeout_seconds:.0f}s 内可连接。请查看日志：{self.config.log_path}")
+        return False
 
 
 def _default_repo_root() -> Path:

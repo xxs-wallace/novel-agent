@@ -57,6 +57,7 @@ class WebSessionService:
         self.selected_task_id = ""
         self._messages: dict[str, list[ConversationMessage]] = {}
         self.analyzer_turn_service: Any | None = None
+        self.analyzer_session_service: Any | None = None
 
     def list_tasks(self) -> list[TaskSummary]:
         return [self.task_summary(snapshot) for snapshot in self.facade.list_tasks()]
@@ -240,11 +241,16 @@ class WebSessionService:
 
     def task_progress(self, task_id: str, *, snapshot: TuiTaskSnapshot | None = None) -> TaskProgress:
         snapshot = snapshot or self.facade.task_snapshot(book_id=task_id)
-        modeling_status = self.facade.modeling_status(book_id=snapshot.book_id, db_path=snapshot.db_path)
-        writer_state = self.latest_writer_state(snapshot.book_id)
-        batch_complete_needs_new_plan = self._writer_batch_complete_needs_new_plan(writer_state)
-        identity_block = self._identity_merge_block(snapshot.book_id, db_path=snapshot.db_path)
-        internal_status = self._derive_public_status_source(snapshot=snapshot, writer_state=writer_state)
+        try:
+            modeling_status = self.facade.modeling_status(book_id=snapshot.book_id, db_path=snapshot.db_path)
+            writer_state = self.latest_writer_state(snapshot.book_id)
+            batch_complete_needs_new_plan = self._writer_batch_complete_needs_new_plan(writer_state)
+            identity_block = self._identity_merge_block(snapshot.book_id, db_path=snapshot.db_path)
+            internal_status = self._derive_public_status_source(snapshot=snapshot, writer_state=writer_state)
+        except sqlite3.OperationalError as exc:
+            if not self._is_sqlite_lock_error(exc):
+                raise
+            return self._locked_task_progress(snapshot)
         status = self.status_presenter.present(internal_status)
         return TaskProgress(
             task_id=snapshot.book_id,
@@ -281,6 +287,32 @@ class WebSessionService:
             modeling_ready=modeling_status.ready_map(),
             counts=dict(modeling_status.counts),
             technical_available=bool(writer_state),
+        )
+
+    @staticmethod
+    def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).lower()
+        return "database is locked" in message or "database is busy" in message
+
+    @staticmethod
+    def _locked_task_progress(snapshot: TuiTaskSnapshot) -> TaskProgress:
+        return TaskProgress(
+            task_id=snapshot.book_id,
+            flow="阅读",
+            step="任务数据正在写入",
+            next_action="稍后自动刷新任务列表",
+            message="后台任务正在更新阅读数据，当前进度暂时不可读取。",
+            read_progress={
+                "completed": snapshot.segmentation_completed_doc_id,
+                "total": snapshot.max_doc_id,
+            },
+            close_read_progress={
+                "completed": snapshot.close_read_completed_doc_id,
+                "total": snapshot.max_doc_id,
+            },
+            modeling_ready={},
+            counts={},
+            technical_available=False,
         )
 
     def writer_start_preflight(self, task_id: str) -> WriterStartPreflight:
@@ -400,6 +432,21 @@ class WebSessionService:
                 continue
             history.append({"role": message.role, "content": message.content})
         return history
+
+    def remove_analyzer_turn_messages(self, task_id: str, *, turn_id: str) -> int:
+        if not turn_id:
+            return 0
+        messages = self._messages.get(task_id, [])
+        retained = [
+            message
+            for message in messages
+            if not (
+                message.payload.get("channel") == "outline_analyzer"
+                and message.payload.get("turn_id") == turn_id
+            )
+        ]
+        self._messages[task_id] = retained
+        return len(messages) - len(retained)
 
     def append_message(
         self,
@@ -1485,7 +1532,7 @@ class WebSessionService:
                 ),
                 WriterReviewAction(
                     action="rewrite_chapter",
-                    label="基于反馈重写",
+                    label="基于反馈修改正文",
                     payload=dict(common_payload),
                     description="基于当前已通过的章节梗概和你的反馈重写，不写回记忆。",
                     requires_input=True,
@@ -1493,7 +1540,7 @@ class WebSessionService:
                 ),
                 WriterReviewAction(
                     action="replan_chapter",
-                    label="修改章节梗概后重写",
+                    label="重新生成章节梗概",
                     payload=dict(common_payload),
                     description="退回章节梗概审阅点，不写回记忆。",
                     requires_input=True,

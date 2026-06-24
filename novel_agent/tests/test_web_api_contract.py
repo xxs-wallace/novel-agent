@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +18,8 @@ from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.run_interactive import run_writer_workflow_action
 from novel_agent.app.web.main import create_app
-from novel_agent.app.web.schemas import DecisionCard, JobSummary, WebActionRequest
+from novel_agent.app.web.routes.tasks import _progress_with_failed_job
+from novel_agent.app.web.schemas import DecisionCard, JobSummary, TaskProgress, WebActionRequest
 from novel_agent.app.web.services.artifact_ids import decode_artifact_id
 from novel_agent.app.web.services.artifact_view_service import ArtifactViewService
 from novel_agent.app.web.services.job_manager import JobManager
@@ -160,6 +162,211 @@ def test_web_outline_analyzer_message_creates_job_and_does_not_submit_writer_act
     assert "supplement_text" not in rendered
     assert "revision_feedback" not in rendered
     assert "answer_text" not in rendered
+
+
+def test_outline_analyzer_sync_restores_completed_turn_after_web_restart(tmp_path: Path) -> None:
+    app = create_app(repo_root=tmp_path)
+    turns = app.state.analyzer_turn_service
+    turn = turns.create_or_continue_turn(
+        book_id="book-one",
+        question="请分析主角关系走向",
+        user_message_id="original-user-message",
+    )
+    turns.bind_job(book_id="book-one", turn_id=turn.turn_id, job_id="job-restored")
+    turns.mark_succeeded(
+        book_id="book-one",
+        turn_id=turn.turn_id,
+        assistant_message_id="original-assistant-message",
+        result={
+            "status": "ok",
+            "answer": "结论：这条关系线适合写成克制的悲剧。",
+            "sources": [{"label": "故事大纲"}],
+        },
+    )
+
+    restarted_session = WebSessionService(repo_root=tmp_path)
+    turns.sync_messages(book_id="book-one", session_service=restarted_session)
+    messages = restarted_session._messages["book-one"]  # noqa: SLF001 - verify restart recovery stream.
+
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[0].content == "请分析主角关系走向"
+    assert messages[0].payload["original_message_id"] == "original-user-message"
+    assert messages[1].content == "结论：这条关系线适合写成克制的悲剧。"
+    assert messages[1].payload["original_message_id"] == "original-assistant-message"
+    assert messages[1].payload["sources"] == [{"label": "故事大纲"}]
+
+    turns.sync_messages(book_id="book-one", session_service=restarted_session)
+    assert len(restarted_session._messages["book-one"]) == 2  # noqa: SLF001
+
+
+def test_web_outline_analyzer_session_carries_public_discussion_context(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            long_recommendation = " ".join([f"建议细节{i}: 把配角升级为共谋者并承担主动选择。" for i in range(20)])
+            return {
+                "status": "ok",
+                "answer": f"公开结论 {len(self.calls)}：先让人物目标冲突浮出水面。{long_recommendation}",
+                "sources": [{"label": "故事大纲"}],
+            }
+
+        def task_snapshot(self, *, book_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(book_id=book_id, db_path=tmp_path / f"{book_id}.db")
+
+        def db_path_for_book(self, book_id: str) -> Path:
+            return tmp_path / f"{book_id}.db"
+
+    app = create_app(repo_root=tmp_path)
+    fake_facade = _FakeFacade()
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
+    session.analyzer_session_service = app.state.analyzer_session_service
+    app.state.web_session_service = session
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/tasks/book-one/messages",
+            json={"content": "请评价这个人物关系大纲。", "payload": {"channel": "outline_analyzer"}},
+        )
+        assert first.status_code == 200
+        first_payload = first.json()["payload"]
+        first_session_id = first_payload["analyzer_session_id"]
+        asyncio.run(app.state.job_manager.wait(first_payload["job_id"], timeout=2.0))
+
+        sessions = client.get("/api/tasks/book-one/analyzer-sessions")
+        assert sessions.status_code == 200
+        assert sessions.json()[0]["session_id"] == first_session_id
+
+        second = client.post(
+            "/api/tasks/book-one/messages",
+            json={
+                "content": "如果我把配角改成共谋者，会不会更强？",
+                "payload": {"channel": "outline_analyzer", "analyzer_session_id": first_session_id},
+            },
+        )
+        assert second.status_code == 200
+        second_payload = second.json()["payload"]
+        assert second_payload["analyzer_session_id"] == first_session_id
+        asyncio.run(app.state.job_manager.wait(second_payload["job_id"], timeout=2.0))
+
+        session_messages = client.get(f"/api/tasks/book-one/messages?analyzer_session_id={first_session_id}")
+        assert session_messages.status_code == 200
+        assert [item["role"] for item in session_messages.json()] == ["user", "job", "assistant", "user", "job", "assistant"]
+
+    assert len(fake_facade.calls) == 2
+    history = "\n".join(item["content"] for item in fake_facade.calls[1]["conversation_history"])
+    assert "同一个 Analyzer 讨论 session 的公开对话背景" in history
+    assert "user_proposed_outline" in history
+    assert "discussion_recommendations" in history
+    assert "不能把讨论目标替换成 committed outline" in history
+    assert "请评价这个人物关系大纲" in history
+    assert "公开结论 1" in history
+    assert "建议细节19: 把配角升级为共谋者并承担主动选择" in history
+    assert "如果我把配角改成共谋者" not in history
+    assert "system_prompt" not in history
+    assert "evidence" not in history.lower()
+
+
+def test_web_outline_analyzer_session_can_rollback_latest_turn(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append(kwargs)
+            return {
+                "status": "ok",
+                "answer": f"公开结论 {len(self.calls)}：这一轮大纲建议。",
+                "sources": [{"label": "故事大纲"}],
+            }
+
+        def task_snapshot(self, *, book_id: str):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(book_id=book_id, db_path=tmp_path / f"{book_id}.db")
+
+        def db_path_for_book(self, book_id: str) -> Path:
+            return tmp_path / f"{book_id}.db"
+
+    app = create_app(repo_root=tmp_path)
+    fake_facade = _FakeFacade()
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
+    session.analyzer_session_service = app.state.analyzer_session_service
+    app.state.web_session_service = session
+
+    with TestClient(app) as client:
+        first = client.post("/api/tasks/book-one/messages", json={"content": "第一轮讨论", "payload": {"channel": "outline_analyzer"}})
+        assert first.status_code == 200
+        first_payload = first.json()["payload"]
+        session_id = first_payload["analyzer_session_id"]
+        asyncio.run(app.state.job_manager.wait(first_payload["job_id"], timeout=2.0))
+
+        second = client.post(
+            "/api/tasks/book-one/messages",
+            json={"content": "第二轮不满意的大纲", "payload": {"channel": "outline_analyzer", "analyzer_session_id": session_id}},
+        )
+        assert second.status_code == 200
+        second_payload = second.json()["payload"]
+        second_turn_id = second_payload["turn_id"]
+        asyncio.run(app.state.job_manager.wait(second_payload["job_id"], timeout=2.0))
+
+        preview = client.delete(f"/api/tasks/book-one/analyzer-sessions/{session_id}/latest-turn")
+        assert preview.status_code == 200
+        assert preview.json()["confirmed"] is False
+        assert preview.json()["turn_id"] == second_turn_id
+
+        confirmed = client.delete(f"/api/tasks/book-one/analyzer-sessions/{session_id}/latest-turn?confirm=true")
+        assert confirmed.status_code == 200
+        payload = confirmed.json()
+        assert payload["confirmed"] is True
+        assert payload["turn_id"] == second_turn_id
+        assert payload["removed_message_count"] == 3
+        assert Path(payload["backup_path"]).exists()
+
+        sessions = client.get("/api/tasks/book-one/analyzer-sessions")
+        assert sessions.status_code == 200
+        restored = [item for item in sessions.json() if item["session_id"] == session_id][0]
+        assert restored["turn_count"] == 1
+        assert restored["latest_turn_id"] == first_payload["turn_id"]
+
+        messages = client.get(f"/api/tasks/book-one/messages?analyzer_session_id={session_id}")
+        assert messages.status_code == 200
+        rendered = json.dumps(messages.json(), ensure_ascii=False)
+        assert "第二轮不满意的大纲" not in rendered
+        assert second_turn_id not in rendered
+        assert "第一轮讨论" in rendered
+
+
+def test_web_outline_analyzer_imports_legacy_turn_as_session(tmp_path: Path) -> None:
+    app = create_app(repo_root=tmp_path)
+    turns = app.state.analyzer_turn_service
+    turn = turns.create_or_continue_turn(
+        book_id="book-one",
+        question="楚子航被抹除这条大纲是否成立？",
+        user_message_id="legacy-user-message",
+    )
+    turns.bind_job(book_id="book-one", turn_id=turn.turn_id, job_id="legacy-job")
+    turns.mark_succeeded(
+        book_id="book-one",
+        turn_id=turn.turn_id,
+        assistant_message_id="legacy-assistant-message",
+        result={"status": "ok", "answer": "结论：成立，但需要强化女主角的主动选择。", "sources": [{"label": "故事大纲"}]},
+    )
+
+    with TestClient(app) as client:
+        sessions = client.get("/api/tasks/book-one/analyzer-sessions")
+        assert sessions.status_code == 200
+        imported = sessions.json()[0]
+        assert imported["session_id"] == f"analyzer-session-{turn.turn_id[:12]}"
+        assert imported["latest_turn_id"] == turn.turn_id
+        assert imported["title"] == "楚子航被抹除大纲评估"
+
+        messages = client.get(f"/api/tasks/book-one/messages?analyzer_session_id={imported['session_id']}")
+        assert messages.status_code == 200
+        assert [item["role"] for item in messages.json()] == ["user", "assistant"]
+        assert messages.json()[1]["content"] == "结论：成立，但需要强化女主角的主动选择。"
 
 
 def test_identity_merge_message_sync_retires_resolved_candidate_cards(tmp_path: Path) -> None:
@@ -386,6 +593,15 @@ def test_web_outline_analyzer_need_user_input_keeps_turn_open(tmp_path: Path) ->
         assert len(fake_facade.calls) == 2
         assert "用户补充" in fake_facade.calls[1]["question"]
         assert "先不要揭开" in fake_facade.calls[1]["question"]
+        resume_messages = [
+            item["content"]
+            for item in fake_facade.calls[1]["conversation_history"]
+            if item["role"] == "system" and "resume_context" in item["content"]
+        ]
+        assert resume_messages
+        assert "previous_answer_or_prompt" in resume_messages[-1]
+        assert "需要你确认" in resume_messages[-1]
+        assert "不要把 debug trace 或未提交猜测当成事实" in resume_messages[-1]
         assert session._messages["book-one"][-1].payload["status"] == "ok"  # noqa: SLF001
 
 
@@ -478,6 +694,38 @@ def test_task_status_shows_active_close_read_job_instead_of_paused_checkpoint(tm
     assert tasks.json()[0]["active_job"]["job_id"] == "job-close-read"
 
 
+def test_task_list_degrades_when_modeling_status_database_is_locked(tmp_path: Path) -> None:
+    class _LockedFacade:
+        def task_snapshot(self, *, book_id: str, source_path: str = "") -> TuiTaskSnapshot:
+            return TuiTaskSnapshot(
+                book_id=book_id,
+                source_path=source_path,
+                db_path=tmp_path / ".indexes" / f"{book_id}.db",
+                segmentation_completed_doc_id=2,
+                close_read_completed_doc_id=1,
+                max_doc_id=4,
+            )
+
+        def list_tasks(self) -> list[TuiTaskSnapshot]:
+            return [self.task_snapshot(book_id="book-one")]
+
+        def modeling_status(self, *, book_id: str, db_path: Path | None = None) -> ModelingStatusSnapshot:
+            raise sqlite3.OperationalError("database is locked")
+
+    session = WebSessionService(repo_root=tmp_path, facade=_LockedFacade())  # type: ignore[arg-type]
+
+    tasks = session.list_tasks()
+
+    assert len(tasks) == 1
+    progress = tasks[0].progress
+    assert progress is not None
+    assert progress.step == "任务数据正在写入"
+    assert progress.next_action == "稍后自动刷新任务列表"
+    assert progress.read_progress == {"completed": 2, "total": 4}
+    assert progress.close_read_progress == {"completed": 1, "total": 4}
+    assert progress.technical_available is False
+
+
 def test_task_status_shows_active_outline_analyzer_job_before_close_read(tmp_path: Path) -> None:
     class _FakeJobManager:
         def active_jobs(self, *, task_id: str | None = None, job_type: str | None = None) -> list[JobSummary]:
@@ -554,6 +802,34 @@ def test_task_status_shows_recent_failed_close_read_job_instead_of_paused_checkp
     assert payload["step"] == "阅读遇到问题"
     assert payload["next_action"] == "查看错误并从最近 checkpoint 重试"
     assert "missing chapter_summary_md plot synopsis" in payload["message"]
+
+
+def test_completed_close_read_progress_is_not_overridden_by_failed_close_read_job() -> None:
+    progress = TaskProgress(
+        task_id="book-one",
+        flow="阅读",
+        step="阅读记忆已可用",
+        next_action="可以构建知识库或开始续写",
+        close_read_progress={"completed": 10, "total": 10},
+    )
+    failed_job = JobSummary(
+        job_id="job-close-read-failed",
+        task_id="book-one",
+        type="close_read",
+        status="failed",
+        message="后台任务遇到问题：LLM request timed out after 120s for model=deepseek-v4-pro",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        events_url="/api/jobs/job-close-read-failed/events",
+    )
+
+    updated = _progress_with_failed_job(progress, failed_job=failed_job)
+
+    assert updated.flow == "阅读"
+    assert updated.step == "阅读记忆已可用"
+    assert updated.next_action == "可以构建知识库或开始续写"
+    assert "阅读已完成" in updated.message
+    assert "阅读遇到问题" not in updated.step
 
 
 def test_task_status_counts_narrative_scene_index_cards(tmp_path: Path) -> None:

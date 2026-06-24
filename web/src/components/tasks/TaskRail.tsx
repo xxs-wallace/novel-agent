@@ -183,6 +183,7 @@ export function TaskRail({
                   disabled={isBusy}
                   onAction={(action, payload) => onAction(task.task_id, action, payload)}
                   onStartWriter={() => startWriterForTask(task.task_id)}
+                  startWriterLabel={task.source_path ? "开始续写" : "开始原创写作"}
                   onResetCloseRead={() => void onResetCloseRead(task.task_id)}
                   onDeleteWriterRunPreview={() => void previewWriterRunDelete(task.task_id)}
                   onDeletePreview={() => void previewDelete(task.task_id)}

@@ -800,8 +800,8 @@ class ArtifactViewService:
         payload = self._load_json(path)
         status_label = {
             "accepted": "提交本章正文",
-            "rewrite_requested": "基于反馈重写",
-            "replan_requested": "修改章节梗概后重写",
+            "rewrite_requested": "基于反馈修改正文",
+            "replan_requested": "重新生成章节梗概",
             "discarded": "作废本次草稿",
         }.get(str(payload.get("status") or ""), str(payload.get("status") or "待决定"))
         return ArtifactView(
@@ -1378,7 +1378,7 @@ class ArtifactViewService:
     def _generation_next_action_text(next_action: str) -> str:
         return {
             "writeback_review": "提交正文并更新续写记忆",
-            "agent_loop_rewrite_draft": "基于当前已通过章节梗概重写正文",
+            "agent_loop_rewrite_draft": "基于上一版草稿修改正文",
             "agent_loop_replan_chapter": "回到章节标题与梗概审阅",
             "halted": "暂停在当前草稿",
         }.get(next_action, "等待你选择下一步")

@@ -119,6 +119,7 @@ FACT_STATUSES = {
     "candidate",
     "assumption",
     "user_authorized",
+    "reference_advice",
     "missing",
 }
 RESEARCH_REQUEST_TYPES = {
@@ -127,6 +128,7 @@ RESEARCH_REQUEST_TYPES = {
     "character_profile",
     "world_concept",
     "structure_pattern",
+    "reference_outline_design",
 }
 RESEARCH_PRIORITIES = {"high", "medium", "low"}
 CHARACTER_MENTION_STATUSES = {"resolved", "ambiguous", "missing"}
@@ -232,8 +234,15 @@ GenerationReviewCheckpoint = Literal[
     "halted",
 ]
 ChapterReplanScope = Literal["current_chapter"]
-FactStatus = Literal["confirmed", "candidate", "assumption", "user_authorized", "missing"]
-ResearchRequestType = Literal["text_search", "story_detail", "character_profile", "world_concept", "structure_pattern"]
+FactStatus = Literal["confirmed", "candidate", "assumption", "user_authorized", "reference_advice", "missing"]
+ResearchRequestType = Literal[
+    "text_search",
+    "story_detail",
+    "character_profile",
+    "world_concept",
+    "structure_pattern",
+    "reference_outline_design",
+]
 ResearchPriority = Literal["high", "medium", "low"]
 CharacterMentionStatus = Literal["resolved", "ambiguous", "missing"]
 CharacterMentionType = Literal["name", "alias", "title", "new_character_hint"]
@@ -292,6 +301,9 @@ def _normalize_fact_status(value: object) -> str:
         "user": "user_authorized",
         "authorized": "user_authorized",
         "user_authorised": "user_authorized",
+        "reference": "reference_advice",
+        "reference_only": "reference_advice",
+        "advice": "reference_advice",
         "unknown": "missing",
     }
     return aliases.get(normalized, normalized)
@@ -453,6 +465,8 @@ class OutlineSeedPacket:
     optional_open_thread_index: list[dict[str, Any]] = field(default_factory=list)
     source_arc_index: list[dict[str, Any]] = field(default_factory=list)
     structure_pattern_index: list[dict[str, Any]] = field(default_factory=list)
+    reference_work: dict[str, Any] = field(default_factory=dict)
+    reference_outline_design_index: list[dict[str, Any]] = field(default_factory=list)
     sources: list[TraceableSource] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -472,6 +486,8 @@ class OutlineSeedPacket:
         self.optional_open_thread_index = self._normalize_index_list(self.optional_open_thread_index)
         self.source_arc_index = self._normalize_index_list(self.source_arc_index)
         self.structure_pattern_index = self._normalize_index_list(self.structure_pattern_index)
+        self.reference_work = dict(self.reference_work) if isinstance(self.reference_work, Mapping) else {}
+        self.reference_outline_design_index = self._normalize_index_list(self.reference_outline_design_index)
 
     @staticmethod
     def _normalize_index_list(items: Sequence[object]) -> list[dict[str, Any]]:
@@ -499,6 +515,8 @@ class OutlineSeedPacket:
             "optional_open_thread_index": [dict(item) for item in self.optional_open_thread_index],
             "source_arc_index": [dict(item) for item in self.source_arc_index],
             "structure_pattern_index": [dict(item) for item in self.structure_pattern_index],
+            "reference_work": dict(self.reference_work),
+            "reference_outline_design_index": [dict(item) for item in self.reference_outline_design_index],
             "sources": [item.to_dict() for item in self.sources],
         }
 
@@ -537,6 +555,10 @@ class OutlineSeedPacket:
             structure_pattern_index=[
                 dict(item) for item in (data.get("structure_pattern_index") or []) if isinstance(item, Mapping)
             ],
+            reference_work=dict(data.get("reference_work") or {}) if isinstance(data.get("reference_work"), Mapping) else {},
+            reference_outline_design_index=[
+                dict(item) for item in (data.get("reference_outline_design_index") or []) if isinstance(item, Mapping)
+            ],
             sources=_coerce_sources(cast(Sequence[object], data.get("sources") or [])),
         )
 
@@ -557,7 +579,10 @@ class ResearchRequest:
         self.request_id = _normalize_text(self.request_id)
         normalized_type = _normalize_text(self.request_type).lower()
         if normalized_type not in RESEARCH_REQUEST_TYPES:
-            raise ValueError("request_type must be text_search, story_detail, character_profile, world_concept, or structure_pattern")
+            raise ValueError(
+                "request_type must be text_search, story_detail, character_profile, "
+                "world_concept, structure_pattern, or reference_outline_design"
+            )
         self.request_type = normalized_type  # type: ignore[assignment]
         self.query = _normalize_text(self.query)
         self.purpose = _normalize_text(self.purpose)
@@ -649,7 +674,7 @@ class StoryDetailResult:
         self.missing_facets = _normalize_string_list(self.missing_facets)
         normalized_status = _normalize_fact_status(self.fact_status)
         if normalized_status not in FACT_STATUSES:
-            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, or missing")
+            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, reference_advice, or missing")
         self.fact_status = normalized_status  # type: ignore[assignment]
 
     def to_dict(self) -> dict[str, Any]:
@@ -693,7 +718,7 @@ class ResearchResult:
         ]
         normalized_status = _normalize_fact_status(self.fact_status)
         if normalized_status not in FACT_STATUSES:
-            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, or missing")
+            raise ValueError("fact_status must be confirmed, candidate, assumption, user_authorized, reference_advice, or missing")
         self.fact_status = normalized_status  # type: ignore[assignment]
         self.confidence = max(0.0, min(float(self.confidence or 0), 1.0))
         self.covered_facets = _normalize_string_list(self.covered_facets)
@@ -1541,6 +1566,7 @@ class ContinuationIntent:
     notes: str = ""
     story_scale: dict[str, Any] = field(default_factory=dict)
     climax_plan: dict[str, Any] = field(default_factory=dict)
+    reference_work: dict[str, Any] = field(default_factory=dict)
     sources: list[TraceableSource] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -1550,6 +1576,7 @@ class ContinuationIntent:
         self.avoidances = _normalize_string_list(self.avoidances)
         self.preferred_outcome = _normalize_text(self.preferred_outcome)
         self.notes = _normalize_text(self.notes)
+        self.reference_work = dict(self.reference_work) if isinstance(self.reference_work, Mapping) else {}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1561,6 +1588,7 @@ class ContinuationIntent:
             "notes": self.notes,
             "story_scale": dict(self.story_scale),
             "climax_plan": dict(self.climax_plan),
+            "reference_work": dict(self.reference_work),
             "sources": [item.to_dict() for item in self.sources],
         }
 

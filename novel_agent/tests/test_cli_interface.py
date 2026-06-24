@@ -36,7 +36,7 @@ def test_status_presenter_translates_internal_writer_and_read_states() -> None:
         ]
     )
 
-    assert "请确认本章写作材料" in rendered
+    assert "旧写作材料确认待迁移" in rendered
     assert "请决定当前章节草稿" in rendered
     assert "请审阅本批剧情大纲" in rendered
     assert "已保存你的修改" in rendered
@@ -67,17 +67,17 @@ def test_writer_status_presenter_covers_confirmation_points_events_and_gui_actio
 
     assert "已保存你的修改" in rendered
     assert "请审阅本批剧情大纲" in rendered
-    assert "请确认本章写作材料" in rendered
+    assert "旧写作材料确认待迁移" in rendered
     assert "请决定当前章节草稿" in rendered
     assert "提交本章正文" in rendered
-    assert "请调整章节规划后重写" in rendered
+    assert "请重新生成章节梗概" in rendered
     assert "已确认，继续下一步" in rendered
     assert "等待你确认" in rendered
     assert "提交本章正文" in rendered
-    assert "调整字数后重写" in rendered
-    assert "修改章节梗概后重写" in rendered
+    assert "基于反馈修改正文" in rendered
+    assert "重新生成章节梗概" in rendered
     assert "作废本次草稿" in rendered
-    assert "确认修改后的章节梗概，并重新生成长度计划" in rendered
+    assert "确认重新生成的章节梗概并继续" in rendered
     assert "保存不等于确认" in rendered
     for token in presenter.FORBIDDEN_PUBLIC_TOKENS:
         assert token not in rendered
@@ -899,14 +899,14 @@ def test_decision_panel_maps_blocking_choices_to_user_visible_next_status() -> N
     rendered = panel.render()
 
     assert "提交本章正文 -> 提交正文并更新续写记忆" in rendered
-    assert "调整字数后重写 -> 请确认章节长度与节奏" in rendered
-    assert "修改章节梗概后重写 -> 请调整章节规划后重写" in rendered
+    assert "基于反馈修改正文 -> 正在修改正文草稿" in rendered
+    assert "重新生成章节梗概 -> 返回章节梗概审阅" in rendered
     assert "作废本次草稿 -> 流程已暂停" in rendered
     assert "稍后再决定 -> 请决定当前章节草稿" in rendered
     assert panel.choose("2").workflow_action == "show_chapter_acceptance_form"
-    assert panel.choose("2").payload == {"status": "revise_length"}
+    assert panel.choose("2").payload == {"status": "rewrite_requested"}
     assert panel.choose("3").workflow_action == "show_chapter_acceptance_form"
-    assert panel.choose("3").payload == {"status": "replan_chapter"}
+    assert panel.choose("3").payload == {"status": "replan_requested"}
 
 
 def test_prompt_writer_review_uses_public_status_copy_and_save_guidance(
@@ -932,7 +932,7 @@ def test_prompt_writer_review_uses_public_status_copy_and_save_guidance(
     output = capsys.readouterr().out
 
     assert confirmed is False
-    assert "请确认本章写作材料" in output
+    assert "旧写作材料确认待迁移" in output
     assert "保存只是保留修改" in output
     assert "保存不等于确认" in output
     for token in WriterStatusPresenter.FORBIDDEN_PUBLIC_TOKENS:

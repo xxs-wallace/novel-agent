@@ -213,6 +213,14 @@ class WebActionService:
                 progress=self.session_service.task_progress(task_id),
             )
 
+        explicit_workflow_action = str(payload.get("workflow_action") or payload.get("writer_action") or "").strip()
+        if explicit_workflow_action:
+            return await self._start_job_action(
+                task_id=task_id,
+                action="resume",
+                payload={**payload, "run_id": run_id, "workflow_action": explicit_workflow_action},
+            )
+
         self.session_service.sync_writer_question_messages(task_id)
         self.session_service.sync_writer_review_messages(task_id)
         active_stage = self.session_service._active_writer_stage(writer_state)
@@ -238,6 +246,19 @@ class WebActionService:
                 action="resume",
                 payload={**payload, "run_id": run_id, "workflow_action": resume_workflow_action},
             )
+        if active_stage == "completed":
+            next_chapter_id = self._next_chapter_id_from_run(run_id)
+            if next_chapter_id:
+                return await self._start_job_action(
+                    task_id=task_id,
+                    action="resume",
+                    payload={
+                        **payload,
+                        "run_id": run_id,
+                        "workflow_action": "prepare_execution",
+                        "chapter_id": next_chapter_id,
+                    },
+                )
 
         recovery_message = self.session_service.append_writer_recovery_message(
             task_id,
@@ -1179,6 +1200,24 @@ class WebActionService:
 
         intent["story_scale"] = cls._writer_story_scale_payload(payload, intent.get("story_scale"))
         intent["climax_plan"] = cls._writer_climax_plan_payload(payload.get("climax_plan"), intent.get("climax_plan"))
+        reference_work = dict(intent.get("reference_work") or {}) if isinstance(intent.get("reference_work"), Mapping) else {}
+        raw_reference_work = payload.get("reference_work")
+        if isinstance(raw_reference_work, Mapping):
+            reference_work.update(dict(raw_reference_work))
+        reference_task_id = str(
+            payload.get("reference_task_id")
+            or payload.get("reference_book_id")
+            or payload.get("reference_source_task_id")
+            or reference_work.get("source_task_id")
+            or ""
+        ).strip()
+        if reference_task_id:
+            reference_work.setdefault("source_task_id", reference_task_id)
+            reference_work.setdefault("mode", "reference_guided_original_creation")
+            reference_work.setdefault("usage_scope", "outline_advice_and_final_prose_style_reference")
+            reference_work.setdefault("truth_policy", "reference_advice_only")
+            reference_work.setdefault("style_policy", "use_fragments_only_as_prose_style_reference_at_draft_stage")
+            intent["reference_work"] = reference_work
         if "allow_character_cast" in payload:
             intent["allow_character_cast"] = bool(payload.get("allow_character_cast"))
         return intent
@@ -1870,7 +1909,7 @@ class WebActionService:
                     actions=[
                         {
                             "action": "rewrite_chapter" if item.workflow_action == "revise_chapter_length" else item.workflow_action,
-                            "label": "基于反馈重写本章" if item.workflow_action == "revise_chapter_length" else item.label,
+                            "label": "基于反馈修改正文" if item.workflow_action == "revise_chapter_length" else item.label,
                             "description": item.description,
                             "variant": "primary" if item.workflow_action == "accept_chapter" else "danger" if item.workflow_action == "discard_chapter" else "secondary",
                             "requires_input": item.workflow_action in {"rewrite_chapter", "revise_chapter_length", "replan_chapter"},

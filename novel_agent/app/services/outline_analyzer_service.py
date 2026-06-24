@@ -30,6 +30,176 @@ from .narrative_memory_query_service import NarrativeMemoryQueryService
 
 logger = logging.getLogger(__name__)
 
+CONVERSATION_BRIEF_SEED_LIMIT = 1800
+CONVERSATION_BRIEF_FINAL_LIMIT = 8000
+CONVERSATION_HISTORY_ITEM_LIMIT = 9000
+CONVERSATION_HISTORY_TOTAL_LIMIT = 12000
+
+
+def _build_analyzer_inquiry_tools() -> list[Any]:
+    from smolagents import Tool
+
+    class TextSearchTool(Tool):
+        name = "text_search"
+        output_type = "object"
+        description = (
+            "Run a bounded lexical locator over modeled story artifacts or source documents. "
+            "Use this before raw_excerpt when keywords can narrow candidate chapters or source_doc_ids. "
+            "match_mode='all' means every term must appear in the same candidate; match_mode='any' recalls aliases, "
+            "surface variants, uncertain wording, or alternative spellings."
+        )
+        inputs = {
+            "query": {"type": "string", "description": "Brief locator query in natural language."},
+            "purpose": {"type": "string", "description": "Why this search is needed for the user's question."},
+            "terms": {"type": "array", "description": "Specific lexical terms to search for."},
+            "match_mode": {"type": "string", "description": "'all' for AND/intersection, 'any' for OR/union."},
+            "scopes": {
+                "type": "array",
+                "description": "Search scopes such as memory_roots, outline_segments, chapter_summaries, character_profiles, index_cards, or documents.",
+            },
+            "priority": {"type": "string", "description": "high, medium, or low.", "nullable": True},
+            "expected_depth": {"type": "string", "description": "Usually locator or raw_document_locator.", "nullable": True},
+            "allow_document_scan": {
+                "type": "boolean",
+                "description": "Whether a bounded document scan is allowed when no source_doc_ids are already bound.",
+                "nullable": True,
+            },
+            "match_offset": {
+                "type": "integer",
+                "description": "Document match pagination offset for later pages of document matches.",
+                "nullable": True,
+            },
+            "chapter_refs": {"type": "array", "description": "Optional bounded chapter refs.", "nullable": True},
+            "document_ids": {"type": "array", "description": "Optional bounded document ids.", "nullable": True},
+            "source_doc_ids": {"type": "array", "description": "Optional bounded source document ids.", "nullable": True},
+        }
+
+        def forward(
+            self,
+            query: str,
+            purpose: str,
+            terms: list[Any],
+            match_mode: str,
+            scopes: list[Any],
+            priority: str | None = None,
+            expected_depth: str | None = None,
+            allow_document_scan: bool | None = None,
+            match_offset: int | None = None,
+            chapter_refs: list[Any] | None = None,
+            document_ids: list[Any] | None = None,
+            source_doc_ids: list[Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "query": query,
+                "purpose": purpose,
+                "terms": terms,
+                "match_mode": match_mode,
+                "scopes": scopes,
+                "priority": priority,
+                "expected_depth": expected_depth,
+                "allow_document_scan": allow_document_scan,
+                "match_offset": match_offset,
+                "chapter_refs": chapter_refs or [],
+                "document_ids": document_ids or [],
+                "source_doc_ids": source_doc_ids or [],
+            }
+
+    class RawExcerptTool(Tool):
+        name = "raw_excerpt"
+        output_type = "object"
+        description = (
+            "Read a bounded excerpt from specific chapters or source documents when locator/summary evidence is not "
+            "enough to answer the required fact granularity, wording, motive, dialogue, or scene continuity."
+        )
+        inputs = {
+            "query": {"type": "string", "description": "The exact fact, wording, or scene detail to confirm."},
+            "purpose": {"type": "string", "description": "Why direct source text is needed."},
+            "read_reason": {"type": "string", "description": "Why summary/locator evidence is insufficient."},
+            "expected_confirmation": {"type": "string", "description": "What the excerpt should confirm or falsify."},
+            "affects_analysis": {"type": "string", "description": "Which answer judgment this read affects."},
+            "priority": {"type": "string", "description": "high, medium, or low.", "nullable": True},
+            "expected_depth": {"type": "string", "description": "Usually bounded_raw_excerpt.", "nullable": True},
+            "chapter_refs": {"type": "array", "description": "Bounded chapter refs to read.", "nullable": True},
+            "document_ids": {"type": "array", "description": "Bounded document ids to read.", "nullable": True},
+            "source_doc_ids": {"type": "array", "description": "Bounded source document ids to read.", "nullable": True},
+            "excerpt_focus": {"type": "array", "description": "Optional focus terms for excerpt selection.", "nullable": True},
+        }
+
+        def forward(
+            self,
+            query: str,
+            purpose: str,
+            read_reason: str,
+            expected_confirmation: str,
+            affects_analysis: str,
+            priority: str | None = None,
+            expected_depth: str | None = None,
+            chapter_refs: list[Any] | None = None,
+            document_ids: list[Any] | None = None,
+            source_doc_ids: list[Any] | None = None,
+            excerpt_focus: list[Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "query": query,
+                "purpose": purpose,
+                "read_reason": read_reason,
+                "expected_confirmation": expected_confirmation,
+                "affects_analysis": affects_analysis,
+                "priority": priority,
+                "expected_depth": expected_depth,
+                "chapter_refs": chapter_refs or [],
+                "document_ids": document_ids or [],
+                "source_doc_ids": source_doc_ids or [],
+                "excerpt_focus": excerpt_focus or [],
+            }
+
+    class CharacterProfileTool(Tool):
+        name = "character_profile"
+        output_type = "object"
+        description = (
+            "Read a character profile for canonical state, goals, relationships, abilities, recent activity, and "
+            "known story events. Prefer this before raw_excerpt when the question is about a character's status or relationship."
+        )
+        inputs = {
+            "name": {"type": "string", "description": "Character name or alias to inspect."},
+            "query": {"type": "string", "description": "Specific character detail or relationship question."},
+            "purpose": {"type": "string", "description": "Why this profile is needed for the analysis."},
+            "priority": {"type": "string", "description": "high, medium, or low.", "nullable": True},
+            "expected_depth": {"type": "string", "description": "Requested profile depth.", "nullable": True},
+            "story_events_offset": {
+                "type": "integer",
+                "description": "Optional pagination offset for longer profile story events.",
+                "nullable": True,
+            },
+            "story_events_char_budget": {
+                "type": "integer",
+                "description": "Optional char budget for profile story events.",
+                "nullable": True,
+            },
+        }
+
+        def forward(
+            self,
+            name: str,
+            query: str,
+            purpose: str,
+            priority: str | None = None,
+            expected_depth: str | None = None,
+            story_events_offset: int | None = None,
+            story_events_char_budget: int | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "name": name,
+                "query": query,
+                "purpose": purpose,
+                "priority": priority,
+                "expected_depth": expected_depth,
+                "story_events_offset": story_events_offset,
+                "story_events_char_budget": story_events_char_budget,
+            }
+
+    return [TextSearchTool(), RawExcerptTool(), CharacterProfileTool()]
+
 
 ANALYZER_ANALYSIS_QUESTION_POLICY = (
     "对于“评价、分析、推测、可能走向、是否合理、之后会怎样”这类讨论题，"
@@ -194,6 +364,33 @@ def _dedup_strings(value: object) -> list[str]:
     return result
 
 
+def _positive_int(value: object) -> int | None:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _positive_int_list(value: object) -> list[int]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        return []
+    result: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        number = _positive_int(item)
+        if number is None or number <= 0 or number in seen:
+            continue
+        seen.add(number)
+        result.append(number)
+    return result
+
+
+def _tool_priority(value: object) -> str:
+    priority = normalize_whitespace(str(value or "medium")).lower()
+    return priority if priority in {"high", "medium", "low"} else "medium"
+
+
 def _compact_list(values: Sequence[Any], *, limit: int, text_limit: int) -> list[Any]:
     result = []
     for value in values[:limit]:
@@ -255,6 +452,8 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
         "next_match_offset_hint",
         "document_title",
         "document_title_index",
+        "snippet_policy",
+        "full_document_available_via",
     )
     result: dict[str, Any] = {}
     for key in keep_scalar:
@@ -291,9 +490,85 @@ def _compact_mapping(value: Mapping[str, Any], *, text_limit: int) -> dict[str, 
     return result
 
 
+def _prompt_excerpt_terms(text: str) -> list[str]:
+    tokens = [token for token in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_]{2,}", normalize_whitespace(text)) if token]
+    seen: set[str] = set()
+    result: list[str] = []
+    for token in tokens:
+        variants = [token]
+        if re.fullmatch(r"[\u4e00-\u9fff]{4,}", token):
+            variants.extend(token[index : index + size] for size in range(2, min(6, len(token)) + 1) for index in range(0, len(token) - size + 1))
+        for variant in variants:
+            if variant in seen:
+                continue
+            seen.add(variant)
+            result.append(variant)
+    return result[:80]
+
+
+def _term_aware_excerpt(text: str, terms: Sequence[str], *, limit: int) -> str:
+    normalized = normalize_whitespace(text)
+    if len(normalized) <= limit:
+        return normalized
+    clean_terms = [term for term in terms if term]
+    if not clean_terms:
+        return safe_excerpt(normalized, limit)
+    haystack = normalized.casefold()
+    starts: list[int] = []
+    for term in clean_terms:
+        index = haystack.find(term.casefold())
+        while index >= 0:
+            starts.append(index)
+            index = haystack.find(term.casefold(), index + max(1, len(term)))
+    if not starts:
+        return safe_excerpt(normalized, limit)
+
+    def score(start: int) -> tuple[float, int, int]:
+        window = haystack[start : start + limit]
+        matched = [term for term in clean_terms if term.casefold() in window]
+        specificity = sum(max(1.0, min(12.0, len(term) / 2)) for term in matched)
+        return specificity, len(matched), -start
+
+    best_start = max(0, starts[0] - limit // 3)
+    best_score = score(best_start)
+    for term_start in starts:
+        candidate_start = max(0, term_start - limit // 3)
+        candidate_score = score(candidate_start)
+        if candidate_score > best_score:
+            best_start = candidate_start
+            best_score = candidate_score
+    snippet = normalized[best_start : best_start + limit].strip()
+    return f"{'...' if best_start > 0 else ''}{snippet}{'...' if best_start + limit < len(normalized) else ''}"
+
+
+def _compact_raw_excerpt_mapping(value: Mapping[str, Any], *, query: str, text_limit: int) -> dict[str, Any]:
+    terms = _prompt_excerpt_terms(" ".join([query, str(value.get("read_reason") or ""), str(value.get("expected_confirmation") or "")]))
+    compact = _compact_mapping(value, text_limit=text_limit)
+    for key in ("summary", "snippet", "text"):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            compact[key] = _term_aware_excerpt(item, terms, limit=text_limit)
+    return compact
+
+
+def _raw_excerpt_relevance_score(value: Mapping[str, Any], *, query: str) -> tuple[float, int]:
+    terms = _prompt_excerpt_terms(query)
+    text = normalize_whitespace(
+        " ".join(str(value.get(key) or "") for key in ("summary", "snippet", "text", "label", "document_title"))
+    ).casefold()
+    matched = [term for term in terms if term.casefold() in text]
+    return sum(max(1.0, min(12.0, len(term) / 2)) for term in matched), len(matched)
+
+
+def _best_raw_excerpt_items(items: Sequence[Mapping[str, Any]], *, query: str, limit: int) -> list[Mapping[str, Any]]:
+    indexed = list(enumerate(items))
+    indexed.sort(key=lambda pair: (_raw_excerpt_relevance_score(pair[1], query=query), -pair[0]), reverse=True)
+    return [item for _index, item in indexed[:limit]]
+
+
 def _compact_evidence_bundle(bundle: EvidenceBundle, *, item_text_limit: int = 360) -> dict[str, Any]:
     item_limit = 10 if bundle.request_type == "text_search" else 3
-    effective_item_text_limit = min(item_text_limit, 260) if bundle.request_type == "text_search" else item_text_limit
+    effective_item_text_limit = max(item_text_limit, 520) if bundle.request_type == "text_search" else item_text_limit
     return {
         "request_id": bundle.request_id,
         "request_type": bundle.request_type,
@@ -326,20 +601,45 @@ def _compact_final_evidence_bundles(bundles: Sequence[EvidenceBundle]) -> list[d
             continue
         seen_bundle_keys.add(bundle_key)
         evidence_items = []
-        for item in bundle.evidence_items[:3]:
-            summary = normalize_whitespace(str(item.get("summary") or item.get("summary_short") or item.get("title") or ""))
+        candidate_items: Sequence[Mapping[str, Any]]
+        if bundle.request_type == "raw_excerpt":
+            candidate_items = _best_raw_excerpt_items(bundle.evidence_items, query=bundle.query, limit=3)
+        else:
+            candidate_items = bundle.evidence_items[:3]
+        for item in candidate_items:
+            summary = normalize_whitespace(
+                str(
+                    item.get("summary")
+                    or item.get("snippet")
+                    or item.get("summary_short")
+                    or item.get("title")
+                    or item.get("label")
+                    or ""
+                )
+            )
             item_key = safe_excerpt(summary, 120)
             if not item_key or item_key in seen_items:
                 continue
             seen_items.add(item_key)
-            compact = _compact_mapping(item, text_limit=220)
+            if bundle.request_type == "raw_excerpt":
+                compact = _compact_raw_excerpt_mapping(item, query=bundle.query, text_limit=700)
+            else:
+                compact = _compact_mapping(item, text_limit=520 if bundle.request_type == "text_search" else 220)
             if compact:
                 evidence_items.append(compact)
             if len(evidence_items) >= 2:
                 break
         excerpts = []
-        for item in bundle.excerpts[:1]:
-            compact = _compact_mapping(item, text_limit=180)
+        candidate_excerpts: Sequence[Mapping[str, Any]]
+        if bundle.request_type == "raw_excerpt":
+            candidate_excerpts = _best_raw_excerpt_items(bundle.excerpts, query=bundle.query, limit=1)
+        else:
+            candidate_excerpts = bundle.excerpts[:1]
+        for item in candidate_excerpts:
+            if bundle.request_type == "raw_excerpt":
+                compact = _compact_raw_excerpt_mapping(item, query=bundle.query, text_limit=900)
+            else:
+                compact = _compact_mapping(item, text_limit=180)
             if compact:
                 excerpts.append(compact)
         result.append(
@@ -360,6 +660,30 @@ def _compact_final_evidence_bundles(bundles: Sequence[EvidenceBundle]) -> list[d
 
 def _is_committable_evidence(bundle: EvidenceBundle) -> bool:
     return bundle.status == "found" and bundle.fact_status not in {"missing", "insufficient_context"}
+
+
+def _should_auto_commit_direct_evidence(bundle: EvidenceBundle) -> bool:
+    return bundle.request_type == "raw_excerpt" and bool(bundle.excerpts)
+
+
+def _select_committed_evidence_bundles(
+    bundles: Sequence[EvidenceBundle],
+    *,
+    kept_request_ids: Sequence[str],
+) -> list[EvidenceBundle]:
+    kept_ids = set(kept_request_ids)
+    committed: list[EvidenceBundle] = []
+    seen: set[str] = set()
+    for bundle in bundles:
+        if not _is_committable_evidence(bundle):
+            continue
+        if bundle.request_id not in kept_ids and not _should_auto_commit_direct_evidence(bundle):
+            continue
+        if bundle.request_id in seen:
+            continue
+        seen.add(bundle.request_id)
+        committed.append(bundle)
+    return committed
 
 
 def _prompt_bytes(system_prompt: str, user_prompt: str) -> int:
@@ -464,6 +788,48 @@ def _notebook_final_payload(notebook: AnalyzerNotebook) -> dict[str, Any]:
     }
 
 
+def _analyzer_pause_context(
+    *,
+    status: str,
+    notebook: AnalyzerNotebook,
+    message: str = "",
+    pause_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    provided = dict(pause_context or {}) if isinstance(pause_context, Mapping) else {}
+    requested = provided.get("requested_user_input") or provided.get("questions_for_user") or []
+    if not requested:
+        requested = _dedup_strings(provided.get("blocking_gaps") or notebook.uncertain_gaps[:3])
+    result = {
+        "pause_type": status,
+        "pause_reason": safe_excerpt(
+            normalize_whitespace(str(provided.get("pause_reason") or provided.get("reason") or message or status)),
+            360,
+        ),
+        "why_it_matters": safe_excerpt(normalize_whitespace(str(provided.get("why_it_matters") or "")), 360),
+        "known_so_far": {
+            "confirmed_facts": [safe_excerpt(item, 160) for item in notebook.confirmed_facts[-6:]],
+            "reasonable_inferences": [safe_excerpt(item, 160) for item in notebook.reasonable_inferences[-6:]],
+        },
+        "blocking_gaps": _dedup_strings(provided.get("blocking_gaps") or notebook.uncertain_gaps[-6:]),
+        "candidate_directions": [safe_excerpt(item, 160) for item in notebook.candidate_directions[-4:]],
+        "blocked_directions": [safe_excerpt(item, 160) for item in notebook.blocked_directions[-4:]],
+        "requested_user_input": _dedup_strings(requested)[:3],
+        "expected_after_resume": safe_excerpt(
+            normalize_whitespace(
+                str(
+                    provided.get("expected_after_resume")
+                    or "将用户补充作为 user preference / authorization 写入同一 turn 上下文后，重新判断是否可回答或是否需要补充 evidence。"
+                )
+            ),
+            360,
+        ),
+    }
+    for key, value in provided.items():
+        if key not in result and isinstance(value, (str, int, float, bool, list, dict)):
+            result[key] = value
+    return result
+
+
 def _source_range_bounds(value: object) -> tuple[int, int] | None:
     numbers = [int(item) for item in re.findall(r"\d+", str(value or ""))]
     if not numbers:
@@ -540,7 +906,7 @@ def _seed_prompt_payload(seed: AnalyzerSeedPacket, *, evidence_history: Sequence
         "user_question": seed.user_question,
         "analysis_type": seed.analysis_type,
         "intent_gate": dict(seed.intent_gate),
-        "conversation_brief": safe_excerpt(seed.conversation_brief, 240),
+        "conversation_brief": safe_excerpt(seed.conversation_brief, CONVERSATION_BRIEF_SEED_LIMIT),
         "modeling_status": dict(seed.modeling_status),
         "story_overview_hint": safe_excerpt(seed.story_overview, story_overview_limit),
         "context_stage": "locator_or_evidence" if has_locator_evidence else "initial_map",
@@ -580,7 +946,7 @@ def _seed_final_payload(seed: AnalyzerSeedPacket) -> dict[str, Any]:
         "user_question": seed.user_question,
         "analysis_type": seed.analysis_type,
         "intent_gate": dict(seed.intent_gate),
-        "conversation_brief": safe_excerpt(seed.conversation_brief, 240),
+        "conversation_brief": safe_excerpt(seed.conversation_brief, CONVERSATION_BRIEF_FINAL_LIMIT),
         "modeling_status": dict(seed.modeling_status),
         "story_overview_hint": safe_excerpt(seed.story_overview, 420),
         "world_concept_index": [
@@ -947,8 +1313,8 @@ class AnalyzerSeedBuilder:
             role = str(item.get("role") or "")
             content = normalize_whitespace(str(item.get("content") or ""))
             if role and content:
-                parts.append(f"{role}: {safe_excerpt(content, 160)}")
-        return "\n".join(parts)
+                parts.append(f"{role}: {safe_excerpt(content, CONVERSATION_HISTORY_ITEM_LIMIT)}")
+        return clamp_text("\n".join(parts), CONVERSATION_HISTORY_TOTAL_LIMIT)
 
     def _load_json(self, path: Path) -> dict[str, Any]:
         if not path.exists():
@@ -1033,6 +1399,7 @@ class AnalyzerService:
         inquiry_broker: NarrativeInquiryBroker | None = None,
         budget: AnalyzerBudget | None = None,
         prompt_trace_recorder: Callable[[dict[str, Any]], None] | None = None,
+        use_tool_call_requests: bool = False,
         **legacy_budget_kwargs: Any,
     ) -> None:
         self.repo_root = repo_root.expanduser().resolve()
@@ -1042,6 +1409,7 @@ class AnalyzerService:
         self.inquiry_broker = inquiry_broker or NarrativeInquiryBroker(repo_root=self.repo_root)
         self.budget = budget or AnalyzerBudget()
         self.prompt_trace_recorder = prompt_trace_recorder
+        self.use_tool_call_requests = bool(use_tool_call_requests)
         # Kept for compatibility with older callers that configured prompt-slice
         # sizes. The new loop budgets live in AnalyzerBudget.
         self.legacy_budget_kwargs = dict(legacy_budget_kwargs)
@@ -1186,12 +1554,10 @@ class AnalyzerService:
                             evidence_bundles=evidence_history,
                             trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
                         )
-                    kept_ids = set(triage.kept_request_ids)
-                    kept_bundles = [
-                        bundle
-                        for bundle in bundles
-                        if bundle.request_id in kept_ids and _is_committable_evidence(bundle)
-                    ]
+                    kept_bundles = _select_committed_evidence_bundles(
+                        bundles,
+                        kept_request_ids=triage.kept_request_ids,
+                    )
                     notebook.add_evidence(kept_bundles)
                     evidence_history.extend(kept_bundles)
                     trace["rounds"].append(
@@ -1248,6 +1614,12 @@ class AnalyzerService:
                 )
             if loop_output.status in {"needs_user_preference", "insufficient_memory", "budget_exhausted"}:
                 answer = loop_output.final_answer or loop_output.message or self._status_answer(loop_output.status, notebook=notebook)
+                pause_context = _analyzer_pause_context(
+                    status=loop_output.status,
+                    notebook=notebook,
+                    message=answer,
+                    pause_context=loop_output.pause_context,
+                )
                 return AnalyzerChatResult(
                     status=loop_output.status,
                     answer=answer,
@@ -1255,7 +1627,7 @@ class AnalyzerService:
                     seed=seed,
                     notebook=notebook,
                     evidence_bundles=evidence_history,
-                    trace={**trace, "final_budget_state": budget_state},
+                    trace={**trace, "final_budget_state": budget_state, "pause_context": pause_context},
                 )
 
             requests = self._filter_requests(loop_output.requests, budget_state=budget_state)
@@ -1299,12 +1671,10 @@ class AnalyzerService:
                     evidence_bundles=evidence_history,
                     trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
                 )
-            kept_ids = set(triage.kept_request_ids)
-            kept_bundles = [
-                bundle
-                for bundle in bundles
-                if bundle.request_id in kept_ids and _is_committable_evidence(bundle)
-            ]
+            kept_bundles = _select_committed_evidence_bundles(
+                bundles,
+                kept_request_ids=triage.kept_request_ids,
+            )
             notebook.add_evidence(kept_bundles)
             evidence_history.extend(kept_bundles)
             trace["rounds"].append(
@@ -1414,6 +1784,152 @@ class AnalyzerService:
             },
         )
 
+    def _tool_call_requests_enabled(self) -> bool:
+        return self.use_tool_call_requests and hasattr(self.model_client, "generate_tool_calls")
+
+    def _call_loop_model_with_tools(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: int,
+        model_kwargs: Mapping[str, Any],
+    ) -> tuple[AnalyzerLoopOutput | None, str]:
+        response = self.model_client.generate_tool_calls(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            tools=_build_analyzer_inquiry_tools(),
+            tool_choice="auto",
+            timeout_seconds=timeout_seconds,
+            **dict(model_kwargs),
+        )
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        if not tool_calls:
+            return None, str(getattr(response, "content", "") or "")
+        requests: list[NarrativeInquiryRequest] = []
+        errors: list[str] = []
+        for index, tool_call in enumerate(tool_calls, start=1):
+            try:
+                requests.append(self._request_from_tool_call(tool_call, index=index))
+            except ValueError as exc:
+                errors.append(str(exc))
+        if not requests:
+            raise ValueError("; ".join(errors) or "model returned tool_calls but none could be converted")
+        return AnalyzerLoopOutput(status="need_more_info", requests=requests), ""
+
+    def _request_from_tool_call(self, tool_call: Any, *, index: int) -> NarrativeInquiryRequest:
+        name = normalize_whitespace(str(getattr(tool_call, "name", "") or ""))
+        call_id = normalize_whitespace(str(getattr(tool_call, "id", "") or f"tool-call-{index}"))
+        arguments = self._tool_call_arguments(getattr(tool_call, "arguments", {}))
+        if name == "text_search":
+            return self._text_search_request_from_tool_call(call_id=call_id, arguments=arguments, index=index)
+        if name == "raw_excerpt":
+            return self._raw_excerpt_request_from_tool_call(call_id=call_id, arguments=arguments, index=index)
+        if name == "character_profile":
+            return self._character_profile_request_from_tool_call(call_id=call_id, arguments=arguments, index=index)
+        raise ValueError(f"unsupported Analyzer tool call: {name or '<missing>'}")
+
+    def _tool_call_arguments(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, Mapping):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"tool call arguments must be JSON object: {exc}") from exc
+            if isinstance(parsed, Mapping):
+                return dict(parsed)
+        raise ValueError("tool call arguments must be an object")
+
+    def _text_search_request_from_tool_call(
+        self,
+        *,
+        call_id: str,
+        arguments: Mapping[str, Any],
+        index: int,
+    ) -> NarrativeInquiryRequest:
+        terms = _dedup_strings(arguments.get("terms"))
+        scopes = _dedup_strings(arguments.get("scopes"))
+        match_mode = normalize_whitespace(str(arguments.get("match_mode") or "all")).lower()
+        if match_mode not in {"all", "any"}:
+            match_mode = "all"
+        metadata = {
+            "terms": terms,
+            "match_mode": match_mode,
+            "scopes": scopes,
+            "allow_document_scan": bool(arguments.get("allow_document_scan")),
+            "tool_call": {"id": call_id, "name": "text_search"},
+        }
+        match_offset = _positive_int(arguments.get("match_offset"))
+        if match_offset is not None:
+            metadata["match_offset"] = match_offset
+        query = normalize_whitespace(str(arguments.get("query") or " ".join(terms) or "text_search"))
+        return NarrativeInquiryRequest(
+            request_id=call_id or f"tool-text-search-{index:03d}",
+            request_type="text_search",
+            query=query,
+            purpose=normalize_whitespace(str(arguments.get("purpose") or query)),
+            priority=_tool_priority(arguments.get("priority")),
+            expected_depth=normalize_whitespace(str(arguments.get("expected_depth") or "locator")),
+            chapter_refs=_dedup_strings(arguments.get("chapter_refs")),
+            document_ids=_positive_int_list(arguments.get("document_ids")),
+            source_doc_ids=_positive_int_list(arguments.get("source_doc_ids")),
+            metadata=metadata,
+        )
+
+    def _raw_excerpt_request_from_tool_call(
+        self,
+        *,
+        call_id: str,
+        arguments: Mapping[str, Any],
+        index: int,
+    ) -> NarrativeInquiryRequest:
+        query = normalize_whitespace(str(arguments.get("query") or arguments.get("expected_confirmation") or "raw_excerpt"))
+        purpose = normalize_whitespace(str(arguments.get("purpose") or arguments.get("read_reason") or query))
+        return NarrativeInquiryRequest(
+            request_id=call_id or f"tool-raw-excerpt-{index:03d}",
+            request_type="raw_excerpt",
+            query=query,
+            purpose=purpose,
+            priority=_tool_priority(arguments.get("priority")),
+            expected_depth=normalize_whitespace(str(arguments.get("expected_depth") or "bounded_raw_excerpt")),
+            chapter_refs=_dedup_strings(arguments.get("chapter_refs")),
+            document_ids=_positive_int_list(arguments.get("document_ids")),
+            source_doc_ids=_positive_int_list(arguments.get("source_doc_ids")),
+            read_reason=normalize_whitespace(str(arguments.get("read_reason") or purpose)),
+            expected_confirmation=normalize_whitespace(str(arguments.get("expected_confirmation") or query)),
+            affects_analysis=normalize_whitespace(str(arguments.get("affects_analysis") or purpose)),
+            excerpt_focus=_dedup_strings(arguments.get("excerpt_focus")),
+            metadata={"tool_call": {"id": call_id, "name": "raw_excerpt"}},
+        )
+
+    def _character_profile_request_from_tool_call(
+        self,
+        *,
+        call_id: str,
+        arguments: Mapping[str, Any],
+        index: int,
+    ) -> NarrativeInquiryRequest:
+        name = normalize_whitespace(str(arguments.get("name") or ""))
+        query = normalize_whitespace(str(arguments.get("query") or name or "character_profile"))
+        metadata = {"tool_call": {"id": call_id, "name": "character_profile"}}
+        offset = _positive_int(arguments.get("story_events_offset"))
+        if offset is not None:
+            metadata["story_events_offset"] = offset
+        char_budget = _positive_int(arguments.get("story_events_char_budget"))
+        if char_budget is not None:
+            metadata["story_events_char_budget"] = char_budget
+        return NarrativeInquiryRequest(
+            request_id=call_id or f"tool-character-profile-{index:03d}",
+            request_type="character_profile",
+            query=query,
+            name=name,
+            purpose=normalize_whitespace(str(arguments.get("purpose") or query)),
+            priority=_tool_priority(arguments.get("priority")),
+            expected_depth=normalize_whitespace(str(arguments.get("expected_depth") or "profile")),
+            metadata=metadata,
+        )
+
     def _call_loop_model(
         self,
         *,
@@ -1449,12 +1965,22 @@ class AnalyzerService:
                 evidence_bundle_count=len(evidence_history),
             )
             try:
-                raw = self.model_client.generate_text(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    timeout_seconds=self._prompt_timeout_seconds("loop"),
-                    **self._prompt_model_kwargs("loop"),
-                )
+                if self._tool_call_requests_enabled():
+                    tool_output, raw = self._call_loop_model_with_tools(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        timeout_seconds=self._prompt_timeout_seconds("loop"),
+                        model_kwargs=self._prompt_model_kwargs("loop"),
+                    )
+                    if tool_output is not None:
+                        return tool_output
+                else:
+                    raw = self.model_client.generate_text(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        timeout_seconds=self._prompt_timeout_seconds("loop"),
+                        **self._prompt_model_kwargs("loop"),
+                    )
                 parsed = extract_json_blob(str(raw))
                 if not isinstance(parsed, Mapping):
                     raise ValueError("Analyzer loop output must be a JSON object")
@@ -1985,6 +2511,12 @@ class AnalyzerService:
         evidence_history: Sequence[EvidenceBundle],
         budget_state: Mapping[str, Any],
     ) -> tuple[str, str]:
+        tool_call_instruction = (
+            "如果当前 API 暴露了 tools，取证请求优先通过 text_search、raw_excerpt、character_profile tool_calls 表达；"
+            "不要在 tool_call 之外重复输出同一批 requests。没有调用工具、需要提交 notebook 或准备回答时，返回 JSON。"
+            if self.use_tool_call_requests
+            else "每轮只返回 JSON：status、requests、notebook_delta、可选 final_answer/message/pause_context。"
+        )
         system_prompt = (
             "你是只读 Analyzer。你只能分析和建议，不能写 Memory、Writer artifact 或推进 workflow。\n"
             "不要声称已经读完整本书；先使用 seed 判断信息需求，再请求补充 evidence。\n"
@@ -2002,16 +2534,37 @@ class AnalyzerService:
             "若定位已收敛但仍无法完整回答，应请求更精确 evidence 或 bounded raw_excerpt，"
             "并填写 chapter_refs、document_ids 或 source_doc_ids。"
             "可以先请求 text_search 作为 grep-like 词面定位：把用户问题拆成少量通用关键词，"
-            "用 metadata.terms 和 metadata.match_mode='all' 表示交集查询，并在 metadata.scopes 中选择 "
-            "memory_roots、outline_segments、chapter_summaries、character_profiles、index_cards。"
-            "定位 query 的 terms 必须能共同缩小范围；角色名、常见动作词、泛称、语气词或单字词只能作为辅助线索，"
-            "不得单独造成候选命中。只有在明确需要召回多个同义词/译名/原文拼写时才使用 match_mode='any'，"
-            "且 terms 中每个词本身都必须足够具体。若 text_search 只命中角色名或宽词，应视为过宽定位，"
+            "在 metadata.terms 中给出关键词列表，并在 metadata.scopes 中选择 memory_roots、outline_segments、"
+            "chapter_summaries、character_profiles、index_cards 或 documents。"
+            "metadata.match_mode 是明确的布尔匹配策略：'all' 表示 AND / 交集，只有所有 terms 都出现才命中；"
+            "'any' 表示 OR / 并集，任意一个 term 出现即可命中。"
+            "当你要验证多个线索是否共同出现在同一候选章节/document 中，使用 match_mode='all'；"
+            "当你要召回多种同义词、译名、称呼、原文拼写、题面可能误写的词面变体，或先扩大候选池再二次收敛，"
+            "使用 match_mode='any'。"
+            "定位 query 的 terms 应尽量具体；角色名、常见动作词、泛称、语气词或单字词只能作为辅助线索，"
+            "不得单独造成候选命中。若 text_search 只命中角色名或宽词，应视为过宽定位，"
             "不要把它写入 notebook；应重试更窄关键词、改用 documents/raw_documents grep，或说明无法定位。"
             "如果 documents grep 已返回一页候选但 raw_excerpt 后仍未完整回答，不要重复读取同一批 source_doc_ids；"
             "应改用不同的具体关键词、放宽被代词/别名替代的人名约束，或用 metadata.match_offset 翻到下一页命中文档。"
             "documents/raw_documents grep 默认可返回最多 10 个按原文顺序排列的命中文档片段；"
+            "document locator 返回的是围绕共同命中窗口或最紧凑匹配窗口的 snippet，不是完整 document。"
+            "如果 snippet 已直接覆盖用户问题需要的事实粒度，可把它作为候选事实进入回答；"
+            "如果需要更长铺垫、对话上下文、动机或跨段关系，必须基于返回的 source_doc_ids 请求 bounded raw_excerpt，"
+            "而不是要求 text_search 返回整篇文档。"
             "如果当前页没有覆盖答案但仍可能存在后续命中，应优先翻页或直接读取后续候选 doc，而不是基于第一页作不存在判断。"
+            "当 proposed answer 或 notebook 要断言某个对象/话语/线索/道具的内容，同时还要断言它是否被发送、收到、说出、兑现、使用、公开、"
+            "撤回或造成后续影响时，必须把“内容是什么”和“动作/状态是否最终成立”拆成两个独立事实核验。"
+            "如果当前 evidence 只覆盖准备、草稿、计划、犹豫、未完成或早期状态，不得直接推断最终没有发生；"
+            "应优先检查同一 text_search 候选页中的后续 source_doc_ids、使用 metadata.match_offset 翻页，"
+            "或用已定位到的具体内容词加动作/结果词发起更窄 text_search。"
+            "用户问题中用于限定目标的动作、关系、对象、时间或结果条件也是回答需求，不能在 final_answer 中被静默降级或改写；"
+            "如果用户问的是已经发生/交付/被接收的对象，而当前证据只显示准备或未完成状态，"
+            "这不是充分回答，而是题面限定与证据状态的冲突或缺口。"
+            "一旦 text_search 或 raw_excerpt 已定位到高精度内容短语、原句、标题、编号或独特称谓，"
+            "应优先把该短语作为下一次 documents text_search 的 term，用于查找后续重复出现、被打开、被听到、被引用或被兑现的片段；"
+            "不要继续只用宽泛主题词扩大噪音。"
+            "若 evidence 已显示同一对象在时间线上存在前后状态差异，最终回答必须说明状态边界，"
+            "不要把早期状态当作全书最终事实。"
             "如果这些摘要/索引范围都无法定位，但你已经得到可执行的关键词且问题需要原文级措辞，"
             "可以请求 text_search 的 documents/raw_documents scope，并显式设置 metadata.allow_document_scan=true；"
             "这只会做词面 grep，作为候选片段，不等于语义结论。"
@@ -2027,7 +2580,8 @@ class AnalyzerService:
             "need_more_info 时 requests 不得为空；每个 request 必须至少填写 query、name、concept、"
             "chapter_refs、document_ids 或 source_doc_ids 中的一个目标字段。"
             "如果无法确定专名，请用 query 描述要查的具体信息需求。\n"
-            "每轮只返回 JSON：status、requests、notebook_delta、可选 final_answer/message。"
+            f"{tool_call_instruction}"
+            "pause_context 只写暂停原因、已提交状态和恢复意图，不要输出完整思维链或未提交 scratchpad。"
         )
         payload = {
             "analyzer_seed_packet": _seed_prompt_payload(seed, evidence_history=evidence_history),
@@ -2081,10 +2635,11 @@ class AnalyzerService:
                         "expected_depth": "locator",
                         "metadata": {
                             "terms": ["关键词A", "关键词B"],
-                            "match_mode": "all",
+                            "match_mode": "all | any",
                             "scopes": ["outline_segments", "chapter_summaries", "character_profiles", "index_cards"],
                             "allow_document_scan": False,
-                            "term_quality": "只放入能共同缩小范围的具体词；不要把宽泛词、人名或单字词当作可单独命中的定位词",
+                            "match_strategy": "all=AND/交集，适合验证多个线索共同出现；any=OR/并集，适合召回同义词/译名/词面变体后再收敛",
+                            "term_quality": "只放入能共同缩小范围或代表可替代词面的具体词；不要把宽泛词、人名或单字词当作可单独命中的定位词",
                         },
                     },
                     {
@@ -2095,11 +2650,12 @@ class AnalyzerService:
                         "expected_depth": "raw_document_locator",
                         "metadata": {
                             "terms": ["关键词A"],
-                            "match_mode": "all",
+                            "match_mode": "all | any",
                             "scopes": ["documents"],
                             "allow_document_scan": True,
                             "match_offset": 0,
-                            "term_quality": "使用上一轮已经明确的具体词；若需要多个同义词才可改用 any",
+                            "match_strategy": "document grep 返回紧凑命中窗口 snippet；若需要更长上下文，用返回的 source_doc_ids 请求 bounded raw_excerpt",
+                            "term_quality": "使用上一轮已经明确的具体词；多个替代词面/别名/可能误写时使用 any，多个必须共同出现的约束时使用 all",
                         },
                     }
                 ],
@@ -2112,6 +2668,14 @@ class AnalyzerService:
                     "questions_for_user": [],
                 },
                 "final_answer": "ready_to_answer 时可直接给用户可读回答",
+                "pause_context": {
+                    "pause_reason": "needs_user_preference / insufficient_memory / budget_exhausted 时为什么暂停",
+                    "why_it_matters": "为什么这个缺口会影响回答或授权边界",
+                    "known_so_far": [],
+                    "blocking_gaps": [],
+                    "requested_user_input": [],
+                    "expected_after_resume": "用户补充后应如何继续同一 Analyzer turn",
+                },
             },
         }
         return system_prompt, _json_prompt(payload)
@@ -2136,6 +2700,18 @@ class AnalyzerService:
             "当摘要、人物档案、index card 或 text_search 已经把范围收敛到少量章节/document/source_doc_ids，"
             "且仍需要更直接事实才能完整回答时，可以请求 bounded raw_excerpt；必须填写 read_reason、"
             "expected_confirmation 和 affects_analysis，并绑定 chapter_refs、document_ids 或 source_doc_ids。\n"
+            "readiness 必须逐条审查 proposed_answer 中每个可核验断言。"
+            "如果 proposed_answer 同时断言“内容/措辞是什么”和“动作或状态最终是否成立”，"
+            "而现有 evidence 只覆盖其中之一，必须返回 need_more_info。"
+            "user_question 中用于限定目标的动作、关系、对象、时间或结果条件同样是 sufficiency 条件；"
+            "proposed_answer 不能把题面中的“已发生/已交付/被接收/被说出/被使用”静默降级成“准备/计划/未完成”。"
+            "如果 evidence 与题面限定出现这种状态差异，必须先核验后续状态，或在预算耗尽时说明只能回答已定位内容而不能确认题面限定。"
+            "特别是当证据只显示准备、草稿、计划、犹豫、取消、未完成等早期状态时，"
+            "不得让 proposed_answer 断言后续从未发生；应请求后续候选 source_doc_ids、metadata.match_offset 后续页，"
+            "或用已知内容词加动作/结果词进行更窄 text_search。"
+            "如果现有 evidence 已给出高精度内容短语、原句、标题、编号或独特称谓，"
+            "优先请求 documents text_search，用该精确短语查找后续重复出现或结果片段。"
+            "如果同一对象在线索页中可能有多个时间点的命中，应优先核验最能支持动作结果的后续命中，再判断 ready_to_answer。\n"
             "如果当前 evidence 足够支持一个有边界的暂定回答，返回 ready_to_answer。\n"
             "如果无法定位到可执行范围，不要请求全书原文或无限扩大搜索；返回 insufficient_memory，并说明需要用户补充什么线索。\n"
             "只返回 JSON：status、requests、notes、message。"
@@ -2175,6 +2751,20 @@ class AnalyzerService:
                 "status": "ready_to_answer | need_more_info | insufficient_memory | budget_exhausted",
                 "requests": [
                     {
+                        "type": "text_search",
+                        "query": "用已知内容词和动作/结果词继续定位后续状态",
+                        "purpose": "现有 evidence 只覆盖内容或早期状态，需要核验动作/状态是否在后续成立",
+                        "priority": "high | medium | low",
+                        "expected_depth": "raw_document_locator",
+                        "metadata": {
+                            "terms": ["已知内容原句或独特短语", "动作或结果关键词"],
+                            "match_mode": "all | any",
+                            "scopes": ["documents"],
+                            "allow_document_scan": True,
+                            "match_offset": 0,
+                        },
+                    },
+                    {
                         "type": "raw_excerpt",
                         "query": "仍需确认的具体事实或细节",
                         "purpose": "说明为什么现有 locator/summary evidence 不能完整回答",
@@ -2207,6 +2797,9 @@ class AnalyzerService:
             "你是 Analyzer 的 evidence triage 子步骤，只判断候选证据是否值得进入后续上下文。\n"
             "不要给用户最终建议，不要补写剧情。只根据用户问题、request purpose、当前 notebook 和候选 evidence digest 判断相关性。\n"
             "保留直接支撑回答、暴露关键缺口、或能防止错误推断的 evidence；剔除只因关键词偶然命中、过宽、重复或无法改变判断的 evidence。\n"
+            "如果候选 evidence 只支持用户题面限定对象的准备、草稿、计划、犹豫、取消或早期状态，"
+            "而用户问题把该对象描述为已发生、已交付、被接收、被说出、被使用或已造成结果，"
+            "应保留它作为关键缺口/冲突证据，但 notes 必须说明还要用后续 source_doc_ids、match_offset 或高精度内容短语继续核验生命周期状态。"
             "只返回 JSON：kept_request_ids、rejected_request_ids、notes。"
         )
         payload = {
@@ -2242,6 +2835,9 @@ class AnalyzerService:
             "你是 Analyzer 的逐条 evidence triage 子步骤。\n"
             "本轮只评估一个候选 evidence 是否值得进入后续上下文；不要给用户最终建议，不要补写剧情。\n"
             "只保留能直接支撑回答、暴露关键缺口、或防止错误推断的 evidence。"
+            "如果候选 evidence 暴露用户题面限定与证据状态的差异，例如题面描述为已发生/已交付/被接收，"
+            "但 evidence 只显示准备、草稿、计划、犹豫、取消或早期状态，应保留为关键缺口证据，"
+            "notes 应要求后续用 match_offset、后续 source_doc_ids 或高精度内容短语核验生命周期状态。"
             "对于 text_search locator：如果 evidence 只命中角色名、常见动作词、泛称、单字词或其他过宽词，"
             "没有把范围缩小到与 request purpose 直接相关的少数章节/文档，必须拒收；"
             "notes 应建议重试更窄 terms、使用 match_mode='all' 交集，或转向 documents/raw_documents grep。"
@@ -2295,16 +2891,29 @@ class AnalyzerService:
     ) -> tuple[str, str]:
         system_prompt = (
             "你是只读 Analyzer。请基于 seed、notebook 和 evidence 给出用户可读中文分析。\n"
+            "只读表示不得写入 Memory、document 或任务产物；不禁止输出用户可读的大纲修改方案、人物设定建议或创作方向建议。\n"
             "先给结论，再说明文学分析、事实依据、风险、可选走向、建议回读章节和需要用户确认的问题。\n"
             f"{self._workflow_instruction(seed.analysis_type)}\n"
             f"{ANALYZER_ANALYSIS_QUESTION_POLICY}\n"
+            "如果用户要求基于上面、刚才或上一轮讨论生成、重写、修改大纲/人物设定，"
+            "conversation_brief 中的 user_proposed_outline 和 discussion_recommendations 是本轮主要讨论对象。"
+            "应直接改进用户提案并标明这是“用户提案/大纲方案”，再用原作材料说明 canon fit、风险和可选调整；"
+            "不得因为提案尚未存在于 committed outline 中就拒绝生成，也不得转而只分析历史 committed outline。\n"
             "如果 evidence 中包含 narrative_scene card，请把它当作场景级结构证据使用：说明对应场景如何支撑人物性格、"
             "关系推进、世界观揭示、主题表达或后续行动推测。"
             "如果 committed evidence 只来自 summary-derived annotation，或 evidence/notebook 暴露事实冲突，"
             "最终回答不得把冲突项写成 confirmed fact；应说明需要原文核验，或引用 raw_excerpt/更直接章节事实作为标准。"
+            "最终回答必须区分内容事实与事件生命周期事实：某个对象、话语、线索或道具的内容被证实，"
+            "不等于其发送、收到、说出、兑现、使用、公开、撤回或后续影响已经被证实。"
+            "用户问题里的动作、关系、对象、时间或结果限定不能被静默改写；"
+            "如果只能确认内容而不能确认题面限定，应直接说明这个边界，不得把题面限定替换成更弱的“准备/计划”。"
+            "如果 evidence 只覆盖早期准备/草稿/计划/犹豫/取消状态，不得写成最终从未发生；"
+            "除非有后续或全局证据支持，否则只能说明已读证据的时间边界。"
             "如果 committed evidence 没有覆盖用户问题要求的事实粒度，最终回答不得给出超出证据的具体断言；"
             "只能说明已定位/未定位的范围、证据缺口，以及需要用户补充的章节、幕名、前后事件或关键词。"
             "如果证据只能支持暂定判断，请直接给暂定判断，并在同一份回答中列出证据缺口和非阻塞追问。\n"
+            "不要把内部工具名、tool-call 名称、request id、流程要求或 prompt 约束当作用户答案输出；"
+            "如果已经有 raw_excerpt 覆盖问题所需事实，请直接综合这些原文证据作答。\n"
             "不要输出 JSON。不得夸大证据覆盖范围，不得把推断写成已确认事实。"
         )
         payload = {
