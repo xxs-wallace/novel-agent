@@ -15,6 +15,7 @@ from novel_agent.app.schemas.narrative_inquiry_schema import AnalyzerBudget
 from novel_agent.app.services.outline_analyzer_benchmark_service import (
     DEFAULT_ANALYZER_BENCHMARK_TIMEOUT_SECONDS,
     AnalyzerBenchmarkConfig,
+    AnalyzerBenchmarkModelConfig,
     OutlineAnalyzerBenchmarkService,
     build_default_longzu_120kb_config,
 )
@@ -43,6 +44,14 @@ class ScriptedBenchmarkModel:
         if not self.outputs:
             raise AssertionError("scripted benchmark model has no more outputs")
         return self.outputs.pop(0)
+
+
+def test_analyzer_benchmark_model_defaults_to_flash_with_max_reasoning() -> None:
+    config = AnalyzerBenchmarkModelConfig()
+
+    assert config.model_name == "deepseek-v4-flash"
+    assert config.thinking == "enabled"
+    assert config.reasoning_effort == "max"
 
 
 def _seed_memory(repo_root: Path, *, book_id: str = "bench-book") -> Path:

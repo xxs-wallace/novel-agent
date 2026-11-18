@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ...cli.events import RunEvent
-from ...constants import DEFAULT_CLOSE_READING_STAGE
 from ...cli.status import WriterStatusPresenter
+from ...constants import DEFAULT_CLOSE_READING_STAGE
 from ...llm import JsonModelClient, ModelSettings
 from ...repos.character_profiles_repo import CharacterProfilesRepo
 from ...repos.db import NovelAgentDB
@@ -342,15 +342,22 @@ class WebActionService:
 
     async def _run_read_pipeline(self, context: JobContext, *, read_only: bool) -> dict[str, Any]:
         snapshot = self.session_service.facade.task_snapshot(book_id=context.task_id)
-        source_path = self._resolve_source_path(snapshot.source_path)
+        payload = context.payload
+        append_source = _truthy(payload.get("append_source"))
+        requested_source_path = str(payload.get("source_path") or "").strip()
+        if append_source and not requested_source_path:
+            raise ValueError("追加原文需要明确提供 source_path。")
+        source_path = self._resolve_source_path(requested_source_path or snapshot.source_path)
         if not source_path:
             raise ValueError("当前任务没有原文路径，请先在任务信息中配置 source_path。")
         if not source_path.exists():
             raise FileNotFoundError(f"原文文件不存在：{source_path}")
+        if append_source:
+            if not snapshot.db_path or not snapshot.db_path.exists() or snapshot.documents_count <= 0:
+                raise ValueError("追加原文需要已完成粗读的旧任务。")
         api_key = self._require_api_key()
         db_path = snapshot.db_path or self.session_service.facade.db_path_for_book(context.task_id)
         debug_path = self._debug_path(context, "read")
-        payload = context.payload
 
         if read_only:
             context.emit("progress", "开始完整导入原文并写入索引。")
@@ -363,6 +370,7 @@ class WebActionService:
                     debug_path=debug_path,
                     api_key=api_key,
                     run_mode="resume" if db_path.exists() else "fresh",
+                    append_source=append_source,
                     max_read_kb=self._optional_int(
                         payload,
                         "max_read_kb",
@@ -372,9 +380,21 @@ class WebActionService:
                     segment_step_kb=self._optional_int(payload, "segment_step_kb", default=32) or 32,
                     close_step_batches=1,
                     build_creative_kb=False,
+                    segmentation_thinking=str(payload.get("segmentation_thinking") or "").strip() or None,
+                    segmentation_reasoning_effort=(
+                        str(payload.get("segmentation_reasoning_effort") or "").strip() or None
+                    ),
+                    segmentation_request_retry_attempts=(
+                        self._optional_int(payload, "segmentation_request_retry_attempts", default=3) or 3
+                    ),
                     should_stop=context.should_cancel,
                 ),
             )
+            if append_source:
+                self.session_service.facade.ensure_task(
+                    book_id=context.task_id,
+                    source_path=str(source_path),
+                )
             context.emit("progress", "原文导入本轮已完成，任务状态会刷新。", payload=self._progress_payload(context.task_id))
             return dict(result)
 
@@ -388,6 +408,7 @@ class WebActionService:
                 debug_path=debug_path,
                 api_key=api_key,
                 run_mode="resume",
+                append_source=False,
                 max_read_kb=0,
                 max_close_batches=self._optional_int(
                     payload,
@@ -397,6 +418,17 @@ class WebActionService:
                 segment_step_kb=1,
                 close_step_batches=self._optional_int(payload, "close_step_batches", default=1) or 1,
                 build_creative_kb=False,
+                close_read_request_retry_attempts=(
+                    self._optional_int(payload, "close_read_request_retry_attempts", default=3) or 3
+                ),
+                close_read_character_evidence_coverage_audit=(
+                    _truthy(payload["character_evidence_coverage_audit"])
+                    if "character_evidence_coverage_audit" in payload
+                    else None
+                ),
+                close_read_timeout_seconds=(
+                    self._optional_int(payload, "close_read_timeout_seconds", default=None)
+                ),
                 close_document_chars_budget=self._optional_int(
                     payload,
                     "close_document_chars_budget",

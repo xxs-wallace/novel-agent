@@ -73,7 +73,7 @@ def _write_text(path: Path, text: str) -> None:
 @dataclass(frozen=True, slots=True)
 class AnalyzerBenchmarkModelConfig:
     model_type: str = "OpenAIModel"
-    model_name: str = "deepseek-v4-pro"
+    model_name: str = "deepseek-v4-flash"
     provider: str | None = "openai_compatible"
     base_url: str | None = "https://api.deepseek.com"
     api_key: str | None = None
@@ -85,7 +85,7 @@ class AnalyzerBenchmarkModelConfig:
     request_retry_backoff_seconds: float = 1.0
     retry_without_thinking_on_failure: bool = True
     thinking: str | None = "enabled"
-    reasoning_effort: str | None = "high"
+    reasoning_effort: str | None = "max"
     include_reasoning_content: bool = False
 
     def to_model_settings(self) -> ModelSettings:

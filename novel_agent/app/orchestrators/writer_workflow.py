@@ -657,6 +657,9 @@ class WriterInteractiveWorkflow:
         checkpoint_stage = "wait_chapter_review" if pending_stage == "wait_chapter_review" else "chapter_review"
         self._confirm_checkpoint(run_id=run_id, stage=checkpoint_stage, source="continue_after_chapter_review")
         state = self.load_workflow_state(run_id=run_id) or state
+        if self._load_generation_review_status(run_id) == "replan_requested":
+            self._remove_run_artifact(run_id=run_id, name="generation_review_decision.json")
+            state["current_decision_id"] = ""
         state["pending_checkpoint"] = None
         self._set_workflow_position(state, technical_stage="freeze_c", agent_state="agent_running")
         self._save_workflow_state(run_id, state)
@@ -1180,7 +1183,11 @@ class WriterInteractiveWorkflow:
                 status="validation_failed",
                 validation={"ok": False, "errors": [str(exc)]},
             )
-            self._remember_pending_scoped_revision(state=state, result=result)
+            self._remember_pending_scoped_revision(
+                state=state,
+                result=result,
+                target_stage=request.target_stage,
+            )
             self._save_workflow_state(run_id, state)
             return {
                 **result.to_dict(),
@@ -1202,7 +1209,11 @@ class WriterInteractiveWorkflow:
                 status="validation_failed",
                 validation={"ok": False, "errors": [str(exc)]},
             )
-            self._remember_pending_scoped_revision(state=state, result=result)
+            self._remember_pending_scoped_revision(
+                state=state,
+                result=result,
+                target_stage=request.target_stage,
+            )
             self._save_workflow_state(run_id, state)
             return {
                 **result.to_dict(),
@@ -1219,7 +1230,11 @@ class WriterInteractiveWorkflow:
                 "checks": ["schema", "scope", "references", "upstream_freeze_constraints"],
             },
         )
-        self._remember_pending_scoped_revision(state=state, result=result)
+        self._remember_pending_scoped_revision(
+            state=state,
+            result=result,
+            target_stage=request.target_stage,
+        )
         self._save_workflow_state(run_id, state)
         return {**result.to_dict(), "diff": self._read_diff_text(result.diff_path)}
 
@@ -2052,6 +2067,7 @@ class WriterInteractiveWorkflow:
             "source_paths": [
                 str(run_dir / self._artifact_filename_for_type(target_artifact_type)),
                 self._artifact_filename_for_type(target_artifact_type),
+                "interactive:user_feedback",
                 *self._artifact_source_paths(target_artifact),
             ],
             "upstream_freezes": {},
@@ -2203,12 +2219,38 @@ class WriterInteractiveWorkflow:
         *,
         state: dict[str, Any],
         result: ScopedArtifactRevisionResult,
+        target_stage: str | None = None,
     ) -> None:
+        review_stage = str(
+            (target_stage if result.status == "candidate" else None)
+            or result.validation.get("target_stage")
+            or state.get("technical_stage")
+            or state.get("current_stage")
+            or ""
+        ).strip()
         self._set_workflow_position(
             state,
-            technical_stage=str(result.validation.get("target_stage") or state.get("technical_stage") or state.get("current_stage") or ""),
+            technical_stage=review_stage,
             agent_state="reviewing_artifact",
         )
+        if result.status == "candidate" and review_stage:
+            run_id = str(state.get("run_id") or "").strip()
+            if run_id:
+                state["pending_checkpoint"] = self._write_checkpoint(
+                    run_id=run_id,
+                    stage=review_stage,
+                    artifact_path=result.target_artifact_path,
+                    source="scoped_artifact_revision",
+                )
+            else:
+                state["pending_checkpoint"] = {
+                    "checkpoint_id": f"{review_stage}-scoped-revision",
+                    "stage": review_stage,
+                    "status": "pending",
+                    "artifact_path": result.target_artifact_path,
+                    "source": "scoped_artifact_revision",
+                    "confirmed_at": "",
+                }
         state["pending_scoped_revision"] = {
             "request_id": result.request_id,
             "revision_id": result.revision_id,
@@ -2624,6 +2666,8 @@ class WriterInteractiveWorkflow:
         previous_draft_id = (
             existing_draft_id
             if existing_draft_id and existing_draft_id != draft_id and str(existing.get("chapter_id") or "").strip() == chapter_id
+            else str(state.get("current_draft_id") or "").strip()
+            if not reuse_pending_draft and str(state.get("current_chapter_id") or "").strip() == chapter_id
             else ""
         )
         decision_id = str(existing.get("decision_id") or "").strip()

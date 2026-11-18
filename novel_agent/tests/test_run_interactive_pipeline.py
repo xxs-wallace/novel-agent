@@ -161,7 +161,11 @@ def test_build_writer_workflow_uses_large_writer_output_budget(monkeypatch, tmp_
     )
 
     assert captured_settings
-    assert captured_settings[0].max_output_tokens == 16384
+    settings = captured_settings[0]
+    assert settings.model_name == "deepseek-v4-flash"
+    assert settings.thinking == "enabled"
+    assert settings.reasoning_effort == "max"
+    assert settings.max_output_tokens == 16384
 
 
 def test_creative_kb_facade_enables_thinking_fallback_for_kb_agents(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -315,6 +315,8 @@ class AnalyzerSessionService:
             return "running"
         if latest.status == "need_user_input":
             return "waiting_user"
+        if latest.status == "answer_may_be_incomplete":
+            return "answer_may_be_incomplete"
         if latest.status in {"failed", "cancelled", "interrupted_can_resume"}:
             return "failed"
         return "idle"

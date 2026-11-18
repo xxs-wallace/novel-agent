@@ -1410,6 +1410,7 @@ class AnalyzerService:
         self.budget = budget or AnalyzerBudget()
         self.prompt_trace_recorder = prompt_trace_recorder
         self.use_tool_call_requests = bool(use_tool_call_requests)
+        self._last_final_response_metadata: dict[str, Any] = {}
         # Kept for compatibility with older callers that configured prompt-slice
         # sizes. The new loop budgets live in AnalyzerBudget.
         self.legacy_budget_kwargs = dict(legacy_budget_kwargs)
@@ -1425,6 +1426,9 @@ class AnalyzerService:
         normalized_question = normalize_whitespace(question)
         if not normalized_question:
             raise ValueError("Analyzer question is required")
+        # A service instance can handle multiple turns; response metadata is
+        # turn-scoped and must not leak into a later result.
+        self._last_final_response_metadata = {}
         seed = self.seed_builder.build(
             conn,
             book_id=book_id,
@@ -1603,14 +1607,16 @@ class AnalyzerService:
                         evidence_bundles=evidence_history,
                         trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
                     )
+                final_response = dict(self._last_final_response_metadata)
+                answer_status = "answer_may_be_incomplete" if final_response.get("finish_reason") == "length" else "ok"
                 return AnalyzerChatResult(
-                    status="ok",
+                    status=answer_status,
                     answer=answer,
                     sources=sources,
                     seed=seed,
                     notebook=notebook,
                     evidence_bundles=evidence_history,
-                    trace={**trace, "final_budget_state": budget_state},
+                    trace={**trace, "final_budget_state": budget_state, "final_model_response": final_response},
                 )
             if loop_output.status in {"needs_user_preference", "insufficient_memory", "budget_exhausted"}:
                 answer = loop_output.final_answer or loop_output.message or self._status_answer(loop_output.status, notebook=notebook)
@@ -1703,14 +1709,18 @@ class AnalyzerService:
                 evidence_bundles=evidence_history,
                 trace={**trace, "failure": str(exc), "final_budget_state": budget_state},
             )
+        final_response = dict(self._last_final_response_metadata)
+        answer_status = "answer_may_be_incomplete" if final_response.get("finish_reason") == "length" else (
+            "budget_exhausted" if budget_state["exhausted"] else "ok"
+        )
         return AnalyzerChatResult(
-            status="budget_exhausted" if budget_state["exhausted"] else "ok",
+            status=answer_status,
             answer=answer,
             sources=sources,
             seed=seed,
             notebook=notebook,
             evidence_bundles=evidence_history,
-            trace={**trace, "final_budget_state": budget_state},
+            trace={**trace, "final_budget_state": budget_state, "final_model_response": final_response},
         )
 
     def _call_intent_gate(self, *, book_id: str, seed: AnalyzerSeedPacket) -> AnalyzerIntent:
@@ -1734,7 +1744,8 @@ class AnalyzerService:
                 evidence_bundle_count=0,
             )
             try:
-                raw = self.model_client.generate_text(
+                raw = self._generate_text(
+                    stage="intent_gate",
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     timeout_seconds=self._prompt_timeout_seconds("intent_gate"),
@@ -1802,6 +1813,13 @@ class AnalyzerService:
             tool_choice="auto",
             timeout_seconds=timeout_seconds,
             **dict(model_kwargs),
+        )
+        self._record_model_response(
+            stage="loop",
+            metadata={
+                "finish_reason": getattr(response, "finish_reason", None),
+                "token_usage": dict(getattr(response, "token_usage", {}) or {}),
+            },
         )
         tool_calls = list(getattr(response, "tool_calls", []) or [])
         if not tool_calls:
@@ -1975,7 +1993,8 @@ class AnalyzerService:
                     if tool_output is not None:
                         return tool_output
                 else:
-                    raw = self.model_client.generate_text(
+                    raw = self._generate_text(
+                        stage="loop",
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
                         timeout_seconds=self._prompt_timeout_seconds("loop"),
@@ -2030,7 +2049,8 @@ class AnalyzerService:
                 evidence_bundle_count=len(evidence_history),
             )
             try:
-                raw = self.model_client.generate_text(
+                raw = self._generate_text(
+                    stage="readiness",
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     timeout_seconds=self._prompt_timeout_seconds("readiness"),
@@ -2205,7 +2225,8 @@ class AnalyzerService:
                 evidence_bundle_count=len(candidate_bundles),
             )
             try:
-                raw = self.model_client.generate_text(
+                raw = self._generate_text(
+                    stage="triage",
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     timeout_seconds=self._prompt_timeout_seconds("triage"),
@@ -2264,7 +2285,8 @@ class AnalyzerService:
                 evidence_bundle_count=1,
             )
             try:
-                raw = self.model_client.generate_text(
+                raw = self._generate_text(
+                    stage="triage",
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     timeout_seconds=self._prompt_timeout_seconds("triage"),
@@ -2316,7 +2338,8 @@ class AnalyzerService:
         )
         try:
             answer = str(
-                self.model_client.generate_text(
+                self._generate_text(
+                    stage="final",
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     timeout_seconds=self._prompt_timeout_seconds("final"),
@@ -2328,6 +2351,33 @@ class AnalyzerService:
         if not answer:
             raise RuntimeError("Analyzer final answer model returned empty text")
         return answer
+
+    def _generate_text(self, *, stage: str, **kwargs: Any) -> str:
+        generate_with_metadata = getattr(self.model_client, "generate_text_with_metadata", None)
+        if callable(generate_with_metadata):
+            response = generate_with_metadata(**kwargs)
+            content = str(getattr(response, "content", "") or "")
+            metadata = response.to_dict() if hasattr(response, "to_dict") else {}
+            if isinstance(metadata, Mapping):
+                response_metadata = dict(metadata)
+            else:
+                response_metadata = {}
+            self._record_model_response(stage=stage, metadata=response_metadata)
+            if stage == "final":
+                self._last_final_response_metadata = response_metadata
+            return content
+        return str(self.model_client.generate_text(**kwargs))
+
+    def _record_model_response(self, *, stage: str, metadata: Mapping[str, Any]) -> None:
+        if not metadata or self.prompt_trace_recorder is None:
+            return
+        self.prompt_trace_recorder(
+            {
+                "event": "model_response",
+                "stage": stage,
+                "response": dict(metadata),
+            }
+        )
 
     def _fit_prompt_to_budget(
         self,
@@ -2414,7 +2464,7 @@ class AnalyzerService:
         logger.info(
             "outline_analyzer.model_prompt_stats book_id=%s stage=%s round=%s attempt=%s "
             "system_chars=%s user_chars=%s total_chars=%s system_bytes=%s user_bytes=%s "
-            "total_bytes=%s evidence_bundles=%s budget_limited=%s model=%s",
+            "total_bytes=%s evidence_bundles=%s budget_limited=%s model=%s max_output_tokens=%s",
             book_id,
             stage,
             round_index if round_index is not None else "-",
@@ -2428,6 +2478,7 @@ class AnalyzerService:
             evidence_bundle_count,
             budget_limited,
             self._model_label(),
+            self._model_max_output_tokens(),
         )
         if self.prompt_trace_recorder is not None:
             try:
@@ -2446,6 +2497,7 @@ class AnalyzerService:
                         "total_bytes": system_bytes + user_bytes,
                         "evidence_bundle_count": evidence_bundle_count,
                         "budget_limited": budget_limited,
+                        "max_output_tokens": self._model_max_output_tokens(),
                         "timeout_seconds": self._prompt_timeout_seconds(stage),
                         "model_kwargs": self._prompt_model_kwargs(stage),
                         "system_prompt": system_prompt,
@@ -2492,6 +2544,11 @@ class AnalyzerService:
                 if value:
                     return str(value)
         return type(self.model_client).__name__
+
+    def _model_max_output_tokens(self) -> int | None:
+        settings = getattr(self.model_client, "settings", None)
+        value = getattr(settings, "max_output_tokens", None)
+        return int(value) if value is not None else None
 
     def _workflow_instruction(self, analysis_type: AnalyzerAnalysisType | None) -> str:
         if analysis_type == "relationship_analysis":
@@ -2893,6 +2950,12 @@ class AnalyzerService:
             "你是只读 Analyzer。请基于 seed、notebook 和 evidence 给出用户可读中文分析。\n"
             "只读表示不得写入 Memory、document 或任务产物；不禁止输出用户可读的大纲修改方案、人物设定建议或创作方向建议。\n"
             "先给结论，再说明文学分析、事实依据、风险、可选走向、建议回读章节和需要用户确认的问题。\n"
+            "如果用户明确指定本次/本卷/本章/本轮大纲的结尾、终点、截断点、戛然而止位置或悬念保留边界，"
+            "该边界是硬性约束，优先级高于完整性、高潮闭合、Reader promise、rubric、可选走向和你的创作惯性。"
+            "必须严格区分本次作品与下一部/后续作品：后续事件只能作为未展开的悬念或极短的边界说明，"
+            "不得写入本次大纲正文；不得描写终点之后的战斗结果、胜负、死亡、身份揭晓、面具破碎、残骸或真相回收。"
+            "如果用户要求停在‘开始/正面开战/第一击’等节点，只写到该节点，不能继续写完整战斗。"
+            "生成前请在内部检查最后一个已发生事件是否等于用户指定终点；不要输出这项检查过程。\n"
             f"{self._workflow_instruction(seed.analysis_type)}\n"
             f"{ANALYZER_ANALYSIS_QUESTION_POLICY}\n"
             "如果用户要求基于上面、刚才或上一轮讨论生成、重写、修改大纲/人物设定，"

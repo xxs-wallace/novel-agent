@@ -1719,7 +1719,7 @@ class OutlineResearchContextBroker:
                 TraceableSource(
                     type=str(source.get("type") or "text_search"),
                     path=str(source.get("path") or ""),
-                    evidence_level="locator",
+                    evidence_level="reasonable_inference",
                     snippet=_safe_excerpt(str(source), limit=180),
                 )
                 for source in bundle.sources
@@ -2024,6 +2024,17 @@ class OutlineResearchModelAdapter(Protocol):
     ) -> SufficiencyDecision | Mapping[str, Any]:
         ...
 
+    def repair_sufficiency_decision(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        notebook: PlanningNotebook,
+        budget_state: Mapping[str, Any],
+        invalid_decision: Mapping[str, Any],
+        validation_error: str,
+    ) -> SufficiencyDecision | Mapping[str, Any]:
+        ...
+
     def generate_outline(
         self,
         *,
@@ -2180,6 +2191,22 @@ class HeuristicOutlineResearchModelAdapter:
             known_enough=["当前索引和用户意图足以进入保守规划。"],
         )
 
+    def repair_sufficiency_decision(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        notebook: PlanningNotebook,
+        budget_state: Mapping[str, Any],
+        invalid_decision: Mapping[str, Any],
+        validation_error: str,
+    ) -> SufficiencyDecision:
+        _ = invalid_decision, validation_error
+        return self.decide_sufficiency(
+            seed_packet=seed_packet,
+            notebook=notebook,
+            budget_state=budget_state,
+        )
+
     def generate_outline(
         self,
         *,
@@ -2262,17 +2289,68 @@ class HeuristicOutlineResearchModelAdapter:
 class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
     def __init__(self, *, model_client: Any) -> None:
         self.model_client = model_client
+        self.model_prompt_trace: list[dict[str, Any]] = []
+
+    def reset_prompt_trace(self) -> None:
+        self.model_prompt_trace.clear()
 
     def _generate_json(self, *, stage: str, system_prompt: str, payload: Mapping[str, Any], fallback: Mapping[str, Any]) -> dict[str, Any]:
         if self.model_client is None:
             raise RuntimeError("Outline research model adapter requires an available model_client")
         user_prompt = json.dumps(payload, ensure_ascii=False, indent=2)
         self._log_model_prompt_stats(stage=stage, system_prompt=system_prompt, user_prompt=user_prompt)
-        result, raw = self.model_client.generate_json(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            fallback_factory=lambda: dict(fallback),
-            use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
+        generate_json_with_metadata = getattr(self.model_client, "generate_json_with_metadata", None)
+        if callable(generate_json_with_metadata):
+            try:
+                response = generate_json_with_metadata(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    fallback_factory=lambda: dict(fallback),
+                    use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
+                )
+            except Exception as exc:
+                self.model_prompt_trace.append(
+                    {
+                        "stage": stage,
+                        "model": self._model_label(),
+                        "system_chars": int(getattr(exc, "system_chars", len(system_prompt))),
+                        "user_chars": int(getattr(exc, "user_chars", len(user_prompt))),
+                        "prompt_chars": int(getattr(exc, "prompt_chars", len(system_prompt) + len(user_prompt))),
+                        "finish_reason": getattr(exc, "finish_reason", None),
+                        "token_usage": dict(getattr(exc, "token_usage", {}) or {}),
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                raise
+            result = response.payload
+            raw = response.raw_text
+            finish_reason = response.finish_reason
+            token_usage = dict(response.token_usage)
+            prompt_chars = response.prompt_chars
+            system_chars = response.system_chars
+            user_chars = response.user_chars
+        else:
+            result, raw = self.model_client.generate_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                fallback_factory=lambda: dict(fallback),
+                use_fallback_on_error=bool(getattr(getattr(self.model_client, "settings", None), "dry_run", False)),
+            )
+            finish_reason = None
+            token_usage = {}
+            prompt_chars = len(system_prompt) + len(user_prompt)
+            system_chars = len(system_prompt)
+            user_chars = len(user_prompt)
+        self.model_prompt_trace.append(
+            {
+                "stage": stage,
+                "model": self._model_label(),
+                "system_chars": system_chars,
+                "user_chars": user_chars,
+                "prompt_chars": prompt_chars,
+                "finish_reason": finish_reason,
+                "token_usage": token_usage,
+            }
         )
         if not isinstance(result, Mapping):
             raise RuntimeError("Outline research model returned a non-object JSON payload")
@@ -2300,6 +2378,7 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             system_prompt=(
                 "你是大纲研究 Agent。只返回 JSON。基于轻量 seed、notebook 和上一轮结果，"
                 "提出下一轮 research requests。请求类型只能是 text_search、story_detail、character_profile、world_concept、structure_pattern、reference_outline_design。"
+                "如果这是首轮、seed_packet.reference_work 为空且 user_intent.desired_actions 非空，requests 必须至少包含一个 story_detail；这是硬性输出 contract，不得只返回 text_search 或其他类型。"
                 "当需要先定位历史剧情、人物共同经历、伏笔或关键词交集时，优先使用 text_search 做 grep-like 词面定位；"
                 "当 seed_packet.reference_outline_design_index 非空，且需要借鉴对象的大纲/剧情设计给用户原创大纲提供方向建议时，"
                 "使用 reference_outline_design；该结果只能作为 reference_advice，不能当作新作品事实或原作桥段继承。"
@@ -2368,19 +2447,40 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                 raise RuntimeError("Outline research model returned a non-object request item")
             normalized.append(dict(item))
         initial_round = not prior_results and not budget_state.get("total_requests_used")
-        if (
-            initial_round
-            and not seed_packet.reference_work
-            and not any(str(item.get("request_type") or item.get("type")) == "story_detail" for item in normalized)
-        ):
-            desired_actions = [
-                str(item)
-                for item in (seed_packet.user_intent.get("desired_actions") or [])
-                if str(item).strip()
-            ]
-            if desired_actions:
-                raise RuntimeError("Outline research model omitted required story_detail request")
+        desired_actions = [
+            str(item)
+            for item in (seed_packet.user_intent.get("desired_actions") or [])
+            if str(item).strip()
+        ]
+        requires_story_detail = initial_round and not seed_packet.reference_work and bool(desired_actions)
+        if requires_story_detail and not self._contains_request_type(normalized, "story_detail"):
+            repaired_payload = dict(payload)
+            repaired_payload["contract_violation"] = {
+                "previous_requests": normalized,
+                "required_request_type": "story_detail",
+                "instruction": "重新生成 requests；必须至少包含一个 request_type=story_detail，查询当前续写所需的最近剧情承接细节。",
+            }
+            repaired = self._generate_json(
+                stage="propose_research_requests_repair",
+                system_prompt=(
+                    "你正在修复上一轮大纲研究请求。只返回 JSON。"
+                    "上一轮 requests 没有满足硬性 contract。"
+                    "由于这是普通续写任务的首轮研究，必须返回至少一个 request_type=story_detail。"
+                    "可以同时保留合理的 text_search、character_profile 或 world_concept，但绝不能再次遗漏 story_detail。"
+                ),
+                payload=repaired_payload,
+                fallback={"requests": fallback_requests},
+            )
+            repaired_requests = self._request_items_from_model_payload(repaired)
+            if isinstance(repaired_requests, list):
+                normalized = [dict(item) for item in repaired_requests if isinstance(item, Mapping)]
+            if not self._contains_request_type(normalized, "story_detail"):
+                raise RuntimeError("Outline research model omitted required story_detail request after repair")
         return normalized
+
+    @staticmethod
+    def _contains_request_type(requests: Sequence[Mapping[str, Any]], request_type: str) -> bool:
+        return any(str(item.get("request_type") or item.get("type")) == request_type for item in requests)
 
     def _request_items_from_model_payload(self, payload: Mapping[str, Any]) -> object:
         requests = payload.get("requests")
@@ -2414,6 +2514,8 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
             system_prompt=(
                 "你是大纲研究 Sufficiency Gate。只返回 JSON。判断现有 evidence 是否足够生成大纲。"
                 "高风险缺口必须 needs_user_input 或 blocked，不得伪造用户答案。"
+                "当 status=blocked 时，必须返回至少一条具体、可执行的 required_actions；"
+                "不得只返回 blocking_gaps 或 reason。"
                 "如果 seed_packet.continuation_boundary 指出 completed_anchor_document_title_index，"
                 "该章节已经完成并写入 Memory，只能作为过去上下文；"
                 "needs_user_input 的问题必须面向 next_document_title_index 及之后的续写选择，"
@@ -2439,6 +2541,51 @@ class ModelOutlineResearchModelAdapter(HeuristicOutlineResearchModelAdapter):
                     "user_questions": [
                         "“角色名”是新增人物，还是已有角色的隐藏身份？如果是已有角色，请说明是谁。"
                     ],
+                },
+                "blocked_schema": {
+                    "status": "blocked",
+                    "blocking_gaps": ["缺少的基础材料或不可继续的明确原因"],
+                    "required_actions": ["用户或系统下一步可以执行的具体动作"],
+                },
+            },
+            fallback=fallback,
+        )
+
+    def repair_sufficiency_decision(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        notebook: PlanningNotebook,
+        budget_state: Mapping[str, Any],
+        invalid_decision: Mapping[str, Any],
+        validation_error: str,
+    ) -> SufficiencyDecision | Mapping[str, Any]:
+        fallback = super().decide_sufficiency(
+            seed_packet=seed_packet,
+            notebook=notebook,
+            budget_state=budget_state,
+        ).to_dict()
+        return self._generate_json(
+            stage="decide_sufficiency_repair",
+            system_prompt=(
+                "你正在修复上一轮 SufficiencyDecision。只返回完整 JSON 对象，不要解释。"
+                "status 只能是 enough、needs_user_input、proceed_with_assumptions、blocked。"
+                "needs_user_input 必须包含具体 user_questions；"
+                "proceed_with_assumptions 必须包含 assumptions；"
+                "blocked 必须包含至少一条具体、可执行的 required_actions。"
+                "保留上一轮仍然成立的 known_enough、blocking_gaps、optional_gaps 和 remaining_risks。"
+            ),
+            payload={
+                "seed_packet": seed_packet.to_dict(),
+                "planning_notebook": notebook.to_dict(),
+                "budget_state": dict(budget_state),
+                "invalid_decision": dict(invalid_decision),
+                "validation_error": validation_error,
+                "output_contract": {
+                    "allowed_status": ["enough", "needs_user_input", "proceed_with_assumptions", "blocked"],
+                    "blocked_requires": ["required_actions"],
+                    "needs_user_input_requires": ["user_questions"],
+                    "proceed_with_assumptions_requires": ["assumptions"],
                 },
             },
             fallback=fallback,
@@ -2580,6 +2727,9 @@ class OutlineResearchLoopController:
         notebook: PlanningNotebook | None = None,
         user_answers: Mapping[str, str] | None = None,
     ) -> OutlineResearchRunResult:
+        reset_prompt_trace = getattr(self.model_adapter, "reset_prompt_trace", None)
+        if callable(reset_prompt_trace):
+            reset_prompt_trace()
         budget = budget or ResearchBudget()
         notebook = notebook or PlanningNotebook(notebook_id=f"{book_id}-planning-notebook")
         user_answer_items = [
@@ -2657,12 +2807,10 @@ class OutlineResearchLoopController:
             total_requests_used=total_requests_used,
             exhausted=exhausted or total_requests_used >= budget.max_total_requests,
         )
-        decision = self._validated_decision(
-            self.model_adapter.decide_sufficiency(
-                seed_packet=seed_packet,
-                notebook=notebook,
-                budget_state=budget_state,
-            )
+        decision = self._decide_sufficiency_with_repair(
+            seed_packet=seed_packet,
+            notebook=notebook,
+            budget_state=budget_state,
         )
         decision = self._with_seed_required_user_questions(
             seed_packet=seed_packet,
@@ -2683,6 +2831,9 @@ class OutlineResearchLoopController:
             "memory_query_rounds": len(memory_query_decision_log),
             "memory_query_final_evidence_ids": self._final_evidence_ids(memory_query_trace, memory_query_decision_log, prior_results),
         }
+        model_prompt_trace = getattr(self.model_adapter, "model_prompt_trace", None)
+        if isinstance(model_prompt_trace, list):
+            trace["model_prompt_trace"] = [dict(item) for item in model_prompt_trace if isinstance(item, Mapping)]
         resume_context = self._build_resume_context(
             seed_packet=seed_packet,
             decision=decision,
@@ -2862,10 +3013,44 @@ class OutlineResearchLoopController:
                     }
                 ]
                 return SufficiencyDecision.from_dict(data)
+            if data.get("status") == "blocked" and not data.get("required_actions"):
+                raise ValueError("blocked decisions must include required_actions") from exc
             raise ValueError(
                 "status must be enough, needs_user_input, proceed_with_assumptions, or blocked; "
                 f"got {data.get('status')!r}"
             ) from exc
+
+    def _decide_sufficiency_with_repair(
+        self,
+        *,
+        seed_packet: OutlineSeedPacket,
+        notebook: PlanningNotebook,
+        budget_state: Mapping[str, Any],
+    ) -> SufficiencyDecision:
+        candidate = self.model_adapter.decide_sufficiency(
+            seed_packet=seed_packet,
+            notebook=notebook,
+            budget_state=budget_state,
+        )
+        try:
+            return self._validated_decision(candidate)
+        except ValueError as initial_error:
+            repair = getattr(self.model_adapter, "repair_sufficiency_decision", None)
+            if not callable(repair) or isinstance(candidate, SufficiencyDecision):
+                raise
+            repaired = repair(
+                seed_packet=seed_packet,
+                notebook=notebook,
+                budget_state=budget_state,
+                invalid_decision=dict(candidate),
+                validation_error=str(initial_error),
+            )
+            try:
+                return self._validated_decision(repaired)
+            except ValueError as repair_error:
+                raise ValueError(
+                    f"SufficiencyDecision remained invalid after one model repair attempt: {repair_error}"
+                ) from repair_error
 
     def _normalize_sufficiency_decision_status(self, item: Mapping[str, Any]) -> Mapping[str, Any]:
         raw_status = str(item.get("status") or "").strip().lower().replace("-", "_").replace(" ", "_")

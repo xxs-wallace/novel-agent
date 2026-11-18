@@ -8,6 +8,28 @@ import pytest
 from novel_agent.app.llm import JsonModelClient, ModelSettings
 
 
+def test_openai_model_client_honors_trust_env_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeOpenAIModel:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr("smolagents.models.OpenAIModel", FakeOpenAIModel)
+    JsonModelClient(
+        ModelSettings(
+            model_type="OpenAIModel",
+            model_name="fake",
+            api_key="test-key",
+            trust_env=False,
+        )
+    )
+
+    client_kwargs = captured["client_kwargs"]
+    assert isinstance(client_kwargs, dict)
+    assert client_kwargs["http_client"]._trust_env is False
+
+
 def test_json_model_client_retries_transient_generation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     class FlakyModel:
         def __init__(self) -> None:
@@ -32,6 +54,76 @@ def test_json_model_client_retries_transient_generation_errors(monkeypatch: pyte
 
     assert client.generate_text(system_prompt="system", user_prompt="user") == "ok"
     assert model.calls == 2
+
+
+def test_json_model_client_preserves_finish_reason_and_token_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    class LengthLimitedModel:
+        def generate(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                content="部分回答",
+                raw=SimpleNamespace(
+                    choices=[SimpleNamespace(finish_reason="length")],
+                    usage=SimpleNamespace(prompt_tokens=12, completion_tokens=34, total_tokens=46),
+                ),
+                token_usage=SimpleNamespace(input_tokens=12, output_tokens=34, total_tokens=46),
+            )
+
+    monkeypatch.setattr(JsonModelClient, "_build_model", lambda _self: LengthLimitedModel())
+    client = JsonModelClient(
+        ModelSettings(
+            model_type="FakeModel",
+            model_name="fake",
+            request_retry_attempts=1,
+        )
+    )
+
+    response = client.generate_text_with_metadata(system_prompt="system", user_prompt="user")
+
+    assert response.content == "部分回答"
+    assert response.finish_reason == "length"
+    assert response.token_usage["input_tokens"] == 12
+    assert response.token_usage["output_tokens"] == 34
+    assert response.token_usage["completion_tokens"] == 34
+
+
+def test_json_model_client_preserves_metadata_for_parsed_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    class JsonModel:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def generate(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            self.kwargs = dict(_kwargs)
+            return SimpleNamespace(
+                content='{"requests": []}',
+                raw=SimpleNamespace(
+                    choices=[SimpleNamespace(finish_reason="stop")],
+                    usage=SimpleNamespace(prompt_tokens=20, completion_tokens=8, total_tokens=28),
+                ),
+            )
+
+    model = JsonModel()
+    monkeypatch.setattr(JsonModelClient, "_build_model", lambda _self: model)
+    client = JsonModelClient(
+        ModelSettings(
+            model_type="OpenAIModel",
+            model_name="fake",
+            api_key="test-key",
+            request_retry_attempts=1,
+        )
+    )
+
+    response = client.generate_json_with_metadata(
+        system_prompt="system",
+        user_prompt="user",
+        fallback_factory=lambda: {"fallback": True},
+    )
+
+    assert response.payload == {"requests": []}
+    assert response.finish_reason == "stop"
+    assert response.token_usage["prompt_tokens"] == 20
+    assert response.token_usage["completion_tokens"] == 8
+    assert response.prompt_chars == len("system") + len("user")
+    assert model.kwargs["response_format"] == {"type": "json_object"}
 
 
 def test_json_model_client_raises_after_retry_exhaustion(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +366,11 @@ def test_openai_model_uses_client_timeout_and_disables_nested_retries(
     )
 
     assert captured["timeout"] == 42
-    assert captured["client_kwargs"] == {"timeout": 42, "max_retries": 0}
+    client_kwargs = captured["client_kwargs"]
+    assert isinstance(client_kwargs, dict)
+    assert client_kwargs["timeout"] == 42
+    assert client_kwargs["max_retries"] == 0
+    assert client_kwargs["http_client"]._trust_env is True
 
 
 def test_openai_model_omits_disabled_thinking_extra_body(

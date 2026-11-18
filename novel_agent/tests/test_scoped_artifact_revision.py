@@ -6,13 +6,16 @@ from pathlib import Path
 import pytest
 
 from novel_agent.app.orchestrators import (
+    ModelScopedArtifactRevisionAdapter,
     RevisionResultError,
-    ScopeGuardError,
     ScopedArtifactReviewContext,
+    ScopedArtifactRevisionLLMInput,
     ScopedArtifactRevisionRequest,
     ScopedArtifactRevisionResult,
     ScopedArtifactRevisionStore,
+    ScopeGuardError,
     get_revision_stage_policy,
+    validate_scoped_revision_references,
     validate_scoped_revision_request,
     validate_scoped_revision_result,
 )
@@ -229,3 +232,50 @@ def test_scoped_revision_result_requires_schema_fields(tmp_path: Path) -> None:
 
     with pytest.raises(RevisionResultError, match="missing required fields"):
         validate_scoped_revision_result(request, result, context)
+
+
+def test_book_continuation_plan_revision_accepts_schema_assumptions() -> None:
+    policy = get_revision_stage_policy("freeze_a_review")
+
+    assert "assumptions" in policy.allowed_fields_for("BookContinuationPlan")
+
+
+def test_model_revision_adapter_strips_transport_type_marker() -> None:
+    class StubModelClient:
+        def generate_json(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return (
+                {
+                    "plan_id": "plan-1",
+                    "book_id": "book-1",
+                    "continuation_goal": "继续主线",
+                    "assumptions": [],
+                    "type": "json_object",
+                },
+                None,
+            )
+
+    llm_input = ScopedArtifactRevisionLLMInput(
+        request={
+            "request_id": "req-1",
+            "target_artifact_type": "BookContinuationPlan",
+            "target_artifact_path": "/tmp/book_continuation_plan.json",
+        },
+        policy={},
+        target_artifact={"plan_id": "plan-1", "book_id": "book-1", "continuation_goal": "继续主线"},
+        allowed_context={},
+        user_feedback="调整节奏。",
+    )
+
+    candidate = ModelScopedArtifactRevisionAdapter(model_client=StubModelClient()).generate_candidate(llm_input)
+
+    assert candidate["revised_artifact"]["assumptions"] == []
+    assert "type" not in candidate["revised_artifact"]
+
+
+def test_scoped_revision_allows_user_feedback_provenance() -> None:
+    validate_scoped_revision_references(
+        revised_artifact={
+            "sources": [{"path": "interactive:user_feedback", "type": "user_feedback"}],
+        },
+        allowed_context={"source_paths": ["interactive:user_feedback"]},
+    )

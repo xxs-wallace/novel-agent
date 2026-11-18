@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Prompt id to run; may be provided multiple times. Default runs all benchmark prompts.",
     )
     parser.add_argument("--model-type", type=str, default="OpenAIModel")
-    parser.add_argument("--model-id", type=str, default="deepseek-v4-pro")
+    parser.add_argument("--model-id", type=str, default="deepseek-v4-flash")
     parser.add_argument("--provider", type=str, default="openai_compatible")
     parser.add_argument("--api-base", type=str, default="https://api.deepseek.com")
     parser.add_argument("--api-key", type=str, default=None)
@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-retry-attempts", type=int, default=3)
     parser.add_argument("--request-retry-backoff-seconds", type=float, default=1.0)
     parser.add_argument("--thinking", type=str, default="enabled", choices=["enabled", "disabled"])
-    parser.add_argument("--reasoning-effort", type=str, default="high", choices=["low", "medium", "high", "max"])
+    parser.add_argument("--reasoning-effort", type=str, default="max", choices=["low", "medium", "high", "max"])
     parser.add_argument("--include-reasoning-content", action="store_true")
     parser.add_argument(
         "--no-reuse-baseline",

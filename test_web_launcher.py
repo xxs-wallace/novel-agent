@@ -18,6 +18,17 @@ def test_root_web_launcher_bootstraps_venv_and_starts_web_entrypoint() -> None:
     assert "DEEPSEEK_API_KEY" in script
 
 
+def test_restart_web_defaults_to_background_launcher() -> None:
+    script = Path("scripts/restart_web_workbench.sh").read_text(encoding="utf-8")
+
+    assert "DAEMON=1" in script
+    assert "--foreground" in script
+    assert "os.setsid()" in script
+    assert "os.execvpe(command[0], command, os.environ.copy())" in script
+    assert "wait_for_port \"$API_PORT\"" in script
+    assert "wait_for_port \"$WEB_PORT\"" in script
+
+
 def test_web_launcher_builds_backend_and_frontend_commands(tmp_path: Path) -> None:
     web_dir = tmp_path / "web"
     web_dir.mkdir()

@@ -258,6 +258,26 @@ class _PromptLengthModelClient:
         return dict(self.payload), ""
 
 
+class _SequenceJsonModelClient:
+    model = "sequence-json-test-model"
+
+    def __init__(self, payloads: Sequence[Mapping[str, Any]]) -> None:
+        self.payloads = [dict(item) for item in payloads]
+        self.calls: list[dict[str, str]] = []
+
+    def generate_json(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory: Any,
+        use_fallback_on_error: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        _ = fallback_factory, use_fallback_on_error
+        self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt})
+        return self.payloads.pop(0), ""
+
+
 def test_outline_research_schema_serialization_and_validation(tmp_path: Path) -> None:
     source = TraceableSource(type="story_outline", path=str(tmp_path / "outline.md"), evidence_level="structured_state")
     packet = OutlineSeedPacket(
@@ -432,6 +452,43 @@ def test_outline_research_rejects_abstract_needs_user_input_fallback() -> None:
                 "blocking_gaps": ["缺少大纲规划所需的授权边界"],
             }
         )
+
+
+def test_outline_research_repairs_blocked_decision_missing_required_actions() -> None:
+    model_client = _SequenceJsonModelClient(
+        [
+            {
+                "decision_id": "invalid-blocked",
+                "status": "blocked",
+                "blocking_gaps": ["缺少可执行的下一步说明"],
+            },
+            {
+                "decision_id": "repaired-blocked",
+                "status": "blocked",
+                "blocking_gaps": ["缺少可执行的下一步说明"],
+                "required_actions": ["请补充具体的剧情选择"],
+            },
+        ]
+    )
+    adapter = ModelOutlineResearchModelAdapter(model_client=model_client)
+    controller = OutlineResearchLoopController(
+        broker=OutlineResearchContextBroker(repo_root=Path.cwd()),
+        model_adapter=adapter,
+    )
+
+    decision = controller._decide_sufficiency_with_repair(
+        seed_packet=OutlineSeedPacket(packet_id="repair-packet", book_id="repair-book", user_intent={}),
+        notebook=PlanningNotebook(notebook_id="repair-notebook"),
+        budget_state={"exhausted": True},
+    )
+
+    assert decision.status == "blocked"
+    assert decision.required_actions == ["请补充具体的剧情选择"]
+    assert [item["stage"] for item in adapter.model_prompt_trace] == [
+        "decide_sufficiency",
+        "decide_sufficiency_repair",
+    ]
+    assert "blocked decisions must include required_actions" in model_client.calls[1]["user_prompt"]
 
 
 def test_outline_research_asks_for_missing_climax_plan_before_formal_outline(tmp_path: Path) -> None:
@@ -874,6 +931,69 @@ def test_model_research_request_adapter_accepts_common_request_wrappers() -> Non
     assert requests[0]["query"] == "最近已写回章节后的续写依据"
 
 
+def test_model_research_request_adapter_repairs_missing_initial_story_detail() -> None:
+    class RepairClient:
+        model = "repair-test-model"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def generate_json(
+            self,
+            *,
+            system_prompt: str,
+            user_prompt: str,
+            fallback_factory: Any,
+            use_fallback_on_error: bool = False,
+        ) -> tuple[dict[str, Any], str]:
+            _ = fallback_factory, use_fallback_on_error
+            self.calls.append((system_prompt, user_prompt))
+            if len(self.calls) == 1:
+                payload = {
+                    "requests": [
+                        {
+                            "request_type": "text_search",
+                            "query": "最近剧情线索",
+                            "purpose": "定位承接点",
+                            "priority": "high",
+                        }
+                    ]
+                }
+            else:
+                payload = {
+                    "requests": [
+                        {
+                            "request_type": "story_detail",
+                            "query": "最近已写回章节后的剧情承接",
+                            "purpose": "确认续写边界",
+                            "priority": "high",
+                        }
+                    ]
+                }
+            return payload, json.dumps(payload, ensure_ascii=False)
+
+    client = RepairClient()
+    adapter = ModelOutlineResearchModelAdapter(model_client=client)
+    requests = adapter.propose_research_requests(
+        seed_packet=OutlineSeedPacket(
+            packet_id="packet-repair",
+            book_id="book-1",
+            user_intent={"desired_actions": ["继续最新章节之后的剧情"]},
+        ),
+        notebook=PlanningNotebook(notebook_id="nb-repair"),
+        prior_results=[],
+        budget_state={"total_requests_used": 0},
+    )
+
+    assert len(client.calls) == 2
+    assert requests[0]["request_type"] == "story_detail"
+    assert "硬性 contract" in client.calls[1][0]
+    assert [item["stage"] for item in adapter.model_prompt_trace] == [
+        "propose_research_requests",
+        "propose_research_requests_repair",
+    ]
+
+
 def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_path: Path) -> None:
     db, orchestrator = _build_db_and_orchestrator(tmp_path)
     book_id = "book-broker"
@@ -894,6 +1014,7 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
 
         broker = OutlineResearchContextBroker(repo_root=orchestrator.repo_root)
         requests = [
+            ResearchRequest(request_id="text-1", request_type="text_search", query="旧案证据", priority="high"),
             ResearchRequest(request_id="story-1", request_type="story_detail", query="最近一次信任冲突的经过和结果", priority="high"),
             ResearchRequest(request_id="story-dup", request_type="story_detail", query="最近一次信任冲突的经过和结果", priority="high"),
             ResearchRequest(request_id="char-1", request_type="character_profile", name="沈青", query="关系状态和能力边界", priority="high"),
@@ -904,8 +1025,9 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
             conn,
             book_id=book_id,
             requests=requests,
-            budget=ResearchBudget(max_total_requests=4, max_return_tokens_per_request=120),
+            budget=ResearchBudget(max_total_requests=5, max_return_tokens_per_request=120),
         )
+        text_result = next(item for item in results if item.request_type == "text_search")
         story_result = next(item for item in results if item.request_type == "story_detail")
         character_result = next(item for item in results if item.request_type == "character_profile")
         world_result = next(item for item in results if item.request_type == "world_concept")
@@ -924,7 +1046,8 @@ def test_context_broker_resolvers_sources_trimming_dedup_and_story_queries(tmp_p
             max_chars=500,
         )
 
-    assert len(results) == 4
+    assert len(results) == 5
+    assert all(source.evidence_level == "reasonable_inference" for source in text_result.sources)
     assert [item.request_id for item in results].count("story-1") == 1
     assert story_result.fact_status == "confirmed"
     assert "relationship_state" in story_result.covered_facets

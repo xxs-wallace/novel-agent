@@ -18,7 +18,10 @@ from novel_agent.app.orchestrators.writer_planning_types import (
     CharacterRequirementReport,
     NamedNewCharacter,
 )
-from novel_agent.app.prompts.writer_planning_prompt import build_chapter_package_prompt
+from novel_agent.app.prompts.writer_planning_prompt import (
+    build_book_continuation_plan_prompt,
+    build_chapter_package_prompt,
+)
 from novel_agent.app.repos.chapters_repo import ChaptersRepo
 from novel_agent.app.repos.character_profiles_repo import CharacterProfilesRepo
 from novel_agent.app.repos.creative_kb_storage import init_creative_kb_schema
@@ -1202,6 +1205,20 @@ def test_chapter_package_prompt_includes_batch_boundary_contract() -> None:
             "must_resolve": ["主角确认邀请", "主角离开旧环境"],
             "must_not_consume": ["不得提前进入学院正课"],
             "exit_hook": "新地点露出异常迹象",
+            "chapter_outline_slots": [
+                {
+                    "chapter_index": 1,
+                    "target_chars": 10000,
+                    "plot_function": "主角收到邀请后调查来源，确认风险，再决定赴约。",
+                    "plot_beats": ["收到邀请", "调查来源", "确认风险", "决定赴约", "准备离开"],
+                },
+                {
+                    "chapter_index": 2,
+                    "target_chars": 10000,
+                    "plot_function": "主角离开旧环境并抵达新地点。",
+                    "plot_beats": ["告别旧环境", "途中受阻", "解决阻碍", "抵达新地点", "发现异常"],
+                },
+            ],
         },
         character_introduction_plan=None,
         story_structure_kb="三幕结构只能作为节奏参考。",
@@ -1214,6 +1231,27 @@ def test_chapter_package_prompt_includes_batch_boundary_contract() -> None:
     assert "主角确认邀请" in user_prompt
     assert "不得提前进入学院正课" in user_prompt
     assert "不要额外输出 boundary_contract 字段" in user_prompt
+    assert "slot_plot_function" in user_prompt
+    assert "slot_plot_beats" in user_prompt
+    assert "收到邀请" in user_prompt
+
+
+def test_book_plan_prompt_requires_detailed_plot_functions_and_plot_beats() -> None:
+    system_prompt, _user_prompt = build_book_continuation_plan_prompt(
+        book_id="book-1",
+        continuation_intent={
+            "raw_user_prompt": "主角收到邀请，调查来源，和同伴争执后决定赴约。",
+            "desired_actions": ["收到邀请", "调查来源", "发生争执", "决定赴约"],
+            "story_scale": {"target_chapter_count": 1, "default_chapter_target_chars": 10000},
+        },
+        outline_markdown="已有主线保持不变。",
+        world_summary_markdown="现有规则保持不变。",
+    )
+
+    assert "不是章节功能标签列表" in system_prompt
+    assert "触发、行动、人物反应" in system_prompt
+    assert "至少输出 5 个互不重复的 plot_beats" in system_prompt
+    assert "不得因生成字数限制而静默丢弃" in system_prompt
 
 
 def test_chapter_package_is_constrained_to_batch_boundaries(tmp_path: Path) -> None:
@@ -3461,6 +3499,62 @@ def test_legacy_wait_chapter_review_continues_to_freeze_c_without_length_review(
     assert state["current_state"] == "agent_running"
     assert resumed_checkpoint is None
     assert confirmed_wait_chapter_review
+
+
+def test_confirming_replanned_chapter_consumes_old_review_and_provisions_new_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, planner_orchestrator = _build_orchestrator(tmp_path)
+    _, workflow = build_writer_workflow(
+        repo_root=planner_orchestrator.repo_root,
+        db_path=db.db_path,
+        runs_dir=planner_orchestrator.run_writer.layout.base_dir,
+        dry_run=True,
+    )
+    run_id = "run-replan"
+    chapter_id = "chapter-001"
+    run_dir = workflow.run_writer.layout.run_dir(run_id)
+    first_draft_id = "draft-001"
+    workflow.initialize_workflow(run_id=run_id, book_id="book-1", product_mode="assist")
+    workflow.run_writer.write_text(run_id, "draft.md", "# First Draft")
+    workflow._save_workflow_state(  # noqa: SLF001
+        run_id,
+        {
+            **(workflow.load_workflow_state(run_id=run_id) or {}),
+            "current_chapter_id": chapter_id,
+            "current_draft_id": first_draft_id,
+            "current_decision_id": f"review-{chapter_id}-{first_draft_id}",
+            "draft_sequence": 1,
+        },
+    )
+    _write_replan_review_decision(
+        planner_orchestrator,
+        run_id=run_id,
+        chapter_id=chapter_id,
+        draft_id=first_draft_id,
+    )
+    state = workflow.load_workflow_state(run_id=run_id)
+    assert state is not None
+    workflow._normalize_generation_review_decision_artifact(run_id=run_id, state=state)  # noqa: SLF001
+    monkeypatch.setattr(workflow.planner, "confirm_chapter_package", lambda **_kwargs: {"freeze_c": "ok"})
+    monkeypatch.setattr(workflow, "_confirm_checkpoint", lambda **_kwargs: None)
+    workflow.continue_after_chapter_review(run_id=run_id)
+
+    assert not (run_dir / "generation_review_decision.json").exists()
+
+    state = workflow.load_workflow_state(run_id=run_id)
+    assert state is not None
+    next_decision = workflow._provision_generation_review_decision_artifact(  # noqa: SLF001
+        run_id=run_id,
+        state=state,
+    )
+    retention = _load_run_artifact_data(run_dir / "draft_retention_index.json")["drafts"]
+
+    assert next_decision["draft_id"] == "draft-002"
+    assert next_decision["supersedes_draft_id"] == first_draft_id
+    assert retention[first_draft_id]["retention_status"] == "superseded"
+    assert retention[first_draft_id]["active_for_consumption"] is False
 
 
 def test_provisioning_new_draft_marks_previous_draft_as_superseded(tmp_path: Path) -> None:

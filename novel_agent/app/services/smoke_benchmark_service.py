@@ -966,9 +966,9 @@ class AgenticSmokeBenchmarkService:
                 segment_step_kb=segment_step_kb,
                 close_step_batches=close_step_batches,
                 build_creative_kb=True,
-                thinking="disabled",
-                reasoning_effort=None,
-                include_reasoning_content=False,
+                thinking="enabled",
+                reasoning_effort="max",
+                include_reasoning_content=True,
             )
             (run_dir / "pipeline_result.json").write_text(
                 json.dumps(pipeline_result, ensure_ascii=False, indent=2),
@@ -1117,9 +1117,9 @@ class AgenticSmokeBenchmarkService:
             runs_dir=run_dir / "writer_runs",
             dry_run=False,
             api_key=api_key,
-            thinking="disabled",
-            reasoning_effort=None,
-            include_reasoning_content=False,
+            thinking="enabled",
+            reasoning_effort="max",
+            include_reasoning_content=True,
         )
         if outline_research_author_brief or enable_outline_research_loop:
             return self._run_outline_research_author_brief_benchmark(
@@ -1211,8 +1211,8 @@ class AgenticSmokeBenchmarkService:
             provider=None,
             api_base="https://api.deepseek.com",
             api_key=api_key,
-            thinking="disabled",
-            reasoning_effort=None,
+            thinking="enabled",
+            reasoning_effort="max",
             save_reasoning=False,
             action_type="tool_calling",
             tools=[],
@@ -1577,8 +1577,8 @@ class AgenticSmokeBenchmarkService:
                 provider=None,
                 api_base="https://api.deepseek.com",
                 api_key=api_key,
-                thinking="disabled",
-                reasoning_effort=None,
+                thinking="enabled",
+                reasoning_effort="max",
                 save_reasoning=False,
                 action_type="tool_calling",
                 tools=[],
@@ -2170,8 +2170,8 @@ class AgenticSmokeBenchmarkService:
             provider=None,
             api_base="https://api.deepseek.com",
             api_key=api_key,
-            thinking="disabled",
-            reasoning_effort=None,
+            thinking="enabled",
+            reasoning_effort="max",
             save_reasoning=False,
             action_type="tool_calling",
             tools=[],
@@ -2958,9 +2958,9 @@ class AgenticSmokeBenchmarkService:
             segment_step_kb=segment_step_kb,
             close_step_batches=close_step_batches,
             build_creative_kb=False,
-            thinking="disabled",
-            reasoning_effort=None,
-            include_reasoning_content=False,
+            thinking="enabled",
+            reasoning_effort="max",
+            include_reasoning_content=True,
         )
         context = self._load_reference_close_read_context(db_path=reference_db_path, book_id=book_id)
         return {

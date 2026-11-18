@@ -15,6 +15,7 @@ from novel_agent.app.repos.db import NovelAgentDB
 from novel_agent.app.repos.documents_repo import DocumentsRepo
 from novel_agent.app.repos.fragment_cards_repo import FragmentCardsRepo
 from novel_agent.app.schemas.creative_kb_schema import FragmentCard, StyleFeatures
+from novel_agent.app.schemas.orchestration_schema import BookContinuationPlan, WorldExpansionPack
 from novel_agent.runs.layout import RunLayout
 from novel_agent.runs.writer import RunWriter
 
@@ -385,6 +386,61 @@ def test_build_continuation_intent_analyzes_climax_from_user_prompt(tmp_path: Pa
     assert intent.climax_plan["target_chapter_index"] == 2
     assert intent.climax_plan["must_foreshadow"] == ["证词前后矛盾"]
     assert any("高潮设想分析器" in call[0] for call in model_client.json_calls)
+
+
+def test_batch_plan_preserves_detailed_book_plan_slots(tmp_path: Path) -> None:
+    db, orchestrator = _build_orchestrator(tmp_path)
+    detailed_slots = [
+        {
+            "chapter_index": 1,
+            "target_chars": 10000,
+            "plot_function": "第一章保留完整的触发、调查、受阻、关系变化与章末决定。",
+            "plot_beats": ["触发", "调查", "受阻", "关系变化", "章末决定"],
+            "setup_targets": ["伏笔甲"],
+            "payoff_targets": [],
+            "must_not_consume": ["真相甲"],
+        },
+        {
+            "chapter_index": 2,
+            "target_chars": 10000,
+            "plot_function": "第二章承接决定，执行行动并形成阶段结果。",
+            "plot_beats": ["承接", "行动", "反制", "结果", "新钩子"],
+            "setup_targets": [],
+            "payoff_targets": ["伏笔甲"],
+            "must_not_consume": ["终局真相"],
+        },
+    ]
+    book_plan = BookContinuationPlan(
+        plan_id="plan-1",
+        book_id="book-1",
+        continuation_goal="完成两章推进。",
+        target_chapter_count=2,
+        target_total_chars=20000,
+        default_chapter_target_chars=10000,
+        chapter_outline_slots=detailed_slots,
+    )
+    world_pack = WorldExpansionPack(pack_id="world-1", book_id="book-1")
+    orchestrator._generate_json_payload = lambda **_kwargs: {  # type: ignore[method-assign]
+        "batch_id": "batch-01",
+        "batch_goal": "完成两章推进。",
+        "must_resolve": ["第一章目标", "第二章目标"],
+        "chapter_outline_slots": [
+            {"chapter_index": 1, "target_chars": 10000, "plot_function": "被模型压缩的版本。"}
+        ],
+    }
+
+    with db.connect() as conn:
+        db.init_schema(conn)
+        batch_plan = orchestrator.plan_batch(
+            conn,
+            book_id="book-1",
+            book_plan=book_plan,
+            world_pack=world_pack,
+            character_cast_plan=None,
+            target_chapter_count=2,
+        )
+
+    assert batch_plan.chapter_outline_slots == detailed_slots
 
 
 def test_build_continuation_intent_keeps_no_climax_transition_choice(tmp_path: Path) -> None:

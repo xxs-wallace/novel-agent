@@ -352,6 +352,7 @@ class WebSessionService:
         self.sync_identity_merge_messages(task_id)
         self.sync_writer_question_messages(task_id)
         self.sync_writer_review_messages(task_id)
+        self.sync_writer_scoped_revision_message(task_id)
         self.sync_writer_recovery_message(task_id)
         self.sync_writer_completion_message(task_id)
         if self.analyzer_turn_service is not None:
@@ -659,6 +660,57 @@ class WebSessionService:
             )
             if review is not None:
                 self.append_writer_artifact_review_message(task_id, review)
+
+    def sync_writer_scoped_revision_message(self, task_id: str) -> None:
+        """Rehydrate a scoped-revision decision card from durable Writer state."""
+        writer_state = self.latest_writer_state(task_id)
+        pending = writer_state.get("pending_scoped_revision")
+        pending = pending if isinstance(pending, Mapping) else {}
+        request_id = str(pending.get("request_id") or "").strip()
+        is_candidate = str(pending.get("status") or "").strip() == "candidate" and bool(request_id)
+        run_id = str(writer_state.get("run_id") or "").strip()
+        existing_messages = [
+            message
+            for message in self._messages.get(task_id, [])
+            if message.payload.get("channel") == "writer_scoped_revision_candidate"
+        ]
+        for message in existing_messages:
+            if is_candidate and str(message.payload.get("request_id") or "") == request_id:
+                return
+            message.content = "候选修改已处理，不再需要确认。"
+            message.decision_cards = []
+            message.payload = {**message.payload, "status": str(pending.get("status") or "resolved")}
+        if not is_candidate:
+            return
+        card = DecisionCard(
+            card_id=f"{task_id}:scoped-revision:{request_id}",
+            title="候选修改已生成",
+            body="请检查右侧 Writer 产物和技术详情中的 diff，再决定是否应用。",
+            actions=[
+                {
+                    "action": "apply_scoped_artifact_revision",
+                    "label": "接受候选修改",
+                    "variant": "primary",
+                    "payload": {"request_id": request_id},
+                },
+                {
+                    "action": "discard_scoped_artifact_revision",
+                    "label": "拒绝候选修改",
+                    "payload": {"request_id": request_id},
+                },
+            ],
+        )
+        self.append_message(
+            task_id,
+            role="assistant",
+            content="候选修改已生成，请检查右侧 Writer 产物后决定是否应用。",
+            payload={
+                "channel": "writer_scoped_revision_candidate",
+                "run_id": run_id,
+                "request_id": request_id,
+            },
+            decision_cards=[card],
+        )
 
     def sync_writer_recovery_message(self, task_id: str) -> None:
         writer_state = self.latest_writer_state(task_id)
@@ -1800,6 +1852,17 @@ class WebSessionService:
         return actions[0] if actions else None
 
     def _writer_missing_modeling_steps(self, *, task_id: str, run_dir: Path) -> list[str]:
+        original_creation_manifest = self._load_json_data(run_dir / "original_creation_task_manifest.json")
+        reference_work = (
+            original_creation_manifest.get("reference_work")
+            if isinstance(original_creation_manifest.get("reference_work"), Mapping)
+            else {}
+        )
+        if (
+            original_creation_manifest.get("mode") == "reference_guided_original_creation"
+            and str(reference_work.get("source_task_id") or "").strip()
+        ):
+            return []
         stale_steps = self._writer_missing_modeling_steps_from_run(run_dir)
         if not stale_steps:
             return []

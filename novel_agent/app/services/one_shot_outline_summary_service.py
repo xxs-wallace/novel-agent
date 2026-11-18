@@ -290,8 +290,9 @@ class OneShotOutlineSummaryService:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             timeout_seconds=timeout_seconds,
-            thinking="disabled",
-            include_reasoning_content=False,
+            thinking="enabled",
+            reasoning_effort="max",
+            include_reasoning_content=True,
         ).strip()
 
     def synthesize_outline(
@@ -327,8 +328,9 @@ class OneShotOutlineSummaryService:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             timeout_seconds=timeout_seconds,
-            thinking="disabled",
-            include_reasoning_content=False,
+            thinking="enabled",
+            reasoning_effort="max",
+            include_reasoning_content=True,
         ).strip()
 
     def _load_character_references(

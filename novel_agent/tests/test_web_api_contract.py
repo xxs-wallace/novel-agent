@@ -199,6 +199,43 @@ def test_outline_analyzer_sync_restores_completed_turn_after_web_restart(tmp_pat
     assert len(restarted_session._messages["book-one"]) == 2  # noqa: SLF001
 
 
+def test_web_outline_analyzer_surfaces_length_limited_answer_warning(tmp_path: Path) -> None:
+    class _FakeFacade:
+        def analyze_outline(self, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "status": "answer_may_be_incomplete",
+                "answer": "部分大纲回答",
+                "sources": [],
+                "trace": {
+                    "final_model_response": {
+                        "finish_reason": "length",
+                        "token_usage": {"input_tokens": 10, "output_tokens": 8192, "total_tokens": 8202},
+                    }
+                },
+            }
+
+    app = create_app(repo_root=tmp_path)
+    session = WebSessionService(repo_root=tmp_path, facade=_FakeFacade())  # type: ignore[arg-type]
+    session.analyzer_turn_service = app.state.analyzer_turn_service
+    app.state.web_session_service = session
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/tasks/book-one/messages",
+            json={"content": "请生成大纲", "payload": {"channel": "outline_analyzer"}},
+        )
+        assert response.status_code == 200
+        job_id = response.json()["payload"]["job_id"]
+        asyncio.run(app.state.job_manager.wait(job_id, timeout=2.0))
+
+    messages = session._messages["book-one"]  # noqa: SLF001 - inspect the public message sync result.
+    assert messages[-1].role == "assistant"
+    assert messages[-1].payload["status"] == "answer_may_be_incomplete"
+    assert messages[-1].payload["warning_code"] == "model_output_length"
+    assert "可能因达到输出长度上限" in messages[-1].content
+    sessions = app.state.analyzer_session_service.list_sessions("book-one")
+    assert sessions[0]["status"] == "answer_may_be_incomplete"
+
+
 def test_web_outline_analyzer_session_carries_public_discussion_context(tmp_path: Path) -> None:
     class _FakeFacade:
         def __init__(self) -> None:
@@ -440,6 +477,7 @@ def test_outline_analyzer_model_omits_reasoning_effort_when_thinking_disabled(tm
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.setenv("NOVEL_AGENT_ANALYZER_THINKING", "disabled")
     monkeypatch.setenv("NOVEL_AGENT_ANALYZER_REASONING_EFFORT", "low")
+    monkeypatch.setenv("NOVEL_AGENT_ANALYZER_MAX_OUTPUT_TOKENS", "12345")
 
     client = WorkflowFacade(repo_root=tmp_path)._build_outline_analyzer_model()  # noqa: SLF001 - model settings boundary.
 
@@ -448,6 +486,30 @@ def test_outline_analyzer_model_omits_reasoning_effort_when_thinking_disabled(tm
     assert settings.thinking == "disabled"
     assert settings.reasoning_effort is None
     assert settings.include_reasoning_content is False
+    assert settings.max_output_tokens == 12345
+
+
+def test_outline_analyzer_model_defaults_to_flash_with_max_reasoning(tmp_path: Path, monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class _FakeJsonModelClient:
+        def __init__(self, settings: Any) -> None:
+            captured["settings"] = settings
+
+    monkeypatch.setattr(facade_module, "JsonModelClient", _FakeJsonModelClient)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.delenv("NOVEL_AGENT_ANALYZER_MODEL_NAME", raising=False)
+    monkeypatch.delenv("NOVEL_AGENT_WEB_WRITER_MODEL_NAME", raising=False)
+    monkeypatch.delenv("NOVEL_AGENT_ANALYZER_THINKING", raising=False)
+    monkeypatch.delenv("NOVEL_AGENT_ANALYZER_REASONING_EFFORT", raising=False)
+
+    client = WorkflowFacade(repo_root=tmp_path)._build_outline_analyzer_model()  # noqa: SLF001
+
+    assert client is not None
+    settings = captured["settings"]
+    assert settings.model_name == "deepseek-v4-flash"
+    assert settings.thinking == "enabled"
+    assert settings.reasoning_effort == "max"
 
 
 def test_web_outline_analyzer_job_failure_appends_error_message(tmp_path: Path) -> None:
@@ -817,7 +879,7 @@ def test_completed_close_read_progress_is_not_overridden_by_failed_close_read_jo
         task_id="book-one",
         type="close_read",
         status="failed",
-        message="后台任务遇到问题：LLM request timed out after 120s for model=deepseek-v4-pro",
+        message="后台任务遇到问题：LLM request timed out after 120s for model=deepseek-v4-flash",
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
         events_url="/api/jobs/job-close-read-failed/events",
@@ -2168,6 +2230,40 @@ def test_web_session_replays_writer_artifact_review_card(tmp_path: Path) -> None
     assert reviewer_action.payload["target_type"] == "outline"
 
 
+def test_web_session_replays_pending_scoped_revision_card(tmp_path: Path) -> None:
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
+    artifact_path = tmp_path / "runs" / "writer" / "run-1" / "book_continuation_plan.json"
+    _write_writer_state(
+        tmp_path=tmp_path,
+        task_id="book-one",
+        run_id="run-1",
+        stage="freeze_a_review",
+        artifact_path=str(artifact_path),
+    )
+    state_path = tmp_path / "runs" / "writer" / "run-1" / "workflow_state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["data"]["pending_scoped_revision"] = {
+        "request_id": "sar-001",
+        "revision_id": "revision-sar-001",
+        "status": "candidate",
+        "target_artifact_type": "BookContinuationPlan",
+        "target_artifact_path": str(artifact_path),
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    session = WebSessionService(repo_root=tmp_path, facade=fake_facade)
+
+    messages = session.messages("book-one")
+
+    candidate_messages = [
+        message
+        for message in messages
+        if message.payload.get("channel") == "writer_scoped_revision_candidate"
+    ]
+    assert len(candidate_messages) == 1
+    assert [card.title for card in candidate_messages[0].decision_cards] == ["候选修改已生成"]
+    assert candidate_messages[0].decision_cards[0].actions[0]["payload"]["request_id"] == "sar-001"
+
+
 def test_web_session_replays_chapter_package_content_in_review_message(tmp_path: Path) -> None:
     fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=[])
     artifact_path = tmp_path / "runs" / "writer" / "run-1" / "chapter_package.json"
@@ -2817,6 +2913,71 @@ def test_resume_action_explains_initialized_run_blocked_by_modeling(tmp_path: Pa
     assert calls == []
     messages = action_service.session_service.messages("book-one")
     assert messages[-1].decision_cards[0].title == "续写前还需要建模"
+
+
+def test_resume_action_does_not_require_target_modeling_for_reference_guided_original_creation(tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+    fake_facade = _FakeWriterFacade(tmp_path=tmp_path, calls=calls)
+    run_dir = tmp_path / "runs" / "writer" / "run-original"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "workflow_state.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "run_id": "run-original",
+                    "book_id": "book-original",
+                    "current_stage": "initialized",
+                    "pending_checkpoint": None,
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "modeling_status.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "book_id": "book-original",
+                    "ready_for_continuation": False,
+                    "missing_modeling_steps": [
+                        "documents.not_indexed",
+                        "memory.character_profiles",
+                        "memory.story_outline",
+                        "memory.world_summary",
+                    ],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "original_creation_task_manifest.json").write_text(
+        json.dumps(
+            {
+                "data": {
+                    "mode": "reference_guided_original_creation",
+                    "reference_work": {"source_task_id": "reference-book"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    action_service, _job_manager = _writer_action_service(tmp_path=tmp_path, fake_facade=fake_facade)
+
+    async def run_action() -> None:
+        result = await action_service.execute(
+            task_id="book-original",
+            request=WebActionRequest(action="resume", payload={"run_id": "run-original"}),
+        )
+        assert result.job is None
+        assert "建模检查" not in result.message
+        assert result.decision_cards[0].title == "续写任务未生成可审阅内容"
+
+    asyncio.run(run_action())
+
+    assert calls == []
 
 
 def test_resume_action_does_not_reoffer_creative_kb_when_current_db_is_ready(tmp_path: Path) -> None:

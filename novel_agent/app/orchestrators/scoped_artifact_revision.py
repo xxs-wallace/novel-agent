@@ -97,6 +97,11 @@ class ModelScopedArtifactRevisionAdapter:
         }
         if not required.issubset(payload):
             revised = payload.get("revised_artifact") if isinstance(payload.get("revised_artifact"), Mapping) else payload
+            # OpenAI-compatible JSON adapters may add this transport marker to
+            # a bare object. It is not part of the artifact contract.
+            revised = dict(revised)
+            if revised.get("type") == "json_object":
+                revised.pop("type", None)
             return {
                 "revision_id": f"revision-{llm_input.request['request_id']}",
                 "request_id": llm_input.request["request_id"],
@@ -106,7 +111,7 @@ class ModelScopedArtifactRevisionAdapter:
                 "change_summary": "model returned a bare revised artifact; adapter wrapped it in ScopedArtifactRevisionResult",
                 "validation": {"adapter": "wrapped_bare_artifact"},
                 "created_at": _utc_now(),
-                "revised_artifact": dict(revised),
+                "revised_artifact": revised,
             }
         return payload
 
@@ -249,6 +254,7 @@ REVISION_STAGE_POLICIES: dict[str, RevisionStagePolicy] = {
                 "relationship_guardrails",
                 "must_preserve",
                 "open_questions",
+                "assumptions",
                 "evidence",
                 "sources",
             ),

@@ -15,8 +15,8 @@ from ..constants import DEFAULT_CLOSE_READING_STAGE
 from ..llm import InvalidJSONResponseError, JsonModelClient, ModelSettings
 from ..prompts.chapter_summary_prompt import build_chapter_summary_prompt
 from ..prompts.character_evidence_coverage_prompt import build_character_evidence_coverage_prompt
-from ..prompts.character_full_roster_prefilter_prompt import build_character_full_roster_prefilter_prompt
 from ..prompts.character_evidence_prompt import build_character_evidence_prompt
+from ..prompts.character_full_roster_prefilter_prompt import build_character_full_roster_prefilter_prompt
 from ..prompts.character_reduce_prompt import build_character_reduce_prompt
 from ..prompts.global_memory_prompt import build_global_memory_prompt
 from ..prompts.world_evidence_prompt import build_world_evidence_prompt
@@ -225,6 +225,7 @@ class CloseReadRunner:
                 temperature=self.config.model.temperature,
                 max_output_tokens=self.config.model.max_output_tokens,
                 timeout_seconds=self.config.model.timeout_seconds,
+                request_retry_attempts=max(1, int(self.config.runtime.max_retries)),
                 retry_without_thinking_on_failure=True,
                 thinking=self.config.model.thinking,
                 reasoning_effort=self.config.model.reasoning_effort,
@@ -832,6 +833,18 @@ class CloseReadRunner:
     def _result_or_retry(self, future, *, batch: ChapterBatch) -> dict[str, Any]:
         try:
             return future.result()
+        except RuntimeError as exc:
+            if not str(exc).startswith("Model returned empty text after"):
+                raise
+            smaller_batch = self._split_batch_for_retry(batch)
+            if smaller_batch is not None:
+                raise _RetryCloseReadBatch(smaller_batch) from None
+            raise
+        except TimeoutError:
+            smaller_batch = self._split_batch_for_retry(batch)
+            if smaller_batch is not None:
+                raise _RetryCloseReadBatch(smaller_batch) from None
+            raise
         except InvalidJSONResponseError:
             smaller_batch = self._split_batch_for_retry(batch)
             if smaller_batch is not None:
@@ -1113,6 +1126,7 @@ class CloseReadRunner:
         if not model_reduce_inputs:
             return self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
         max_workers = max(1, min(int(self.config.runtime.character_reduce_max_workers), len(model_reduce_inputs)))
+        failures: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -1130,9 +1144,39 @@ class CloseReadRunner:
                 )
                 for reduce_input in model_reduce_inputs
             ]
-            for future in futures:
-                outputs.append(future.result())
-        return self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
+            for reduce_input, future in zip(model_reduce_inputs, futures, strict=True):
+                try:
+                    outputs.append(future.result())
+                except (RuntimeError, TimeoutError, InvalidJSONResponseError) as exc:
+                    message = str(exc)
+                    if not (
+                        isinstance(exc, TimeoutError)
+                        or isinstance(exc, InvalidJSONResponseError)
+                        or message.startswith("Model returned empty text after")
+                    ):
+                        raise
+                    failure = {
+                        "status": "skipped",
+                        "error_type": type(exc).__name__,
+                        "error": message[:500],
+                        "character_id": str(reduce_input.get("character_id") or ""),
+                        "canonical_name": str(reduce_input.get("canonical_name") or ""),
+                    }
+                    failures.append(failure)
+                    self._emit_progress(
+                        {
+                            "stage": DEFAULT_CLOSE_READING_STAGE,
+                            "agent": "character_reduce",
+                            "event": "partial_model_failure",
+                            "document_title_indexes": batch.title_indexes,
+                            **failure,
+                        }
+                    )
+        normalized = self.memory_candidate_service.normalize_character_reduce_outputs(outputs)
+        if failures:
+            normalized["character_reduce_status"] = "partial"
+            normalized["character_reduce_failures"] = failures
+        return normalized
 
     def _prompt_input_metrics(self, prompt_input: dict[str, Any]) -> dict[str, int]:
         metrics: dict[str, int] = {}
@@ -1657,6 +1701,7 @@ class CloseReadRunner:
         page_model_client = self._full_roster_page_model_client(model_client)
         max_workers = max(1, min(len(roster_pages), int(self.config.runtime.close_read_extraction_max_workers)))
         page_payloads: list[dict[str, Any]] = []
+        page_failures: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for page_index, roster_page in enumerate(roster_pages, start=1):
@@ -1664,27 +1709,57 @@ class CloseReadRunner:
                 page_input["existing_character_roster"] = roster_page
                 page_input["character_roster_scope"] = "full_page"
                 page_input["can_request_full_roster"] = False
-                futures.append(
-                    executor.submit(
-                        self._generate_agent_payload,
-                        model_client=page_model_client,
+                futures.append((page_index, executor.submit(
+                    self._generate_agent_payload,
+                    model_client=page_model_client,
+                    batch=batch,
+                    prompt_input=self._build_character_evidence_input(
                         batch=batch,
-                        prompt_input=self._build_character_evidence_input(
-                            batch=batch,
-                            prompt_input=page_input,
-                        ),
-                        agent_name="character_evidence_full_roster",
-                        prompt_builder=build_character_evidence_prompt,
-                        fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
+                        prompt_input=page_input,
+                    ),
+                    agent_name="character_evidence_full_roster",
+                    prompt_builder=build_character_evidence_prompt,
+                    fallback_factory=lambda batch=batch: self._fallback_character_evidence_output(batch),
+                )))
+            for page_index, future in futures:
+                try:
+                    page_payloads.append(future.result())
+                except (RuntimeError, TimeoutError, InvalidJSONResponseError) as exc:
+                    message = str(exc)
+                    if not (
+                        isinstance(exc, TimeoutError)
+                        or isinstance(exc, InvalidJSONResponseError)
+                        or message.startswith("Model returned empty text after")
+                    ):
+                        raise
+                    failure = {
+                        "page_index": page_index,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "error": message[:500],
+                    }
+                    page_failures.append(failure)
+                    self._emit_progress(
+                        {
+                            "stage": DEFAULT_CLOSE_READING_STAGE,
+                            "agent": "character_evidence_full_roster",
+                            "event": "partial_model_failure",
+                            "document_title_indexes": batch.title_indexes,
+                            "page_index": page_index,
+                            **failure,
+                        }
                     )
-                )
-            for future in futures:
-                page_payloads.append(future.result())
-        return self._merge_paged_full_roster_character_evidence(
+        merged = self._merge_paged_full_roster_character_evidence(
             first_pass_payload=first_pass_payload,
             page_payloads=page_payloads,
             full_roster=full_roster,
         )
+        if page_failures:
+            merged["full_roster_evidence_status"] = "partial"
+            merged["full_roster_page_failures"] = page_failures
+        else:
+            merged["full_roster_evidence_status"] = "completed"
+        return merged
 
     def _full_roster_page_model_client(self, model_client: JsonModelClient) -> JsonModelClient:
         model_name = str(
@@ -2647,6 +2722,9 @@ class CloseReadRunner:
         payload["identity_revelations"] = self._flatten_identity_revelations(evidence_payload)
         fallback_memory = self._fallback_memory_candidate_output(batch, summary_payload, evidence_payload)
         payload["character_updates"] = character_reduce_payload.get("character_updates", fallback_memory["character_updates"])
+        if character_reduce_payload.get("character_reduce_status") == "partial":
+            payload["character_reduce_status"] = "partial"
+            payload["character_reduce_failures"] = character_reduce_payload.get("character_reduce_failures", [])
         payload["world_update"] = global_memory_payload.get("world_update", fallback_memory["world_update"])
         payload["outline_update"] = current_outline_segment or global_memory_payload.get("outline_update", fallback_memory["outline_update"])
         return payload

@@ -70,6 +70,7 @@ class SegmentationRuntimeConfig:
     save_raw_prompt_io: bool = True
     max_retries: int = 3
     resume_from_checkpoint: bool = False
+    append_source: bool = False
 
 
 @dataclass(slots=True)
@@ -128,6 +129,7 @@ class CloseReadModelConfig:
 class CloseReadRuntimeConfig:
     document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET
     dry_run: bool = False
+    max_retries: int = 3
     max_chapters: int | None = None
     export_debug_markdown: bool = True
     debug_markdown_path: str | None = None

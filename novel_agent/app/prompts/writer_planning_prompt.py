@@ -26,6 +26,15 @@ def build_book_continuation_plan_prompt(
         "必须归并进 BookContinuationPlan，不得只作为备注。\n"
         "7. 如果 climax_plan.no_climax=true 或 climax_plan.climax_mode=none，表示用户选择本批/本段为过渡剧情；"
         "不得强行发明高潮章节，chapter_outline_slots 应体现铺垫、过渡、关系缓冲或信息整理功能。\n"
+        "8. chapter_outline_slots 是后续批次规划和章节梗概的剧情依据，不是章节功能标签列表。"
+        "当用户已经给出具体事件链时，每个 plot_function 必须保留分配到该章的触发、行动、人物反应、"
+        "直接结果、状态变化和章末承接，不得压缩成一句笼统概括。\n"
+        "9. 每个 chapter_outline_slot 必须输出按发生顺序排列的 plot_beats；"
+        "每个 beat 应是可直接扩写的剧情节点，而不是主题词或对 plot_function 的重复。"
+        "目标篇幅达到 8000 字及以上时，通常至少输出 5 个互不重复的 plot_beats；"
+        "只有用户明确要求短章、留白章或单场景章时才可更少。\n"
+        "10. 用户在 continuation_intent.raw_user_prompt / desired_actions 中明确给出的事件、因果、"
+        "人物选择和状态变化必须分配到对应章节槽；可以调整表达和章节边界，但不得因生成字数限制而静默丢弃。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n\n"
@@ -139,6 +148,8 @@ def build_batch_plan_prompt(
         "以及当前批次覆盖的 chapter_outline_slots；不得擅自缩短用户授权的章节数或字数。\n"
         "8. chapters 是后端根据 Writer Memory document_title_index 计算并冻结的章节列表，必须原样输出；"
         "不得自行推导、改写、重排章节编号，也不要输出 scope_start 或 scope_end。\n"
+        "9. chapter_outline_slots 必须逐字段原样复制当前范围内的 BookContinuationPlan 章节槽，"
+        "尤其不得缩写 plot_function、删减 plot_beats、setup_targets、payoff_targets 或 must_not_consume。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
@@ -184,6 +195,8 @@ def build_chapter_package_prompt(
         "9. 剧情结构知识库和关系弧线知识库只能用于节奏安排，若它们暗示的事件超出章节边界契约，必须忽略。\n"
         "10. target_word_count 必须服从章节边界契约中的 target_chars；若契约给出 10000 字，"
         "target_word_count 应为 5000，因为后续长度规划会把该字段换算为正文目标字数。\n"
+        "11. 每章必须完整承接对应章节边界中的 slot_plot_function 与 slot_plot_beats。"
+        "structure_hint.beats 应细化这些时序节点，不得只复述 assigned_must_resolve 或把多个节点合并成一句。\n"
     )
     user_prompt = (
         f"book_id: {book_id}\n"
@@ -231,6 +244,16 @@ def _chapter_boundary_contract(*, batch_plan: dict[str, Any], chapter_count: int
                 "other_batch_must_resolve": other,
                 "may_use_batch_exit_hook": index == count - 1,
                 "target_chars": target_chars,
+                "slot_plot_function": str(slot.get("plot_function") or "").strip(),
+                "slot_plot_beats": [
+                    str(item).strip() for item in (slot.get("plot_beats") or []) if str(item).strip()
+                ],
+                "slot_setup_targets": [
+                    str(item).strip() for item in (slot.get("setup_targets") or []) if str(item).strip()
+                ],
+                "slot_payoff_targets": [
+                    str(item).strip() for item in (slot.get("payoff_targets") or []) if str(item).strip()
+                ],
             }
         )
     return {
@@ -265,7 +288,14 @@ def _book_plan_example() -> dict[str, Any]:
             {
                 "chapter_index": 1,
                 "target_chars": 3800,
-                "plot_function": "承接上文并建立新目标",
+                "plot_function": "主角从上一阶段的失败现场撤离，在清点遗留物时发现旧案证物与最新追踪记录互相矛盾；他先向同伴核对来源，又因对方的回避产生不信任，随后冒险返回被封锁的现场验证细节。调查结果证明有人改动过证据链，也迫使两人暂时共享情报。章节结束时，主角取得一个能指向下一处地点的线索，但尚不能确认它是突破口还是诱饵。",
+                "plot_beats": [
+                    "主角撤离失败现场并清点遗留物，确认当前损失与未解决目标。",
+                    "旧案证物和最新追踪记录出现矛盾，触发新的调查行动。",
+                    "主角向同伴核对来源，对方的回避使关系由合作转为互相试探。",
+                    "两人冒险返回封锁现场验证细节，并在外部压力下被迫协作。",
+                    "调查证明证据链被人改动，新的地点线索成为章末钩子。"
+                ],
                 "setup_targets": ["旧案新线索"],
                 "payoff_targets": [],
                 "must_not_consume": ["幕后主使身份"],
@@ -386,7 +416,14 @@ def _batch_plan_example() -> dict[str, Any]:
             {
                 "chapter_index": 1,
                 "target_chars": 10000,
-                "plot_function": "解决当前困境并打开新秩序入口",
+                "plot_function": "解决当前困境并打开新秩序入口，同时保留触发、行动、反应、结果、状态变化和章末承接。",
+                "plot_beats": [
+                    "当前困境以具体事件施压。",
+                    "主角尝试第一种解决方式但受阻。",
+                    "人物关系在共同应对中发生小步变化。",
+                    "新的信息改变行动方向。",
+                    "阶段结果打开下一章入口。"
+                ],
             }
         ],
         "evidence": [

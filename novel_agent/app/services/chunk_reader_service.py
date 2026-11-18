@@ -92,6 +92,8 @@ class ChunkReaderService:
                     remaining_budget = self.max_total_chars - total_chars_read
                     if remaining_budget <= 0:
                         break
+                    if current_chars == 0 and total_chars_read > 0 and remaining_budget < self.target_min_chars:
+                        break
                     allowed = min(allowed, remaining_budget)
                 if len(remaining) <= allowed:
                     chunk_text = remaining

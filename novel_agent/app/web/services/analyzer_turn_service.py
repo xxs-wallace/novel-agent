@@ -222,6 +222,24 @@ class AnalyzerTurnService:
         self._append_conversation_memory(turn)
         return turn
 
+    def mark_answer_may_be_incomplete(
+        self,
+        *,
+        book_id: str,
+        turn_id: str,
+        assistant_message_id: str,
+        result: Mapping[str, Any],
+    ) -> AnalyzerTurn:
+        turn = self.require_turn(book_id, turn_id)
+        turn.status = "answer_may_be_incomplete"
+        turn.assistant_message_id = assistant_message_id
+        turn.result = dict(result)
+        turn.source_refs = [dict(item) for item in result.get("sources") or [] if isinstance(item, Mapping)]
+        turn.updated_at = _timestamp()
+        self._save_turn(turn)
+        self._append_conversation_memory(turn)
+        return turn
+
     def mark_need_user_input(
         self,
         *,
@@ -415,6 +433,38 @@ class AnalyzerTurnService:
             )
             return {"status": "need_user_input", "turn_id": turn.turn_id, "assistant_message_id": message.message_id}
 
+        if status == "answer_may_be_incomplete":
+            message = session_service.append_message(
+                context.task_id,
+                role="assistant",
+                content=(
+                    str(result.get("answer") or "")
+                    + "\n\n> 提示：本次回答可能因达到输出长度上限而未完成，建议你让 Analyzer 继续补齐或重新生成。"
+                ),
+                payload={
+                    "channel": "outline_analyzer",
+                    "status": "answer_may_be_incomplete",
+                    "warning_code": "model_output_length",
+                    "job_id": context.job_id,
+                    "turn_id": turn.turn_id,
+                    "analyzer_session_id": turn.session_id,
+                    "sources": result.get("sources") or [],
+                    "final_model_response": (result.get("trace") or {}).get("final_model_response", {}),
+                    **trace_paths,
+                },
+            )
+            self.mark_answer_may_be_incomplete(
+                book_id=context.task_id,
+                turn_id=turn.turn_id,
+                assistant_message_id=message.message_id,
+                result=result,
+            )
+            return {
+                "status": "answer_may_be_incomplete",
+                "turn_id": turn.turn_id,
+                "assistant_message_id": message.message_id,
+            }
+
         if status in {"needs_model", "failed", "blocked"}:
             message = session_service.append_message(
                 context.task_id,
@@ -463,6 +513,8 @@ class AnalyzerTurnService:
         return {"status": status or "ok", "turn_id": turn.turn_id, "assistant_message_id": message.message_id}
 
     def prompt_trace_recorder(self, *, book_id: str, turn_id: str, job_id: str):
+        last_prompt_payload: dict[str, Any] = {}
+
         def record(snapshot: Mapping[str, Any]) -> None:
             payload = {
                 "created_at": _timestamp(),
@@ -471,6 +523,23 @@ class AnalyzerTurnService:
                 "job_id": job_id,
                 **dict(snapshot),
             }
+            if snapshot.get("event") == "model_response":
+                merged = dict(last_prompt_payload)
+                merged["response"] = dict(snapshot.get("response") or {})
+                merged["response_event"] = {
+                    "stage": snapshot.get("stage"),
+                    "response": dict(snapshot.get("response") or {}),
+                }
+                payload = {
+                    "created_at": _timestamp(),
+                    "book_id": book_id,
+                    "turn_id": turn_id,
+                    "job_id": job_id,
+                    **merged,
+                }
+            else:
+                last_prompt_payload.clear()
+                last_prompt_payload.update(payload)
             trace_path = self._prompt_trace_path(book_id, turn_id)
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             trace_path.open("a", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False) + "\n")
@@ -532,7 +601,7 @@ class AnalyzerTurnService:
     def sync_messages(self, *, book_id: str, session_service: Any) -> None:
         for turn in self.turns(book_id):
             self._sync_user_message(turn, session_service=session_service)
-            if turn.status in {"succeeded", "need_user_input"}:
+            if turn.status in {"succeeded", "answer_may_be_incomplete", "need_user_input"}:
                 self._sync_result_message(turn, session_service=session_service)
                 continue
             if turn.status in self.FAILURE_STATUSES:

@@ -106,7 +106,7 @@ def build_model_client() -> DirectOpenAICompatibleTextClient:
         model_name=os.getenv("NOVEL_AGENT_ONE_SHOT_MODEL_NAME")
         or os.getenv("NOVEL_AGENT_ANALYZER_MODEL_NAME")
         or os.getenv("NOVEL_AGENT_WEB_WRITER_MODEL_NAME")
-        or "deepseek-v4-pro",
+        or "deepseek-v4-flash",
         base_url=os.getenv("NOVEL_AGENT_ONE_SHOT_BASE_URL")
         or os.getenv("NOVEL_AGENT_ANALYZER_BASE_URL")
         or "https://api.deepseek.com",

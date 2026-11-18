@@ -1242,6 +1242,9 @@ function analyzerSessionStatusText(status: string) {
   if (status === "failed") {
     return "失败";
   }
+  if (status === "answer_may_be_incomplete") {
+    return "回答可能未完成";
+  }
   return "可继续";
 }
 

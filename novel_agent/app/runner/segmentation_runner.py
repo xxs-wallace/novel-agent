@@ -38,6 +38,7 @@ class SegmentationResumeCheckpoint:
     source_path: str | None
     source_offset: int
     batch_no: int
+    appending_new_source: bool = False
 
 
 class SegmentationRunner:
@@ -68,6 +69,8 @@ class SegmentationRunner:
                 temperature=self.config.model.temperature,
                 max_output_tokens=self.config.model.max_output_tokens,
                 timeout_seconds=self.config.model.timeout_seconds,
+                request_retry_attempts=max(1, int(self.config.runtime.max_retries)),
+                retry_without_thinking_on_failure=True,
                 thinking=self.config.model.thinking,
                 reasoning_effort=self.config.model.reasoning_effort,
                 include_reasoning_content=self.config.model.include_reasoning_content,
@@ -128,6 +131,7 @@ class SegmentationRunner:
             last_document = documents_repo.fetch_last_document(conn, book_id=self.config.book.book_id)
             existing_title_indexes = documents_repo.list_title_indexes(conn, book_id=self.config.book.book_id)
             initial_title_index = (max(existing_title_indexes) + 1) if existing_title_indexes else 1
+            continued_document = None if resume_checkpoint.appending_new_source else last_document
             result = ingest_service.ingest_batches(
                 conn=conn,
                 repo_root=self.repo_root,
@@ -136,9 +140,9 @@ class SegmentationRunner:
                 run_id=run_id,
                 reset_book=not self.config.runtime.resume_from_checkpoint,
                 initial_title_index=initial_title_index,
-                continued_title=last_document.document_title if last_document else None,
-                continued_title_index=last_document.document_title_index if last_document else None,
-                continued_document_content=last_document.content if last_document else None,
+                continued_title=continued_document.document_title if continued_document else None,
+                continued_title_index=continued_document.document_title_index if continued_document else None,
+                continued_document_content=continued_document.content if continued_document else None,
             )
             AssetsRepo().upsert(
                 conn,
@@ -195,9 +199,6 @@ class SegmentationRunner:
         source_path = str(progress["current_source_path"] or "").strip()
         if not source_path:
             raise RuntimeError(f"Segmentation checkpoint for {book_id} has no source path")
-        if source_path not in {path.as_posix() for path in ordered_paths}:
-            raise RuntimeError(f"Checkpoint source path is no longer available: {source_path}")
-        source_offset = int(progress["current_source_offset"] or 0)
         status = progress["status_json"]
         last_batch_no = 0
         if isinstance(status, str) and status:
@@ -209,6 +210,35 @@ class SegmentationRunner:
                 status_payload = {}
             if isinstance(status_payload, dict):
                 last_batch_no = int(status_payload.get("last_batch_no", 0) or 0)
+        ordered_source_paths = {path.as_posix() for path in ordered_paths}
+        if source_path not in ordered_source_paths:
+            if not self.config.runtime.append_source:
+                raise RuntimeError(f"Checkpoint source path is no longer available: {source_path}")
+            stored_source_paths = set(ordered_source_paths)
+            resolved_repo_root = self.repo_root.expanduser().resolve()
+            for path in ordered_paths:
+                try:
+                    stored_source_paths.add(path.relative_to(resolved_repo_root).as_posix())
+                except ValueError:
+                    pass
+            placeholders = ", ".join("?" for _ in stored_source_paths)
+            existing = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM documents
+                WHERE book_id = ? AND source_path IN ({placeholders})
+                """,
+                (book_id, *sorted(stored_source_paths)),
+            ).fetchone()
+            if existing and int(existing["count"] or 0) > 0:
+                raise RuntimeError("Append source already has imported documents; refusing to append it again from offset 0")
+            return SegmentationResumeCheckpoint(
+                source_path=None,
+                source_offset=0,
+                batch_no=max(1, last_batch_no + 1),
+                appending_new_source=True,
+            )
+        source_offset = int(progress["current_source_offset"] or 0)
         return SegmentationResumeCheckpoint(
             source_path=source_path,
             source_offset=source_offset,

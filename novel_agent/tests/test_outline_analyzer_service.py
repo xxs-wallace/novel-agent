@@ -21,6 +21,7 @@ from novel_agent.app.schemas.narrative_inquiry_schema import (
 )
 from novel_agent.app.services.narrative_inquiry_broker import NarrativeInquiryBroker
 from novel_agent.app.services.narrative_memory_query_service import NarrativeMemoryQueryService
+from novel_agent.app.llm import TextModelResponse
 from novel_agent.app.services.outline_analyzer_service import (
     AnalyzerService,
     _compact_evidence_bundle,
@@ -2382,6 +2383,39 @@ def test_outline_analyzer_records_prompt_snapshots(tmp_path: Path) -> None:
     assert snapshots[2]["model_kwargs"]["thinking"] == "disabled"
 
 
+def test_outline_analyzer_marks_length_limited_final_answer_as_incomplete(tmp_path: Path) -> None:
+    db = _seed_memory(tmp_path)
+
+    class LengthAwareModel(ScriptedAnalyzerModel):
+        def generate_text_with_metadata(self, **kwargs: Any) -> TextModelResponse:
+            content = self.generate_text(**kwargs)
+            is_final = len(self.prompts) == 4
+            return TextModelResponse(
+                content=content,
+                finish_reason="length" if is_final else "stop",
+                token_usage={"input_tokens": 100, "output_tokens": 8192, "total_tokens": 8292},
+            )
+
+    model = LengthAwareModel(
+        [
+            json.dumps({"status": "ready_to_answer"}, ensure_ascii=False),
+            json.dumps({"status": "ready_to_answer", "notes": ["当前证据足以回答"]}, ensure_ascii=False),
+            "结论：这是一个被长度上限截断的回答。",
+        ]
+    )
+    snapshots: list[dict[str, Any]] = []
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=model, prompt_trace_recorder=snapshots.append)
+
+    with db.connect() as conn:
+        result = service.chat(conn, book_id="book-one", question="当前剧情合理吗？")
+
+    assert result.status == "answer_may_be_incomplete"
+    assert result.trace["final_model_response"]["finish_reason"] == "length"
+    assert result.trace["final_model_response"]["token_usage"]["output_tokens"] == 8192
+    response_events = [item for item in snapshots if item.get("event") == "model_response"]
+    assert response_events[-1]["response"]["finish_reason"] == "length"
+
+
 def test_analyzer_factual_queries_route_through_broker_and_memory_query(tmp_path: Path) -> None:
     db = _seed_memory(tmp_path)
     spy_memory = SpyMemoryQueryService(repo_root=tmp_path)
@@ -2644,6 +2678,30 @@ def test_outline_analyzer_final_prompt_preserves_session_revision_context(tmp_pa
     assert "不禁止输出用户可读的大纲修改方案" in system_prompt
     assert "不得因为提案尚未存在于 committed outline 中就拒绝生成" in system_prompt
     assert marker in payload["seed_brief"]["conversation_brief"]
+
+
+def test_outline_analyzer_final_prompt_treats_explicit_endpoint_as_hard_boundary(tmp_path: Path) -> None:
+    service = OutlineAnalyzerService(repo_root=tmp_path, model_client=None)
+    seed = AnalyzerSeedPacket(
+        book_id="book-one",
+        user_question=(
+            "生成本卷大纲，结尾停在主角交换代价并与傀儡正面开战，高潮处戛然而止；"
+            "下一部才揭晓傀儡身份和战斗结果。"
+        ),
+        analysis_type="outline_analysis",
+    )
+
+    system_prompt, _ = service.build_final_prompt(
+        seed=seed,
+        notebook=AnalyzerNotebook(),
+        evidence_history=[],
+        budget_limited=False,
+    )
+
+    assert "该边界是硬性约束" in system_prompt
+    assert "必须严格区分本次作品与下一部/后续作品" in system_prompt
+    assert "不得描写终点之后的战斗结果、胜负、死亡、身份揭晓" in system_prompt
+    assert "只写到该节点，不能继续写完整战斗" in system_prompt
 
 
 def _table_counts(conn: Any, *table_names: str) -> dict[str, int]:

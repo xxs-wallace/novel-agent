@@ -122,11 +122,11 @@ python -m novel_agent.app.run_mvp \
   --anchor-path longzu_split/seg_001.md \
   --goal "承接锚点续写一场冲突升级的对话戏" \
   --model-type OpenAIModel \
-  --model-id deepseek-v4-pro \
+  --model-id deepseek-v4-flash \
   --api-base https://api.deepseek.com \
   --api-key "$DEEPSEEK_API_KEY" \
   --thinking enabled \
-  --reasoning-effort high \
+  --reasoning-effort max \
   --save-reasoning
 ```
 

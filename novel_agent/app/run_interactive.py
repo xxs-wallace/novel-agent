@@ -38,9 +38,9 @@ from .services.writer_memory_workspace_service import WriterMemoryWorkspaceServi
 DEFAULT_PIPELINE_SEGMENT_STEP_KB = 32
 DEFAULT_PIPELINE_CLOSE_STEP_BATCHES = 1
 DEFAULT_PIPELINE_SEGMENT_MODEL_NAME = "deepseek-v4-flash"
-DEFAULT_PIPELINE_CLOSE_READ_MODEL_NAME = "deepseek-v4-pro"
+DEFAULT_PIPELINE_CLOSE_READ_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_PIPELINE_CREATIVE_KB_MODEL_NAME = "deepseek-v4-flash"
-DEFAULT_WRITER_MODEL_NAME = "deepseek-v4-pro"
+DEFAULT_WRITER_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_WRITER_MAX_OUTPUT_TOKENS = 16384
 DEFAULT_PIPELINE_CREATIVE_KB_COMMIT_BATCH_SIZE = 8
 STATUS_PRESENTER = WriterStatusPresenter()
@@ -218,10 +218,12 @@ def build_writer_workflow(
     api_key: str | None = None,
     model_name: str | None = None,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
     timeout_seconds: int = 900,
     max_output_tokens: int = DEFAULT_WRITER_MAX_OUTPUT_TOKENS,
+    request_retry_attempts: int = 3,
+    retry_without_thinking_on_failure: bool = True,
     revision_adapter: object | None = None,
 ) -> tuple[NovelAgentDB, WriterInteractiveWorkflow]:
     if dry_run:
@@ -241,12 +243,14 @@ def build_writer_workflow(
                 base_url="https://api.deepseek.com",
                 api_key=api_key,
                 api_key_env="DEEPSEEK_API_KEY",
-                retry_without_thinking_on_failure=True,
+                retry_without_thinking_on_failure=retry_without_thinking_on_failure,
+                request_retry_attempts=max(1, int(request_retry_attempts)),
                 thinking=thinking,
                 reasoning_effort=reasoning_effort,
                 include_reasoning_content=include_reasoning_content,
                 timeout_seconds=timeout_seconds,
                 max_output_tokens=max_output_tokens,
+                trust_env=False,
                 dry_run=False,
             )
         )
@@ -1464,9 +1468,11 @@ def _build_segmentation_config(
     api_key: str,
     max_total_chars: int | None,
     resume_from_checkpoint: bool,
+    append_source: bool = False,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
+    request_retry_attempts: int = 3,
 ) -> SegmentationAgentConfig:
     model_config: dict[str, object] = {
         "model_type": "OpenAIModel",
@@ -1490,7 +1496,12 @@ def _build_segmentation_config(
             "model": model_config,
             "read_strategy": {"max_total_chars": max_total_chars},
             "storage": {"sqlite_path": db_path.as_posix()},
-            "runtime": {"dry_run": False, "resume_from_checkpoint": resume_from_checkpoint},
+            "runtime": {
+                "dry_run": False,
+                "resume_from_checkpoint": resume_from_checkpoint,
+                "append_source": append_source,
+                "max_retries": max(1, int(request_retry_attempts)),
+            },
         }
     )
 
@@ -1504,8 +1515,11 @@ def _build_close_read_config(
     max_chapters: int | None,
     document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
+    request_retry_attempts: int = 3,
+    character_evidence_coverage_audit: bool | None = None,
+    timeout_seconds: int | None = None,
 ) -> CloseReadAgentConfig:
     close_config = CloseReadAgentConfig(book_id=book_id, sqlite_path=db_path.as_posix())
     close_config.model.model_type = "OpenAIModel"
@@ -1520,6 +1534,11 @@ def _build_close_read_config(
     close_config.runtime.debug_markdown_path = debug_path.as_posix()
     close_config.runtime.max_chapters = max_chapters
     close_config.runtime.document_chars_budget = int(document_chars_budget)
+    close_config.runtime.max_retries = max(1, int(request_retry_attempts))
+    if timeout_seconds is not None:
+        close_config.model.timeout_seconds = max(1, int(timeout_seconds))
+    if character_evidence_coverage_audit is not None:
+        close_config.runtime.character_evidence_coverage_audit = bool(character_evidence_coverage_audit)
     return close_config
 
 
@@ -1528,7 +1547,7 @@ def _build_creative_kb_facade(
     api_key: str,
     model_name: str = DEFAULT_PIPELINE_CREATIVE_KB_MODEL_NAME,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
 ) -> CreativeKnowledgeBaseFacade:
     fragment_cards_repo = FragmentCardsRepo()
@@ -1564,7 +1583,7 @@ def _build_creative_kb(
     creative_kb_facade: CreativeKnowledgeBaseFacade | None = None,
     max_doc_id: int | None = None,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CreativeKBBuildResult:
@@ -1634,7 +1653,7 @@ def _build_source_arc_map(
                 api_key=normalized_api_key,
                 api_key_env="DEEPSEEK_API_KEY",
                 thinking="enabled",
-                reasoning_effort="high",
+                reasoning_effort="max",
                 include_reasoning_content=True,
                 max_output_tokens=12288,
             )
@@ -1670,11 +1689,18 @@ def _run_pipeline(
     segment_step_kb: int,
     close_step_batches: int,
     build_creative_kb: bool,
+    append_source: bool = False,
     close_document_chars_budget: int = DEFAULT_CLOSE_READ_DOC_BUDGET,
     should_stop: Callable[[], bool] | None = None,
     thinking: str | None = "enabled",
-    reasoning_effort: str | None = "high",
+    reasoning_effort: str | None = "max",
     include_reasoning_content: bool = True,
+    segmentation_thinking: str | None = None,
+    segmentation_reasoning_effort: str | None = None,
+    segmentation_request_retry_attempts: int = 3,
+    close_read_request_retry_attempts: int = 3,
+    close_read_character_evidence_coverage_audit: bool | None = None,
+    close_read_timeout_seconds: int | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, object]:
     should_stop = should_stop or (lambda: False)
@@ -1720,9 +1746,15 @@ def _run_pipeline(
                 api_key=api_key,
                 max_total_chars=seg_round_chars,
                 resume_from_checkpoint=segmentation_resume,
-                thinking=thinking,
-                reasoning_effort=reasoning_effort,
+                append_source=append_source,
+                thinking=segmentation_thinking if segmentation_thinking is not None else thinking,
+                reasoning_effort=(
+                    segmentation_reasoning_effort
+                    if segmentation_thinking is not None
+                    else reasoning_effort
+                ),
                 include_reasoning_content=include_reasoning_content,
+                request_retry_attempts=segmentation_request_retry_attempts,
             )
             seg_result = SegmentationRunner(
                 repo_root=repo_root,
@@ -1760,6 +1792,9 @@ def _run_pipeline(
                 thinking=thinking,
                 reasoning_effort=reasoning_effort,
                 include_reasoning_content=include_reasoning_content,
+                request_retry_attempts=close_read_request_retry_attempts,
+                character_evidence_coverage_audit=close_read_character_evidence_coverage_audit,
+                timeout_seconds=close_read_timeout_seconds,
             )
             close_result = CloseReadRunner(
                 repo_root=repo_root,

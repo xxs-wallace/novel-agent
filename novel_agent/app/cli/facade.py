@@ -403,7 +403,7 @@ class WorkflowFacade:
         if not resolved_api_key:
             return None
         thinking = _env_optional_text("NOVEL_AGENT_ANALYZER_THINKING") or "enabled"
-        reasoning_effort = _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT") or "high"
+        reasoning_effort = _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT") or "max"
         if thinking.strip().lower() == "disabled":
             reasoning_effort = None
         return JsonModelClient(
@@ -411,11 +411,12 @@ class WorkflowFacade:
                 model_type="OpenAIModel",
                 model_name=_env_optional_text("NOVEL_AGENT_ANALYZER_MODEL_NAME")
                 or _env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME")
-                or "deepseek-v4-pro",
+                or "deepseek-v4-flash",
                 provider="openai_compatible",
                 base_url=_env_optional_text("NOVEL_AGENT_ANALYZER_BASE_URL") or "https://api.deepseek.com",
                 api_key=resolved_api_key,
                 api_key_env="DEEPSEEK_API_KEY",
+                max_output_tokens=_env_optional_int("NOVEL_AGENT_ANALYZER_MAX_OUTPUT_TOKENS") or 16384,
                 timeout_seconds=_env_optional_int("NOVEL_AGENT_ANALYZER_TIMEOUT_SECONDS") or 120,
                 request_retry_attempts=_env_optional_int("NOVEL_AGENT_ANALYZER_REQUEST_RETRY_ATTEMPTS")
                 or _env_optional_int("NOVEL_AGENT_ANALYZER_RETRY_ATTEMPTS")
@@ -464,8 +465,15 @@ class WorkflowFacade:
         segment_step_kb: int,
         close_step_batches: int,
         build_creative_kb: bool,
+        append_source: bool = False,
         close_document_chars_budget: int = 20000,
         should_stop: Callable[[], bool] | None = None,
+        segmentation_thinking: str | None = None,
+        segmentation_reasoning_effort: str | None = None,
+        segmentation_request_retry_attempts: int = 3,
+        close_read_request_retry_attempts: int = 3,
+        close_read_character_evidence_coverage_audit: bool | None = None,
+        close_read_timeout_seconds: int | None = None,
     ) -> dict[str, object]:
         from .. import run_interactive
 
@@ -479,6 +487,7 @@ class WorkflowFacade:
                 debug_path=debug_path,
                 api_key=api_key,
                 run_mode=run_mode,
+                append_source=append_source,
                 max_read_kb=max_read_kb,
                 max_close_batches=max_close_batches,
                 segment_step_kb=segment_step_kb,
@@ -486,6 +495,12 @@ class WorkflowFacade:
                 build_creative_kb=build_creative_kb,
                 close_document_chars_budget=close_document_chars_budget,
                 should_stop=should_stop,
+                segmentation_thinking=segmentation_thinking,
+                segmentation_reasoning_effort=segmentation_reasoning_effort,
+                segmentation_request_retry_attempts=segmentation_request_retry_attempts,
+                close_read_request_retry_attempts=close_read_request_retry_attempts,
+                close_read_character_evidence_coverage_audit=close_read_character_evidence_coverage_audit,
+                close_read_timeout_seconds=close_read_timeout_seconds,
                 progress_callback=self.event_stream.progress_callback,
             )
         self.event_stream.emit("系统", "导入原文/阅读本轮已完成", payload=result)
@@ -619,7 +634,7 @@ class WorkflowFacade:
                 model_name=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_MODEL_NAME")
                 or _env_optional_text("NOVEL_AGENT_ANALYZER_MODEL_NAME")
                 or _env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME")
-                or "deepseek-v4-pro",
+                or "deepseek-v4-flash",
                 provider="openai_compatible",
                 base_url=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_BASE_URL")
                 or _env_optional_text("NOVEL_AGENT_ANALYZER_BASE_URL")
@@ -634,7 +649,7 @@ class WorkflowFacade:
                 or "enabled",
                 reasoning_effort=_env_optional_text("NOVEL_AGENT_SCENE_INDEX_REASONING_EFFORT")
                 or _env_optional_text("NOVEL_AGENT_ANALYZER_REASONING_EFFORT")
-                or "high",
+                or "max",
                 include_reasoning_content=bool(
                     _env_optional_text("NOVEL_AGENT_SCENE_INDEX_THINKING")
                     or _env_optional_text("NOVEL_AGENT_SCENE_INDEX_REASONING_EFFORT")
@@ -680,13 +695,17 @@ class WorkflowFacade:
             dry_run=dry_run,
             api_key=api_key,
             model_name=_env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME"),
-            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING"),
-            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT"),
-            include_reasoning_content=bool(
-                _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
-                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
-            ),
+            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING") or "enabled",
+            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT") or "max",
+            include_reasoning_content=True,
             timeout_seconds=_env_optional_int("NOVEL_AGENT_WEB_WRITER_TIMEOUT_SECONDS") or 900,
+            max_output_tokens=_env_optional_int("NOVEL_AGENT_WEB_WRITER_MAX_OUTPUT_TOKENS") or 16384,
+            request_retry_attempts=_env_optional_int("NOVEL_AGENT_WEB_WRITER_REQUEST_RETRY_ATTEMPTS") or 3,
+            retry_without_thinking_on_failure=(
+                _env_optional_bool("NOVEL_AGENT_WEB_WRITER_RETRY_WITHOUT_THINKING")
+                if _env_optional_bool("NOVEL_AGENT_WEB_WRITER_RETRY_WITHOUT_THINKING") is not None
+                else True
+            ),
         )
         self.event_stream.emit("系统", "开始 Writer 分层生成", payload={"run_id": run_id})
         with db.connect() as conn:
@@ -734,13 +753,17 @@ class WorkflowFacade:
             dry_run=dry_run,
             api_key=api_key,
             model_name=_env_optional_text("NOVEL_AGENT_WEB_WRITER_MODEL_NAME"),
-            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING"),
-            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT"),
-            include_reasoning_content=bool(
-                _env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING")
-                or _env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT")
-            ),
+            thinking=_env_optional_text("NOVEL_AGENT_WEB_WRITER_THINKING") or "enabled",
+            reasoning_effort=_env_optional_text("NOVEL_AGENT_WEB_WRITER_REASONING_EFFORT") or "max",
+            include_reasoning_content=True,
             timeout_seconds=_env_optional_int("NOVEL_AGENT_WEB_WRITER_TIMEOUT_SECONDS") or 900,
+            max_output_tokens=_env_optional_int("NOVEL_AGENT_WEB_WRITER_MAX_OUTPUT_TOKENS") or 16384,
+            request_retry_attempts=_env_optional_int("NOVEL_AGENT_WEB_WRITER_REQUEST_RETRY_ATTEMPTS") or 3,
+            retry_without_thinking_on_failure=(
+                _env_optional_bool("NOVEL_AGENT_WEB_WRITER_RETRY_WITHOUT_THINKING")
+                if _env_optional_bool("NOVEL_AGENT_WEB_WRITER_RETRY_WITHOUT_THINKING") is not None
+                else True
+            ),
         )
         with db.connect() as conn:
             db.init_schema(conn)

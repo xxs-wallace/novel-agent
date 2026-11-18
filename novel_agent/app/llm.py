@@ -5,7 +5,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, cast
 
 from .bootstrap import read_api_key
@@ -16,6 +16,35 @@ JSON_RETRY_ATTEMPTS = 3
 DEFAULT_REQUEST_RETRY_ATTEMPTS = 3
 DEFAULT_REQUEST_RETRY_BACKOFF_SECONDS = 1.0
 logger = logging.getLogger(__name__)
+
+
+def _response_field(value: Any, name: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _usage_mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    elif hasattr(value, "dict"):
+        value = value.dict()
+    elif hasattr(value, "__dict__"):
+        value = vars(value)
+    if not isinstance(value, dict):
+        return {}
+
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            result[str(key)] = _usage_mapping(item)
+        elif item is None or isinstance(item, (bool, int, float, str)):
+            result[str(key)] = item
+    return result
 
 
 @dataclass(slots=True)
@@ -30,6 +59,7 @@ class ModelSettings:
     temperature: float = 0.2
     max_output_tokens: int = 8192
     timeout_seconds: int = 120
+    trust_env: bool = True
     request_retry_attempts: int = DEFAULT_REQUEST_RETRY_ATTEMPTS
     request_retry_backoff_seconds: float = DEFAULT_REQUEST_RETRY_BACKOFF_SECONDS
     retry_without_thinking_on_failure: bool = False
@@ -40,9 +70,24 @@ class ModelSettings:
 
 
 class InvalidJSONResponseError(ValueError):
-    def __init__(self, *, raw_text: str, attempts: int) -> None:
+    def __init__(
+        self,
+        *,
+        raw_text: str,
+        attempts: int,
+        finish_reason: str | None = None,
+        token_usage: dict[str, Any] | None = None,
+        prompt_chars: int = 0,
+        system_chars: int = 0,
+        user_chars: int = 0,
+    ) -> None:
         self.raw_text = raw_text
         self.attempts = attempts
+        self.finish_reason = finish_reason
+        self.token_usage = dict(token_usage or {})
+        self.prompt_chars = prompt_chars
+        self.system_chars = system_chars
+        self.user_chars = user_chars
         preview = raw_text[:1200]
         super().__init__(
             f"Model did not return valid JSON after {attempts} attempts. "
@@ -68,7 +113,46 @@ class ModelToolCall:
 class ToolCallModelResponse:
     tool_calls: list[ModelToolCall]
     content: str
+    finish_reason: str | None = None
+    token_usage: dict[str, Any] = field(default_factory=dict)
     raw_response: Any | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TextModelResponse:
+    """Text plus provider metadata needed for completion auditing."""
+
+    content: str
+    finish_reason: str | None = None
+    token_usage: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "finish_reason": self.finish_reason,
+            "token_usage": dict(self.token_usage),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class JsonModelResponse:
+    """Parsed JSON plus provider metadata for prompt/output auditing."""
+
+    payload: dict[str, Any] | list[Any]
+    raw_text: str
+    finish_reason: str | None = None
+    token_usage: dict[str, Any] = field(default_factory=dict)
+    prompt_chars: int = 0
+    system_chars: int = 0
+    user_chars: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "finish_reason": self.finish_reason,
+            "token_usage": dict(self.token_usage),
+            "prompt_chars": self.prompt_chars,
+            "system_chars": self.system_chars,
+            "user_chars": self.user_chars,
+        }
 
 
 class JsonModelClient:
@@ -88,6 +172,8 @@ class JsonModelClient:
     def _build_model(self, settings: ModelSettings | None = None):
         settings = settings or self.settings
         if settings.model_type == "OpenAIModel":
+            import httpx
+
             from smolagents.models import OpenAIModel
 
             thinking = str(settings.thinking or "").strip()
@@ -100,6 +186,10 @@ class JsonModelClient:
                 client_kwargs={
                     "timeout": settings.timeout_seconds,
                     "max_retries": 0,
+                    "http_client": httpx.Client(
+                        timeout=settings.timeout_seconds,
+                        trust_env=settings.trust_env,
+                    ),
                 },
                 temperature=settings.temperature,
                 max_tokens=settings.max_output_tokens,
@@ -129,10 +219,32 @@ class JsonModelClient:
         reasoning_effort: str | None = None,
         include_reasoning_content: bool | None = None,
     ) -> str:
+        return self.generate_text_with_metadata(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback_text=fallback_text,
+            timeout_seconds=timeout_seconds,
+            thinking=thinking,
+            reasoning_effort=reasoning_effort,
+            include_reasoning_content=include_reasoning_content,
+        ).content
+
+    def generate_text_with_metadata(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_text: str | None = None,
+        timeout_seconds: int | None = None,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
+        include_reasoning_content: bool | None = None,
+        response_format: dict[str, str] | None = None,
+    ) -> TextModelResponse:
         if self.settings.dry_run:
             if fallback_text is None:
                 raise RuntimeError("Dry-run mode requires fallback_text")
-            return fallback_text
+            return TextModelResponse(content=fallback_text, finish_reason="stop")
         if self.model is None:
             raise RuntimeError("Model client is not initialized")
         from smolagents.models import ChatMessage, MessageRole
@@ -153,7 +265,7 @@ class JsonModelClient:
         model = self.model if active_settings is self.settings else self._build_model(active_settings)
 
         try:
-            text = self._generate_text_with_retries(
+            response = self._generate_text_with_retries(
                 model=model,
                 messages=messages,
                 attempts=attempts,
@@ -161,6 +273,7 @@ class JsonModelClient:
                 prompt_chars=prompt_chars,
                 retry_label="primary",
                 timeout_seconds=request_timeout_seconds,
+                generation_kwargs={"response_format": response_format} if response_format else None,
             )
         except Exception as primary_error:
             if not self._should_retry_without_thinking(active_settings):
@@ -172,7 +285,7 @@ class JsonModelClient:
             )
             fallback_settings = self._settings_without_thinking(active_settings)
             fallback_model = self._build_model(fallback_settings)
-            return self._generate_text_with_retries(
+            response = self._generate_text_with_retries(
                 model=fallback_model,
                 messages=messages,
                 attempts=attempts,
@@ -180,16 +293,18 @@ class JsonModelClient:
                 prompt_chars=prompt_chars,
                 retry_label="thinking_disabled",
                 timeout_seconds=request_timeout_seconds,
+                generation_kwargs={"response_format": response_format} if response_format else None,
             )
-        if text or not self._should_retry_without_thinking(active_settings):
-            return text
+        result = self._text_model_response(response)
+        if result.content or not self._should_retry_without_thinking(active_settings):
+            return result
         logger.warning(
             "LLM returned empty text after primary attempts for model=%s; retrying with thinking disabled",
             self.settings.model_name,
         )
         fallback_settings = self._settings_without_thinking(active_settings)
         fallback_model = self._build_model(fallback_settings)
-        return self._generate_text_with_retries(
+        response = self._generate_text_with_retries(
             model=fallback_model,
             messages=messages,
             attempts=attempts,
@@ -197,7 +312,9 @@ class JsonModelClient:
             prompt_chars=prompt_chars,
             retry_label="thinking_disabled",
             timeout_seconds=request_timeout_seconds,
+            generation_kwargs={"response_format": response_format} if response_format else None,
         )
+        return self._text_model_response(response)
 
     def generate_tool_calls(
         self,
@@ -281,7 +398,8 @@ class JsonModelClient:
         prompt_chars: int,
         retry_label: str,
         timeout_seconds: int,
-    ) -> str:
+        generation_kwargs: dict[str, Any] | None = None,
+    ) -> Any:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             started_at = time.monotonic()
@@ -290,13 +408,16 @@ class JsonModelClient:
                     model=model,
                     messages=messages,
                     timeout_seconds=timeout_seconds,
-                    generation_kwargs={"temperature": self.settings.temperature},
+                    generation_kwargs={
+                        "temperature": self.settings.temperature,
+                        **(generation_kwargs or {}),
+                    },
                 )
                 text = str(response.content or "").strip()
                 if not text:
                     text = self._extract_text_from_raw_response(response).strip()
                 if text:
-                    return text
+                    return response
                 last_error = None
                 if attempt < attempts:
                     logger.warning(
@@ -339,6 +460,24 @@ class JsonModelClient:
             raise last_error
         raise RuntimeError(
             f"Model returned empty text after {attempts} attempts for model={self.settings.model_name}"
+        )
+
+    def _text_model_response(self, response: Any) -> TextModelResponse:
+        content = str(getattr(response, "content", "") or "").strip()
+        if not content:
+            content = self._extract_text_from_raw_response(response).strip()
+        raw = getattr(response, "raw", None)
+        choices = _response_field(raw, "choices") or []
+        choice = choices[0] if choices else None
+        finish_reason = _response_field(choice, "finish_reason")
+        usage = _usage_mapping(getattr(response, "token_usage", None))
+        raw_usage = _response_field(raw, "usage")
+        if raw_usage is not None:
+            usage.update(_usage_mapping(raw_usage))
+        return TextModelResponse(
+            content=content,
+            finish_reason=str(finish_reason) if finish_reason is not None else None,
+            token_usage=usage,
         )
 
     def _generate_tool_call_response_with_retries(
@@ -478,7 +617,21 @@ class JsonModelClient:
             if not name:
                 continue
             calls.append(ModelToolCall(id=call_id, name=name, arguments=arguments))
-        return ToolCallModelResponse(tool_calls=calls, content=content, raw_response=response)
+        raw = getattr(response, "raw", None)
+        choices = _response_field(raw, "choices") or []
+        choice = choices[0] if choices else None
+        usage = _usage_mapping(getattr(response, "token_usage", None))
+        raw_usage = _response_field(raw, "usage")
+        if raw_usage is not None:
+            usage.update(_usage_mapping(raw_usage))
+        finish_reason = _response_field(choice, "finish_reason")
+        return ToolCallModelResponse(
+            tool_calls=calls,
+            content=content,
+            finish_reason=str(finish_reason) if finish_reason is not None else None,
+            token_usage=usage,
+            raw_response=response,
+        )
 
     def generate_json(
         self,
@@ -488,16 +641,55 @@ class JsonModelClient:
         fallback_factory: Callable[[], dict[str, Any] | list[Any]],
         use_fallback_on_error: bool = False,
     ) -> tuple[dict[str, Any] | list[Any], str]:
+        response = self.generate_json_with_metadata(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            fallback_factory=fallback_factory,
+            use_fallback_on_error=use_fallback_on_error,
+        )
+        return response.payload, response.raw_text
+
+    def generate_json_with_metadata(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        fallback_factory: Callable[[], dict[str, Any] | list[Any]],
+        use_fallback_on_error: bool = False,
+    ) -> JsonModelResponse:
         if self.settings.dry_run:
             payload = fallback_factory()
-            return payload, json.dumps(payload, ensure_ascii=False, indent=2)
+            return JsonModelResponse(
+                payload=payload,
+                raw_text=json.dumps(payload, ensure_ascii=False, indent=2),
+                finish_reason="stop",
+                prompt_chars=len(system_prompt) + len(user_prompt),
+                system_chars=len(system_prompt),
+                user_chars=len(user_prompt),
+            )
         raw_text = ""
         last_error: ValueError | None = None
+        last_response: TextModelResponse | None = None
         for attempt in range(JSON_RETRY_ATTEMPTS):
-            raw_text = self.generate_text(system_prompt=system_prompt, user_prompt=user_prompt)
+            last_response = self.generate_text_with_metadata(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_format={"type": "json_object"}
+                if self.settings.model_type == "OpenAIModel"
+                else None,
+            )
+            raw_text = last_response.content
             try:
                 payload = extract_json_blob(raw_text)
-                return payload, raw_text
+                return JsonModelResponse(
+                    payload=payload,
+                    raw_text=raw_text,
+                    finish_reason=last_response.finish_reason,
+                    token_usage=dict(last_response.token_usage),
+                    prompt_chars=len(system_prompt) + len(user_prompt),
+                    system_chars=len(system_prompt),
+                    user_chars=len(user_prompt),
+                )
             except ValueError as exc:
                 last_error = exc
                 if attempt < JSON_RETRY_ATTEMPTS - 1:
@@ -508,4 +700,12 @@ class JsonModelClient:
                 "Ignoring generate_json fallback request for model=%s; model failures must surface as errors",
                 self.settings.model_name,
             )
-        raise InvalidJSONResponseError(raw_text=raw_text, attempts=JSON_RETRY_ATTEMPTS) from last_error
+        raise InvalidJSONResponseError(
+            raw_text=raw_text,
+            attempts=JSON_RETRY_ATTEMPTS,
+            finish_reason=last_response.finish_reason if last_response else None,
+            token_usage=last_response.token_usage if last_response else {},
+            prompt_chars=len(system_prompt) + len(user_prompt),
+            system_chars=len(system_prompt),
+            user_chars=len(user_prompt),
+        ) from last_error

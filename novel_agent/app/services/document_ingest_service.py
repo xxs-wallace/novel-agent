@@ -116,6 +116,7 @@ SEGMENT_DELIMITERS = {",", "，", ".", "。", "!", "！", "\n"}
 RESUME_CONTEXT_TAIL_CHARS = 600
 RESUME_OVERLAP_MAX_CHARS = 600
 RESUME_OVERLAP_MIN_CHARS = 20
+EMPTY_MODEL_RESPONSE_PREFIX = "Model returned empty text after"
 CHINESE_NUMBER_CHARS = "零〇一二两三四五六七八九十百千万壹贰叁肆伍陆柒捌玖拾"
 HEADING_NUMBER_PATTERN = re.compile(rf"[0-9{CHINESE_NUMBER_CHARS}]")
 HEADING_KEYWORD_PATTERN = re.compile(r"(第.{0,12}[章幕卷节回]|Chapter|Part|Episode|卷|章|幕|节|回)", re.IGNORECASE)
@@ -206,6 +207,14 @@ class DocumentIngestService:
     def _emit_progress(self, event: dict[str, Any]) -> None:
         if self.progress_callback is not None:
             self.progress_callback(event)
+
+    @staticmethod
+    def _is_retryable_empty_model_response(exc: RuntimeError) -> bool:
+        return str(exc).startswith(EMPTY_MODEL_RESPONSE_PREFIX)
+
+    @staticmethod
+    def _is_retryable_model_transport_error(exc: Exception) -> bool:
+        return type(exc).__name__ in {"APIConnectionError", "APITimeoutError", "TimeoutError"}
 
     def _build_resume_context(self, content: str | None) -> str:
         if not content:
@@ -966,6 +975,54 @@ class DocumentIngestService:
                 pending_batches.appendleft(right_batch)
                 pending_batches.appendleft(left_batch)
                 continue
+            except RuntimeError as exc:
+                # Some OpenAI-compatible providers occasionally return a successful
+                # response envelope with no text for a large prompt.  This is not an
+                # authentication failure, so retry the source text in smaller bounded
+                # batches.  Other runtime errors (including missing/invalid keys) must
+                # remain explicit and stop the production pipeline.
+                if not self._is_retryable_empty_model_response(exc):
+                    raise
+                split_batches = self._split_batch_for_retry(batch)
+                if split_batches is None:
+                    raise
+                self._emit_progress(
+                    {
+                        "stage": "segmentation",
+                        "agent": "segmentation",
+                        "event": "prompt_empty_text_retry_split",
+                        "batch_no": batch.batch_no,
+                        "batch_chars": batch.chars,
+                        "segment_count": len(batch_segments),
+                        "duration_seconds": round(time.perf_counter() - prompt_started_at, 3),
+                    }
+                )
+                left_batch, right_batch = split_batches
+                pending_batches.appendleft(right_batch)
+                pending_batches.appendleft(left_batch)
+                continue
+            except Exception as exc:
+                if not self._is_retryable_model_transport_error(exc):
+                    raise
+                split_batches = self._split_batch_for_retry(batch)
+                if split_batches is None:
+                    raise
+                self._emit_progress(
+                    {
+                        "stage": "segmentation",
+                        "agent": "segmentation",
+                        "event": "prompt_transport_error_retry_split",
+                        "batch_no": batch.batch_no,
+                        "batch_chars": batch.chars,
+                        "segment_count": len(batch_segments),
+                        "error_type": type(exc).__name__,
+                        "duration_seconds": round(time.perf_counter() - prompt_started_at, 3),
+                    }
+                )
+                left_batch, right_batch = split_batches
+                pending_batches.appendleft(right_batch)
+                pending_batches.appendleft(left_batch)
+                continue
             if isinstance(payload, list) and payload and isinstance(payload[0], dict) and "documents" in payload[0]:
                 payload = payload[0]
             if not isinstance(payload, dict):
@@ -984,7 +1041,23 @@ class DocumentIngestService:
                 else:
                     raise RuntimeError("Segmentation model returned invalid documents field")
             if not doc_items and not self.model_client.settings.dry_run:
-                raise RuntimeError("Segmentation model returned no documents")
+                split_batches = self._split_batch_for_retry(batch)
+                if split_batches is None:
+                    raise RuntimeError("Segmentation model returned no documents")
+                self._emit_progress(
+                    {
+                        "stage": "segmentation",
+                        "agent": "segmentation",
+                        "event": "prompt_empty_documents_retry_split",
+                        "batch_no": batch.batch_no,
+                        "batch_chars": batch.chars,
+                        "segment_count": len(batch_segments),
+                    }
+                )
+                left_batch, right_batch = split_batches
+                pending_batches.appendleft(right_batch)
+                pending_batches.appendleft(left_batch)
+                continue
             raw_doc_items = self._materialize_segment_documents(
                 batch_segments=batch_segments,
                 doc_items=doc_items,
@@ -994,7 +1067,23 @@ class DocumentIngestService:
                 doc_items=raw_doc_items,
             )
             if not raw_doc_items and not self.model_client.settings.dry_run:
-                raise RuntimeError("Segmentation model returned no materializable documents")
+                split_batches = self._split_batch_for_retry(batch)
+                if split_batches is None:
+                    raise RuntimeError("Segmentation model returned no materializable documents")
+                self._emit_progress(
+                    {
+                        "stage": "segmentation",
+                        "agent": "segmentation",
+                        "event": "prompt_unusable_documents_retry_split",
+                        "batch_no": batch.batch_no,
+                        "batch_chars": batch.chars,
+                        "segment_count": len(batch_segments),
+                    }
+                )
+                left_batch, right_batch = split_batches
+                pending_batches.appendleft(right_batch)
+                pending_batches.appendleft(left_batch)
+                continue
             if pending_overlap_source and raw_doc_items:
                 first_content = str(raw_doc_items[0].get("content", ""))
                 trimmed_content = self._trim_resumed_overlap(
@@ -1004,6 +1093,24 @@ class DocumentIngestService:
                 raw_doc_items[0]["content"] = trimmed_content
                 raw_doc_items[0]["content_chars"] = len(trimmed_content)
             processed_doc_items = self._postprocess_documents(raw_doc_items)
+            if not processed_doc_items and not self.model_client.settings.dry_run:
+                split_batches = self._split_batch_for_retry(batch)
+                if split_batches is None:
+                    raise RuntimeError("Segmentation model returned no documents after post-processing")
+                self._emit_progress(
+                    {
+                        "stage": "segmentation",
+                        "agent": "segmentation",
+                        "event": "prompt_filtered_documents_retry_split",
+                        "batch_no": batch.batch_no,
+                        "batch_chars": batch.chars,
+                        "segment_count": len(batch_segments),
+                    }
+                )
+                left_batch, right_batch = split_batches
+                pending_batches.appendleft(right_batch)
+                pending_batches.appendleft(left_batch)
+                continue
             if not processed_doc_items:
                 continue
             pending_resume_context = ""

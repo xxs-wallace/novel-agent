@@ -743,14 +743,22 @@ class WriterLayeredGenerationOrchestrator:
             mentions=mentions,
             resolutions=resolutions,
         )
-        result = self.outline_research_controller.run(
-            conn,
-            book_id=book_id,
-            seed_packet=seed_packet,
-            budget=budget or ResearchBudget(),
-            notebook=notebook,
-            user_answers=user_answers,
-        )
+        try:
+            result = self.outline_research_controller.run(
+                conn,
+                book_id=book_id,
+                seed_packet=seed_packet,
+                budget=budget or ResearchBudget(),
+                notebook=notebook,
+                user_answers=user_answers,
+            )
+        except Exception as exc:
+            self._write_outline_research_failure_artifacts(
+                run_id=run_id,
+                seed_packet=seed_packet,
+                error=exc,
+            )
+            raise
         self._write_outline_research_artifacts(run_id=run_id, result=result)
         return result
 
@@ -1027,6 +1035,30 @@ class WriterLayeredGenerationOrchestrator:
             )
         if result.resume_context:
             self.run_writer.write_json(run_id, "outline_research_resume_context.json", result.resume_context)
+
+    def _write_outline_research_failure_artifacts(
+        self,
+        *,
+        run_id: str,
+        seed_packet: OutlineSeedPacket,
+        error: Exception,
+    ) -> None:
+        """Keep enough prompt metadata to diagnose a failed research call."""
+        model_adapter = self.outline_research_controller.model_adapter
+        prompt_trace = getattr(model_adapter, "model_prompt_trace", [])
+        self.run_writer.write_json(run_id, "outline_seed_packet.json", seed_packet)
+        self.run_writer.write_json(
+            run_id,
+            "outline_research_trace.json",
+            {
+                "status": "failed",
+                "error_type": type(error).__name__,
+                "error": str(error),
+                "model_prompt_trace": [
+                    dict(item) for item in prompt_trace if isinstance(item, Mapping)
+                ],
+            },
+        )
 
     def _outline_research_wait_payload(self, *, run_id: str, research: OutlineResearchRunResult) -> dict[str, Any]:
         run_dir = self.run_writer.layout.run_dir(run_id)
@@ -1718,10 +1750,12 @@ class WriterLayeredGenerationOrchestrator:
         payload["target_chapter_count"] = effective_count
         payload.setdefault("target_total_chars", int(book_plan.target_total_chars or 0))
         payload.setdefault("default_chapter_target_chars", int(book_plan.default_chapter_target_chars or 0))
-        if not isinstance(payload.get("chapter_outline_slots"), list) or not payload.get("chapter_outline_slots"):
-            payload["chapter_outline_slots"] = [
-                dict(item) for item in book_plan.chapter_outline_slots[:effective_count] if isinstance(item, Mapping)
-            ]
+        # Chapter slots are an approved upstream boundary. The model plans the
+        # batch around them, but must not summarize away their detailed event
+        # chain before ChapterPackage generation.
+        payload["chapter_outline_slots"] = [
+            dict(item) for item in book_plan.chapter_outline_slots[:effective_count] if isinstance(item, Mapping)
+        ]
         return self._batch_plan_from_dict(payload)
 
     def plan_chapter_package(
